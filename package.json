@@ -1,0 +1,98 @@
+{
+  "name": "codex-model-provider",
+  "displayName": "Codex Model Provider",
+  "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onLanguageModelChatProvider:codex-model-provider",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "check": "tsc -p ./ --noEmit",
+    "compile": "npm run check && node esbuild.mjs",
+    "test:real-backend": "node test/realBackendProbe.mjs",
+    "test:smoke": "node test/smokeResponsesClient.mjs",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "openai": "^6.44.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/vscode": "^1.104.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.25.5",
+    "typescript": "^5.9.2"
+  },
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "codex-model-provider",
+        "displayName": "Codex Model Provider",
+        "managementCommand": "codexModelProvider.manage"
+      }
+    ],
+    "commands": [
+      {
+        "command": "codexModelProvider.manage",
+        "title": "Codex Model Provider: Manage"
+      },
+      {
+        "command": "codexModelProvider.openSettings",
+        "title": "Codex Model Provider: Open Settings"
+      },
+      {
+        "command": "codexModelProvider.setApiKey",
+        "title": "Codex Model Provider: Set API Key"
+      },
+      {
+        "command": "codexModelProvider.clearApiKey",
+        "title": "Codex Model Provider: Clear API Key"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Model Provider",
+      "properties": {
+        "codexModelProvider.baseURL": {
+          "type": "string",
+          "default": "https://chatgpt.com/backend-api/codex/responses",
+          "description": "ChatGPT Codex Responses backend URL."
+        },
+        "codexModelProvider.model": {
+          "type": "string",
+          "default": "gpt-5.5",
+          "description": "Model ID sent to Responses API."
+        },
+        "codexModelProvider.displayName": {
+          "type": "string",
+          "default": "GPT-5.5-Codex",
+          "description": "Model name displayed in VS Code model picker."
+        },
+        "codexModelProvider.instructions": {
+          "type": "string",
+          "default": "You are a helpful coding assistant integrated with VS Code.",
+          "description": "Top-level Responses API instructions. Sent with every request."
+        },
+        "codexModelProvider.maxInputTokens": {
+          "type": "number",
+          "default": 120000
+        },
+        "codexModelProvider.maxOutputTokens": {
+          "type": "number",
+          "default": 8192
+        }
+      }
+    }
+  }
+}
