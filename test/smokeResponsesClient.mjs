@@ -1,23 +1,39 @@
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
+import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 
 const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-provider-'));
-const bundlePath = join(tempDir, 'responsesClient.mjs');
+const bundlePath = join(tempDir, 'responsesClient.cjs');
+const moduleLoad = Module._load;
+const require = createRequire(import.meta.url);
 
 await build({
   entryPoints: ['src/responsesClient.ts'],
   bundle: true,
-  format: 'esm',
+  format: 'cjs',
   platform: 'node',
   target: 'node20',
-  outfile: bundlePath
+  outfile: bundlePath,
+  external: ['vscode']
 });
 
-const { streamResponseText } = await import(pathToFileURL(bundlePath).href);
+Module._load = function patchedLoad(request, parent, isMain) {
+  if (request === 'vscode') {
+    return {
+      LanguageModelChatToolMode: {
+        Required: 2
+      }
+    };
+  }
+
+  return moduleLoad.call(this, request, parent, isMain);
+};
+
+const { streamResponseText } = require(bundlePath);
 
 let capturedRequest;
 const server = createServer(async (request, response) => {
@@ -87,6 +103,7 @@ try {
 
   console.log('Smoke test passed: request shape and streaming deltas are correct.');
 } finally {
+  Module._load = moduleLoad;
   server.close();
   await rm(tempDir, { recursive: true, force: true });
 }

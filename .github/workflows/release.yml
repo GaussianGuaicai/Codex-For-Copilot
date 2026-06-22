@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, release, and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          VSIX="codex-for-copilot-${VERSION}.vsix"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "${TAG}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${VERSION}; expected ${TAG}."
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "vsix=${VSIX}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate VSCE_PAT
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [[ -z "${VSCE_PAT}" ]]; then
+            echo "::error::Missing VSCE_PAT repository secret. Add a Visual Studio Marketplace PAT with Marketplace: Manage permissions."
+            exit 1
+          fi
+
+      - name: Check TypeScript
+        run: npm run check
+
+      - name: Compile extension
+        run: npm run compile
+
+      - name: Run smoke tests
+        run: npm run test:smoke
+
+      - name: Package VSIX
+        run: npx vsce package --out "${{ steps.version.outputs.vsix }}"
+
+      - name: Ensure release does not already exist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::error::Release ${TAG} already exists. Bump package.json version before publishing again."
+            exit 1
+          fi
+
+      - name: Generate release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          VSIX: ${{ steps.version.outputs.vsix }}
+        run: |
+          gh api repos/${{ github.repository }}/releases/generate-notes \
+            -f tag_name="${TAG}" \
+            -f target_commitish="${GITHUB_SHA}" \
+            --jq .body > release-notes.md
+
+          cat >> release-notes.md <<EOF
+
+## Install VSIX manually
+
+Download \`${VSIX}\` from this release, then run:
+
+\`\`\`bash
+code --install-extension ${VSIX} --force
+\`\`\`
+EOF
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VSIX: ${{ steps.version.outputs.vsix }}
+        run: |
+          gh release create "${TAG}" "${VSIX}" \
+            --title "${TAG}" \
+            --notes-file release-notes.md \
+            --target "${GITHUB_SHA}"
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          VSIX: ${{ steps.version.outputs.vsix }}
+        run: npx vsce publish --packagePath "${VSIX}" -p "${VSCE_PAT}"
