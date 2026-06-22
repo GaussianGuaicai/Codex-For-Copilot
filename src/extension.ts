@@ -8,7 +8,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     outputChannel,
-    vscode.lm.registerLanguageModelChatProvider('codex-model-provider', provider),
+    vscode.lm.registerLanguageModelChatProvider('codex-for-copilot', provider),
     vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
       outputChannel.show(true);
     }),

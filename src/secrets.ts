@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 
 export const API_KEY_SECRET = 'codexModelProvider.apiKey';
-export const DEFAULT_USER_AGENT = 'local.codex-model-provider/0.0.1 Codex-Extension';
+export const DEFAULT_USER_AGENT = 'local.codex-for-copilot/1.0.0 Codex-Extension';
 
 export interface ApiCredentials {
   apiKey: string;

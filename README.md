@@ -1,4 +1,4 @@
-# Codex
+# Codex For Copilot
 
 This extension contributes one VS Code language model provider named **Codex**. It discovers available models from the ChatGPT Codex backend, exposes them in the VS Code model picker, streams text deltas back into VS Code, and forwards VS Code function-style tools through the Responses API.
 
@@ -53,7 +53,7 @@ You can control which credential source wins with `codexModelProvider.credential
 The default request `User-Agent` is:
 
 ```text
-local.codex-model-provider/0.0.1 Codex-Extension
+local.codex-for-copilot/1.0.0 Codex-Extension
 ```
 
 ## Settings
@@ -127,12 +127,12 @@ npm run compile
 npm run package:vsix
 ```
 
-That produces a file like `codex-model-provider-0.0.1.vsix` in the repository root.
+That produces a file like `codex-for-copilot-1.0.0.vsix` in the repository root.
 
 To install the packaged extension into VS Code locally:
 
 ```bash
-code --install-extension .\codex-model-provider-0.0.1.vsix --force
+code --install-extension .\codex-for-copilot-1.0.0.vsix --force
 ```
 
 If you only want to inspect the extension during development, you can still press F5 to launch an Extension Development Host without creating a VSIX.

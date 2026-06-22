@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-model-provider-provider-'));
+const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-provider-'));
 const bundlePath = join(tempDir, 'responsesClient.mjs');
 
 await build({
@@ -57,7 +57,7 @@ try {
     baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
     apiKey: 'test-api-key',
     headers: {
-      'User-Agent': 'local.codex-model-provider/0.0.1 Codex-Extension',
+      'User-Agent': 'local.codex-for-copilot/1.0.0 Codex-Extension',
       'ChatGPT-Account-ID': 'acct-test'
     },
     omitMaxOutputTokens: true,
@@ -75,7 +75,7 @@ try {
   assertEqual(capturedRequest.method, 'POST', 'method');
   assertEqual(capturedRequest.url, '/backend-api/codex/responses', 'request path');
   assertEqual(capturedRequest.authorization, 'Bearer test-api-key', 'authorization header');
-  assertEqual(capturedRequest.userAgent, 'local.codex-model-provider/0.0.1 Codex-Extension', 'user agent');
+  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot/1.0.0 Codex-Extension', 'user agent');
   assertEqual(capturedRequest.accountId, 'acct-test', 'ChatGPT account id header');
   assertEqual(capturedRequest.body.model, 'gpt-5.5', 'model');
   assertEqual(capturedRequest.body.instructions, 'Smoke test instructions', 'top-level instructions');

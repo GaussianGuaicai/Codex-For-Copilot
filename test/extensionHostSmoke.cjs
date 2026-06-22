@@ -3,7 +3,7 @@ const { createServer } = require('node:http');
 const vscode = require('vscode');
 
 async function run() {
-  const extension = vscode.extensions.getExtension('local.codex-model-provider');
+  const extension = vscode.extensions.getExtension('local.codex-for-copilot');
   assert(extension, 'Extension is not registered in VS Code.');
 
   await extension.activate();
@@ -43,7 +43,7 @@ async function run() {
 
     if (request.method === 'POST' && request.url === '/backend-api/codex/responses/input_tokens') {
       assert.strictEqual(request.headers.authorization?.startsWith('Bearer '), true, 'Missing bearer authorization header for token count.');
-      assert.strictEqual(request.headers['user-agent'], 'local.codex-model-provider/0.0.1 Codex-Extension');
+      assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot/1.0.0 Codex-Extension');
       assert.strictEqual(body.model, 'gpt-5.4');
       assert.strictEqual(body.input, 'Ping');
 
@@ -58,7 +58,7 @@ async function run() {
     assert.strictEqual(request.method, 'POST');
     assert.strictEqual(request.url, '/backend-api/codex/responses');
     assert(request.headers.authorization?.startsWith('Bearer '), 'Missing bearer authorization header.');
-    assert.strictEqual(request.headers['user-agent'], 'local.codex-model-provider/0.0.1 Codex-Extension');
+    assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot/1.0.0 Codex-Extension');
     assert.strictEqual(body.instructions, 'Extension host smoke instructions');
     assert.strictEqual(body.stream, true);
     assert.strictEqual(body.store, false);
@@ -88,10 +88,10 @@ async function run() {
     await config.update('baseURL', `http://127.0.0.1:${address.port}/backend-api/codex/responses`, vscode.ConfigurationTarget.Global);
     await config.update('instructions', 'Extension host smoke instructions', vscode.ConfigurationTarget.Global);
 
-    const models = await vscode.lm.selectChatModels({ vendor: 'codex-model-provider' });
-    assert(models.length > 0, 'No codex-model-provider language model was selectable.');
+    const models = await vscode.lm.selectChatModels({ vendor: 'codex-for-copilot' });
+    assert(models.length > 0, 'No codex-for-copilot language model was selectable.');
     assert.strictEqual(models[0].name, 'GPT-5.4 (Codex)');
-    assert.strictEqual(models[0].id, 'codex-model-provider::gpt-5.4');
+    assert.strictEqual(models[0].id, 'codex-for-copilot::gpt-5.4');
     assert.strictEqual(models[0].family, 'gpt-5.4');
     assert.strictEqual(models[0].maxInputTokens, 272000);
     assert.strictEqual(models.length, 1);

@@ -15,7 +15,7 @@ const requestServiceTier = requestedServiceTier === 'fast'
     ? undefined
     : requestedServiceTier;
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-model-provider-real-'));
+const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-real-'));
 const secretsBundlePath = join(tempDir, 'secrets.cjs');
 const responsesBundlePath = join(tempDir, 'responsesClient.cjs');
 const moduleLoad = Module._load;
