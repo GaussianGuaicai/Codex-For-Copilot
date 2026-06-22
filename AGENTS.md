@@ -19,7 +19,7 @@ Compiled output is written to `out/` and should be treated as build artifacts. T
 - `npm run check`: run TypeScript type-checking only
 - `npm run compile`: type-check and bundle `src/extension.ts` into `out/extension.js`
 - `npm run test:smoke`: verify request shape and streaming against a local mock server
-- `npm run test:real-backend`: verify the extension request path against the ChatGPT Codex backend using local auth
+- `npm run test:real-backend`: verify the extension request path against the ChatGPT Codex backend using local auth. Set `CODEX_TEST_MODEL` and `CODEX_TEST_SERVICE_TIER` to probe a single model or service tier.
 
 For interactive extension debugging, press `F5` in VS Code and launch the Extension Development Host using `.vscode/launch.json`.
 
@@ -32,6 +32,7 @@ There is no formatter or linter configured here, so keep edits stylistically con
 ## Testing Guidelines
 
 Add focused tests under `test/` when changing request construction, credential resolution, or VS Code integration points. Name tests by behavior, not implementation detail. Keep mock-based checks in the smoke tests and reserve `test:real-backend` for flows that truly need live backend validation.
+For service tier changes, prefer a single real-backend probe with `CODEX_TEST_MODEL` and `CODEX_TEST_SERVICE_TIER` instead of broad runs.
 
 ## VS Code AI References
 
