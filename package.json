@@ -115,6 +115,21 @@
           "description": "Top-level Responses API instructions. Sent with every request.",
           "editPresentation": "multilineText"
         },
+        "codexModelProvider.defaultServiceTier": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "default",
+            "fast"
+          ],
+          "enumDescriptions": [
+            "Do not send service_tier explicitly. The Codex backend will use its default or project-configured tier.",
+            "Use the standard service tier for the selected model. This is the most reliable explicit option on the Codex backend.",
+            "Request the backend's faster processing path."
+          ],
+          "description": "Default Responses API service_tier behavior for each request. On the Codex backend, choosing auto omits the field and lets the backend decide."
+        },
         "codexModelProvider.defaultReasoningEffort": {
           "type": "string",
           "default": "auto",
@@ -128,13 +143,13 @@
             "xhigh"
           ],
           "enumDescriptions": [
-            "Use the backend or model metadata default unless the chat UI supplies a Thinking Effort value.",
-            "Disable reasoning when supported by the selected model.",
-            "Use minimal reasoning effort.",
-            "Use low reasoning effort.",
-            "Use medium reasoning effort.",
-            "Use high reasoning effort.",
-            "Use extra-high reasoning effort."
+            "Use the model's default Thinking Effort unless the chat UI supplies an explicit selection.",
+            "Skip extra reasoning for the fastest replies when the selected model supports it.",
+            "Use a very light reasoning pass for small edits and quick follow-ups.",
+            "Fast responses with lighter reasoning.",
+            "Balances speed and reasoning depth for everyday tasks.",
+            "Greater reasoning depth for complex problems.",
+            "Extra high reasoning depth for complex problems."
           ],
           "description": "Fallback reasoning effort used when the chat UI does not provide a Thinking Effort selection."
         },

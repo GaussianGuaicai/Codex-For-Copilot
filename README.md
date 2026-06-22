@@ -53,6 +53,7 @@ local.codex-model-provider/0.0.1 Codex-Extension
   "codexModelProvider.credentialsSource": "auto",
   "codexModelProvider.model": "gpt-5.5",
   "codexModelProvider.instructions": "You are a helpful coding assistant integrated with VS Code.",
+  "codexModelProvider.defaultServiceTier": "auto",
   "codexModelProvider.defaultReasoningEffort": "auto",
   "codexModelProvider.maxOutputTokens": 8192
 }
@@ -64,6 +65,8 @@ When model discovery succeeds, the provider surfaces the backend's `display_name
 
 - The picker keeps one entry per upstream model instead of duplicating models by reasoning level.
 - Supported reasoning levels are exposed through model metadata so VS Code can show a native Thinking Effort selector when that UI path is available.
+- `codexModelProvider.defaultServiceTier` controls the default Responses API `service_tier`; the settings UI now offers `auto`, `default`, and `fast`.
+- `fast` requests the backend's faster processing path.
 - `codexModelProvider.defaultReasoningEffort` acts as the fallback when the chat UI does not send a Thinking Effort choice.
 
 When discovery fails, the provider falls back to the configured `codexModelProvider.model` value and derives a readable name from that model ID.

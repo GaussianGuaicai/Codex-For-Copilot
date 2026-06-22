@@ -20,6 +20,7 @@ export interface StreamResponseTextOptions {
   omitMaxOutputTokens?: boolean;
   model: string;
   instructions: string;
+  serviceTier?: 'default' | 'priority';
   input: ResponsesInputMessage[];
   tools?: readonly vscode.LanguageModelChatTool[];
   toolMode?: vscode.LanguageModelChatToolMode;
@@ -70,6 +71,7 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       input: options.input,
       stream: true,
       store: false,
+      ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
       ...(options.reasoning ? { reasoning: options.reasoning } : {}),
       ...(tools.length > 0
         ? {

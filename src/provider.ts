@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { convertMessagesToResponsesInput, estimateTokenCount } from './convertMessages';
-import { getProviderConfig } from './config';
+import { getProviderConfig, type ProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
 import { countInputTokens, normalizeBaseURL, streamResponseText } from './responsesClient';
 import { getApiCredentials } from './secrets';
@@ -112,6 +112,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     this.outputChannel.info('provideLanguageModelChatResponse start', {
       modelId: model.id,
       requestModel: selectedModel.requestModel,
+      serviceTier: config.defaultServiceTier ?? 'auto',
       reasoningEffort: reasoningEffort ?? null,
       messageCount: messages.length,
       inputItemCount: input.length,
@@ -128,6 +129,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
       model: selectedModel.requestModel,
       instructions: config.instructions,
+      serviceTier: getRequestServiceTier(config.defaultServiceTier),
       input,
       tools: options.tools,
       toolMode: options.toolMode,
@@ -238,6 +240,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       config.clientVersion,
       config.credentialsSource,
       config.model,
+      config.defaultServiceTier ?? 'auto',
       config.defaultReasoningEffort ?? 'auto',
       config.maxOutputTokens,
       credentials.source
@@ -275,6 +278,17 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     };
 
     return models;
+  }
+}
+
+function getRequestServiceTier(serviceTier: ProviderConfig['defaultServiceTier']): 'default' | 'priority' | undefined {
+  switch (serviceTier) {
+    case 'default':
+      return 'default';
+    case 'fast':
+      return 'priority';
+    default:
+      return undefined;
   }
 }
 

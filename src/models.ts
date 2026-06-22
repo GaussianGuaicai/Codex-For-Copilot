@@ -14,11 +14,50 @@ const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'codex-auto-review': 272000
 };
 
+const MODEL_DESCRIPTION_FALLBACKS: Record<string, string> = {
+  'gpt-5.5': 'Frontier model for complex coding, research, and real-world work.',
+  'gpt-5.4': 'Strong model for everyday coding.',
+  'gpt-5.4-mini': 'Small, fast, and cost-efficient model for simpler coding tasks.',
+  'gpt-5.3-codex-spark-preview': 'Ultra-fast coding model (preview).',
+  'codex-auto-review': 'Automatic approval review model for Codex.'
+};
+
+const MODEL_DEFAULT_REASONING_FALLBACKS: Partial<Record<string, ReasoningEffort>> = {
+  'gpt-5.5': 'xhigh',
+  'gpt-5.4': 'medium',
+  'gpt-5.4-mini': 'medium',
+  'gpt-5.3-codex-spark-preview': 'high',
+  'codex-auto-review': 'medium'
+};
+
+const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra High'
+};
+
+const REASONING_EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
+  none: 'Skip extra reasoning for the fastest replies when the model supports it.',
+  minimal: 'Use a very light reasoning pass for small edits and quick follow-ups.',
+  low: 'Fast responses with lighter reasoning.',
+  medium: 'Balances speed and reasoning depth for everyday tasks.',
+  high: 'Greater reasoning depth for complex problems.',
+  xhigh: 'Extra high reasoning depth for complex problems.'
+};
+
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 interface UpstreamReasoningLevel {
   effort?: unknown;
   description?: unknown;
+}
+
+interface ReasoningOption {
+  effort: ReasoningEffort;
+  description: string;
 }
 
 interface UpstreamModel {
@@ -101,7 +140,8 @@ export function buildProviderModels(config: ProviderConfig, upstreamModels: Upst
 
 export function buildFallbackModel(config: ProviderConfig): ResolvedProviderModel {
   const fallbackMaxInputTokens = getFallbackContextWindow(config.model);
-  const reasoningEffort = normalizeReasoningEffort(undefined);
+  const reasoningEffort = getDefaultReasoningEffort(undefined, config.model);
+  const reasoningOptions = getReasoningOptions(undefined, config.model);
   return {
     requestModel: config.model,
     reasoningEffort,
@@ -112,8 +152,8 @@ export function buildFallbackModel(config: ProviderConfig): ResolvedProviderMode
       version: '1.0.0',
       maxInputTokens: fallbackMaxInputTokens,
       maxOutputTokens: config.maxOutputTokens,
-      tooltip: 'ChatGPT Codex Responses model provider',
-      detail: `${config.baseURL} | Context: ${formatTokenCount(fallbackMaxInputTokens)}`,
+      tooltip: getModelDescription(undefined, config.model),
+      detail: buildModelDetail(fallbackMaxInputTokens, reasoningOptions, reasoningEffort, config.baseURL),
       capabilities: {
         imageInput: false,
         toolCalling: true
@@ -137,12 +177,12 @@ export function parseModelIdentifier(modelId: string): ParsedModelIdentifier {
 function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): ResolvedProviderModel {
   const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : config.model;
   const displayName = getDiscoveredDisplayName(model, config.model);
-  const reasoningEfforts = getOrderedReasoningEfforts(model);
+  const reasoningOptions = getReasoningOptions(model, slug);
+  const reasoningEfforts = reasoningOptions.map((option) => option.effort);
+  const defaultReasoningEffort = getDefaultReasoningEffort(model, slug);
   const maxInputTokens = getModelContextWindow(slug, model.context_window, getFallbackContextWindow(slug));
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
-  const tooltip = typeof model.description === 'string' && model.description.trim()
-    ? model.description.trim()
-    : 'ChatGPT Codex Responses model provider';
+  const tooltip = getModelDescription(model, slug);
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
 
   const info: ModelPickerChatInformation = {
@@ -153,43 +193,75 @@ function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): Res
     maxInputTokens,
     maxOutputTokens: config.maxOutputTokens,
     tooltip,
-    detail: buildModelDetail(maxInputTokens, reasoningEfforts),
+    detail: buildModelDetail(maxInputTokens, reasoningOptions, defaultReasoningEffort),
     capabilities: {
       imageInput,
       toolCalling: true
     },
     ...(reasoningEfforts.length > 1
-      ? { configurationSchema: buildThinkingEffortSchema(reasoningEfforts) }
+      ? { configurationSchema: buildThinkingEffortSchema(reasoningOptions, defaultReasoningEffort ?? reasoningEfforts[0]) }
       : {})
   };
 
   return {
     requestModel: slug,
-    reasoningEffort: reasoningEfforts[0],
+    reasoningEffort: defaultReasoningEffort ?? reasoningEfforts[0],
     info
   };
 }
 
-function getOrderedReasoningEfforts(model: UpstreamModel): ReasoningEffort[] {
-  const defaultEffort = normalizeReasoningEffort(model.default_reasoning_level);
-  const supportedEfforts = Array.isArray(model.supported_reasoning_levels)
+function getReasoningOptions(model: UpstreamModel | undefined, slug: string): ReasoningOption[] {
+  const upstreamOptions = Array.isArray(model?.supported_reasoning_levels)
     ? model.supported_reasoning_levels
-        .map((level) => normalizeReasoningEffort((level as UpstreamReasoningLevel).effort))
-        .filter((level): level is ReasoningEffort => level !== undefined)
+        .map((level) => toReasoningOption(level as UpstreamReasoningLevel))
+        .filter((level): level is ReasoningOption => level !== undefined)
     : [];
 
-  const ordered: ReasoningEffort[] = [];
+  const ordered: ReasoningOption[] = [];
+  const defaultEffort = getDefaultReasoningEffort(model, slug);
   if (defaultEffort) {
-    ordered.push(defaultEffort);
+    ordered.push({
+      effort: defaultEffort,
+      description: getReasoningEffortDescription(defaultEffort)
+    });
   }
 
-  for (const effort of supportedEfforts) {
-    if (!ordered.includes(effort)) {
-      ordered.push(effort);
+  for (const option of upstreamOptions) {
+    const existingIndex = ordered.findIndex((entry) => entry.effort === option.effort);
+    if (existingIndex >= 0) {
+      ordered[existingIndex] = option;
+    } else {
+      ordered.push(option);
     }
   }
 
   return ordered;
+}
+
+function toReasoningOption(level: UpstreamReasoningLevel): ReasoningOption | undefined {
+  const effort = normalizeReasoningEffort(level.effort);
+  if (!effort) {
+    return undefined;
+  }
+
+  return {
+    effort,
+    description: typeof level.description === 'string' && level.description.trim()
+      ? normalizeSentence(level.description.trim())
+      : getReasoningEffortDescription(effort)
+  };
+}
+
+function getDefaultReasoningEffort(model: UpstreamModel | undefined, slug: string): ReasoningEffort | undefined {
+  return normalizeReasoningEffort(model?.default_reasoning_level) ?? MODEL_DEFAULT_REASONING_FALLBACKS[slug];
+}
+
+function getModelDescription(model: UpstreamModel | undefined, slug: string): string {
+  if (typeof model?.description === 'string' && model.description.trim()) {
+    return model.description.trim();
+  }
+
+  return MODEL_DESCRIPTION_FALLBACKS[slug] ?? 'Codex model discovered from the ChatGPT Codex backend.';
 }
 
 function getDiscoveredDisplayName(model: UpstreamModel, fallbackModel: string): string {
@@ -231,30 +303,44 @@ function stripProviderModelIdPrefix(modelId: string): string {
     : modelId;
 }
 
-function buildModelDetail(maxInputTokens: number, reasoningEfforts?: readonly ReasoningEffort[]): string {
+function buildModelDetail(
+  maxInputTokens: number,
+  reasoningOptions?: readonly ReasoningOption[],
+  defaultReasoningEffort?: ReasoningEffort,
+  sourceHint?: string
+): string {
   const parts = [`Context: ${formatTokenCount(maxInputTokens)}`];
 
-  if (reasoningEfforts && reasoningEfforts.length > 0) {
-    const labels = reasoningEfforts.map((effort) => formatReasoningEffort(effort));
-    parts.push(`Reasoning: ${labels.join(', ')}`);
+  if (reasoningOptions && reasoningOptions.length > 0) {
+    const labels = reasoningOptions.map((option) => formatReasoningEffort(option.effort));
+    if (defaultReasoningEffort) {
+      parts.push(`Thinking: ${labels.join(', ')} (default: ${formatReasoningEffort(defaultReasoningEffort)})`);
+    } else {
+      parts.push(`Thinking: ${labels.join(', ')}`);
+    }
+  }
+
+  if (sourceHint) {
+    parts.push(sourceHint);
   }
 
   return parts.join(' | ');
 }
 
-function buildThinkingEffortSchema(reasoningEfforts: readonly ReasoningEffort[]): ThinkingEffortSchema {
-  const labels = reasoningEfforts.map((effort) => formatReasoningEffort(effort));
-  const descriptions = reasoningEfforts.map((effort) => `Use ${formatReasoningEffort(effort)} reasoning effort.`);
+function buildThinkingEffortSchema(reasoningOptions: readonly ReasoningOption[], defaultEffort: ReasoningEffort): ThinkingEffortSchema {
+  const efforts = reasoningOptions.map((option) => option.effort);
+  const labels = reasoningOptions.map((option) => formatReasoningEffort(option.effort));
+  const descriptions = reasoningOptions.map((option) => option.description);
 
   return {
     properties: {
       reasoningEffort: {
         type: 'string',
         title: 'Thinking Effort',
-        enum: [...reasoningEfforts],
+        enum: [...efforts],
         enumItemLabels: labels,
         enumDescriptions: descriptions,
-        default: reasoningEfforts[0],
+        default: defaultEffort,
         group: 'navigation'
       }
     }
@@ -266,11 +352,15 @@ function formatTokenCount(value: number): string {
 }
 
 function formatReasoningEffort(effort: ReasoningEffort): string {
-  if (effort === 'xhigh') {
-    return 'XHigh';
-  }
+  return REASONING_EFFORT_LABELS[effort];
+}
 
-  return effort.charAt(0).toUpperCase() + effort.slice(1);
+function getReasoningEffortDescription(effort: ReasoningEffort): string {
+  return REASONING_EFFORT_DESCRIPTIONS[effort];
+}
+
+function normalizeSentence(value: string): string {
+  return /[.!?]$/.test(value) ? value : `${value}.`;
 }
 
 function isUpstreamModel(value: unknown): value is UpstreamModel {
