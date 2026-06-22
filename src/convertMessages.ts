@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 export type ResponsesInputMessage = ResponseInputItem;
 
 const textDecoder = new TextDecoder();
+const USAGE_DATA_PART_MIME = 'usage';
 
 export function convertMessagesToResponsesInput(messages: readonly vscode.LanguageModelChatRequestMessage[]): ResponsesInputMessage[] {
   return messages.flatMap((message) => convertMessageToResponsesInput(message));
@@ -61,7 +62,10 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
     }
 
     if (part instanceof vscode.LanguageModelDataPart) {
-      bufferedText += serializeDataPart(part);
+      const serialized = serializeDataPart(part);
+      if (serialized.length > 0) {
+        bufferedText += serialized;
+      }
       continue;
     }
 
@@ -109,6 +113,10 @@ function serializeToolResultContent(content: readonly unknown[]): string {
 
 function serializeDataPart(part: vscode.LanguageModelDataPart): string {
   const mimeType = part.mimeType.toLowerCase();
+
+  if (mimeType === USAGE_DATA_PART_MIME) {
+    return '';
+  }
 
   if (mimeType.startsWith('text/') || mimeType.includes('json') || mimeType.includes('xml') || mimeType.includes('javascript')) {
     return textDecoder.decode(part.data);

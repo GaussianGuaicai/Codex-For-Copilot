@@ -27,6 +27,7 @@ export interface StreamResponseTextOptions {
   maxOutputTokens: number;
   token: vscode.CancellationToken;
   onTextDelta: (text: string) => void;
+  onReasoningTextDelta?: (text: string) => void;
   onToolCall?: (callId: string, name: string, input: object) => void;
   onResponseCreated?: (response: {
     id?: string;
@@ -94,6 +95,11 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
 
       if (event.type === 'response.output_text.delta') {
         options.onTextDelta(event.delta);
+        continue;
+      }
+
+      if (event.type === 'response.reasoning_text.delta') {
+        options.onReasoningTextDelta?.(event.delta);
         continue;
       }
 

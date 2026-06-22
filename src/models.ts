@@ -38,6 +38,24 @@ export interface ResolvedProviderModel {
   reasoningEffort?: ReasoningEffort;
 }
 
+type ThinkingEffortSchema = {
+  readonly properties: {
+    readonly reasoningEffort: {
+      readonly type: 'string';
+      readonly title: string;
+      readonly enum: readonly ReasoningEffort[];
+      readonly enumItemLabels: readonly string[];
+      readonly enumDescriptions: readonly string[];
+      readonly default: ReasoningEffort;
+      readonly group: 'navigation';
+    };
+  };
+};
+
+type ModelPickerChatInformation = vscode.LanguageModelChatInformation & {
+  readonly configurationSchema?: ThinkingEffortSchema;
+};
+
 export interface ParsedModelIdentifier {
   requestModel: string;
   reasoningEffort?: ReasoningEffort;
@@ -75,7 +93,7 @@ export async function fetchAvailableModels(
 }
 
 export function buildProviderModels(config: ProviderConfig, upstreamModels: UpstreamModel[]): ResolvedProviderModel[] {
-  const models = upstreamModels.flatMap((model) => buildDiscoveredVariants(model, config));
+  const models = upstreamModels.map((model) => buildDiscoveredModel(model, config));
   return models.length > 0 ? models : [buildFallbackModel(config)];
 }
 
@@ -112,7 +130,7 @@ export function parseModelIdentifier(modelId: string): ParsedModelIdentifier {
   return { requestModel, reasoningEffort };
 }
 
-function buildDiscoveredVariants(model: UpstreamModel, config: ProviderConfig): ResolvedProviderModel[] {
+function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): ResolvedProviderModel {
   const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : config.model;
   const displayName = getDiscoveredDisplayName(model, config);
   const reasoningEfforts = getOrderedReasoningEfforts(model);
@@ -123,52 +141,29 @@ function buildDiscoveredVariants(model: UpstreamModel, config: ProviderConfig): 
     : 'ChatGPT Codex Responses model provider';
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
 
-  if (reasoningEfforts.length === 0) {
-    return [
-      {
-        requestModel: slug,
-        info: {
-          id: slug,
-          name: displayName,
-          family: slug,
-          version: versionBase,
-          maxInputTokens,
-          maxOutputTokens: config.maxOutputTokens,
-          tooltip,
-          detail: buildModelDetail(maxInputTokens),
-          capabilities: {
-            imageInput,
-            toolCalling: true
-          }
-        }
-      }
-    ];
-  }
+  const info: ModelPickerChatInformation = {
+    id: slug,
+    name: displayName,
+    family: slug,
+    version: versionBase,
+    maxInputTokens,
+    maxOutputTokens: config.maxOutputTokens,
+    tooltip,
+    detail: buildModelDetail(maxInputTokens, reasoningEfforts),
+    capabilities: {
+      imageInput,
+      toolCalling: true
+    },
+    ...(reasoningEfforts.length > 1
+      ? { configurationSchema: buildThinkingEffortSchema(reasoningEfforts) }
+      : {})
+  };
 
-  return reasoningEfforts.map((reasoningEffort, index) => {
-    const isDefaultEntry = index === 0;
-    const modelId = `${slug}${REASONING_ID_DELIMITER}${reasoningEffort}`;
-    const name = isDefaultEntry ? displayName : `${displayName} (${formatReasoningEffort(reasoningEffort)})`;
-
-    return {
-      requestModel: slug,
-      reasoningEffort,
-      info: {
-        id: modelId,
-        name,
-        family: slug,
-        version: `${versionBase}:${reasoningEffort}`,
-        maxInputTokens,
-        maxOutputTokens: config.maxOutputTokens,
-        tooltip,
-        detail: buildModelDetail(maxInputTokens, reasoningEffort, isDefaultEntry),
-        capabilities: {
-          imageInput,
-          toolCalling: true
-        }
-      }
-    };
-  });
+  return {
+    requestModel: slug,
+    reasoningEffort: reasoningEfforts[0],
+    info
+  };
 }
 
 function getOrderedReasoningEfforts(model: UpstreamModel): ReasoningEffort[] {
@@ -234,15 +229,34 @@ function getModelContextWindow(model: string, discoveredContextWindow: unknown, 
   return getPositiveInteger(discoveredContextWindow) ?? fallbackContextWindow;
 }
 
-function buildModelDetail(maxInputTokens: number, reasoningEffort?: ReasoningEffort, isDefaultEntry?: boolean): string {
+function buildModelDetail(maxInputTokens: number, reasoningEfforts?: readonly ReasoningEffort[]): string {
   const parts = [`Context: ${formatTokenCount(maxInputTokens)}`];
 
-  if (reasoningEffort) {
-    const label = formatReasoningEffort(reasoningEffort);
-    parts.push(isDefaultEntry ? `Reasoning: Default (${label})` : `Reasoning: ${label}`);
+  if (reasoningEfforts && reasoningEfforts.length > 0) {
+    const labels = reasoningEfforts.map((effort) => formatReasoningEffort(effort));
+    parts.push(`Reasoning: ${labels.join(', ')}`);
   }
 
   return parts.join(' | ');
+}
+
+function buildThinkingEffortSchema(reasoningEfforts: readonly ReasoningEffort[]): ThinkingEffortSchema {
+  const labels = reasoningEfforts.map((effort) => formatReasoningEffort(effort));
+  const descriptions = reasoningEfforts.map((effort) => `Use ${formatReasoningEffort(effort)} reasoning effort.`);
+
+  return {
+    properties: {
+      reasoningEffort: {
+        type: 'string',
+        title: 'Thinking Effort',
+        enum: [...reasoningEfforts],
+        enumItemLabels: labels,
+        enumDescriptions: descriptions,
+        default: reasoningEfforts[0],
+        group: 'navigation'
+      }
+    }
+  };
 }
 
 function formatTokenCount(value: number): string {

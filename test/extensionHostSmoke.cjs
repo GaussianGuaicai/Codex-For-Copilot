@@ -69,9 +69,10 @@ async function run() {
       'cache-control': 'no-cache',
       connection: 'keep-alive'
     });
+    response.write('data: {"type":"response.reasoning_text.delta","delta":"Reasoning...","output_index":0,"content_index":0}\n\n');
     response.write('data: {"type":"response.output_text.delta","delta":"VS Code"}\n\n');
     response.write('data: {"type":"response.output_text.delta","delta":" smoke passed"}\n\n');
-    response.write('data: {"type":"response.completed","response":{"id":"resp_mock","object":"response","status":"completed"}}\n\n');
+    response.write('data: {"type":"response.completed","response":{"id":"resp_mock","object":"response","status":"completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}\n\n');
     response.write('data: [DONE]\n\n');
     response.end();
   });
@@ -92,7 +93,7 @@ async function run() {
     assert.strictEqual(models[0].name, 'GPT-5.4');
     assert.strictEqual(models[0].family, 'gpt-5.4');
     assert.strictEqual(models[0].maxInputTokens, 272000);
-    assert.strictEqual(models[1].name, 'GPT-5.4 (Low)');
+    assert.strictEqual(models.length, 1);
     assert.strictEqual(await models[0].countTokens('Ping'), 11);
 
     const response = await models[0].sendRequest([vscode.LanguageModelChatMessage.User('Ping')]);

@@ -5,6 +5,17 @@ import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseMod
 import { countInputTokens, normalizeBaseURL, streamResponseText } from './responsesClient';
 import { getApiCredentials } from './secrets';
 
+type RuntimeProvideLanguageModelChatResponseOptions = vscode.ProvideLanguageModelChatResponseOptions & {
+  readonly modelConfiguration?: Record<string, unknown>;
+  readonly configuration?: Record<string, unknown>;
+};
+
+type VSCodeWithThinkingPart = typeof vscode & {
+  LanguageModelThinkingPart?: new (value: string | string[], id?: string, metadata?: { readonly [key: string]: any }) => unknown;
+};
+
+const USAGE_DATA_PART_MIME = 'usage';
+
 export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
@@ -90,7 +101,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     const selectedModel = parseModelIdentifier(model.id || config.model);
-    const reasoningEffort = getReasoningEffort(selectedModel.reasoningEffort, options.modelOptions);
+    const reasoningEffort = getReasoningEffort(selectedModel.reasoningEffort, options as RuntimeProvideLanguageModelChatResponseOptions);
     const requestStartedAt = Date.now();
     const input = convertMessagesToResponsesInput(messages);
 
@@ -120,6 +131,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       maxOutputTokens: config.maxOutputTokens,
       token,
       onTextDelta: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
+      onReasoningTextDelta: (text) => {
+        const thinkingPart = createThinkingPart(text);
+        if (thinkingPart) {
+          progress.report(thinkingPart);
+        }
+      },
       onToolCall: (callId, name, input) => {
         this.outputChannel.debug('response tool call', {
           requestModel: selectedModel.requestModel,
@@ -144,6 +161,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           durationMs: Date.now() - requestStartedAt,
           usage: response.usage ?? null
         });
+
+        const usagePart = createUsageDataPart(response.usage);
+        if (usagePart) {
+          progress.report(usagePart);
+        }
       },
       onResponseFailed: (message) => {
         this.outputChannel.error(`response failed model=${selectedModel.requestModel} message=${message}`);
@@ -254,8 +276,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
 function getReasoningEffort(
   selectedReasoningEffort: ReasoningEffort | undefined,
-  modelOptions: vscode.ProvideLanguageModelChatResponseOptions['modelOptions']
+  options: RuntimeProvideLanguageModelChatResponseOptions
 ): ReasoningEffort | undefined {
+  const configuredEffort = normalizeReasoningEffort(options.modelConfiguration?.reasoningEffort ?? options.configuration?.reasoningEffort);
+  if (configuredEffort) {
+    return configuredEffort;
+  }
+
+  const modelOptions = options.modelOptions;
   const directEffort = normalizeReasoningEffort(modelOptions?.reasoningEffort);
   if (directEffort) {
     return directEffort;
@@ -282,4 +310,40 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
 function supportsOfficialTokenCounting(baseURL: string): boolean {
   const normalizedBaseURL = normalizeBaseURL(baseURL).toLowerCase();
   return !normalizedBaseURL.includes('chatgpt.com/backend-api/codex');
+}
+
+function createThinkingPart(text: string): vscode.LanguageModelResponsePart | undefined {
+  const ThinkingPart = (vscode as VSCodeWithThinkingPart).LanguageModelThinkingPart;
+  if (typeof ThinkingPart !== 'function') {
+    return undefined;
+  }
+
+  return new ThinkingPart(text) as vscode.LanguageModelResponsePart;
+}
+
+function createUsageDataPart(usage: {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  input_tokens_details?: { cached_tokens?: number | null } | null;
+  output_tokens_details?: { reasoning_tokens?: number | null } | null;
+} | null | undefined): vscode.LanguageModelResponsePart | undefined {
+  if (!usage) {
+    return undefined;
+  }
+
+  return vscode.LanguageModelDataPart.json(
+    {
+      prompt_tokens: usage.input_tokens ?? 0,
+      completion_tokens: usage.output_tokens ?? 0,
+      total_tokens: usage.total_tokens ?? 0,
+      prompt_tokens_details: {
+        cached_tokens: usage.input_tokens_details?.cached_tokens ?? 0
+      },
+      completion_tokens_details: {
+        reasoning_tokens: usage.output_tokens_details?.reasoning_tokens ?? 0
+      }
+    },
+    USAGE_DATA_PART_MIME
+  ) as vscode.LanguageModelResponsePart;
 }
