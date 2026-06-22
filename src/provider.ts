@@ -1,15 +1,35 @@
 import * as vscode from 'vscode';
-import { convertMessagesToResponsesInput, getTextFromMessage } from './convertMessages';
+import { convertMessagesToResponsesInput, estimateTokenCount } from './convertMessages';
 import { getProviderConfig } from './config';
+import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
 import { streamResponseText } from './responsesClient';
 import { getApiCredentials } from './secrets';
 
 export class CodexModelProvider implements vscode.LanguageModelChatProvider {
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
+  private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
+  private cachedModels?: {
+    key: string;
+    expiresAt: number;
+    models: ResolvedProviderModel[];
+  };
+
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
+    this.context.subscriptions.push(
+      this.modelInfoChangedEmitter,
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('codexModelProvider')) {
+          this.cachedModels = undefined;
+          this.modelInfoChangedEmitter.fire();
+        }
+      })
+    );
+  }
 
   async provideLanguageModelChatInformation(
     options: vscode.PrepareLanguageModelChatModelOptions,
-    _token: vscode.CancellationToken
+    token: vscode.CancellationToken
   ): Promise<vscode.LanguageModelChatInformation[]> {
     const config = getProviderConfig();
     const credentials = await getApiCredentials(this.context);
@@ -32,30 +52,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       return [];
     }
 
-    const modelName = getModelDisplayName(config.model, config.displayName);
-
-    return [
-      {
-        id: config.model,
-        name: modelName,
-        family: 'codex-model-provider',
-        version: '1.0.0',
-        maxInputTokens: config.maxInputTokens,
-        maxOutputTokens: config.maxOutputTokens,
-        tooltip: 'ChatGPT Codex Responses model provider',
-        detail: config.baseURL,
-        capabilities: {
-          imageInput: false,
-          toolCalling: true
-        }
-      }
-    ];
+    const models = await this.getAvailableModels(config, credentials, token);
+    return models.map((model) => model.info);
   }
 
   async provideLanguageModelChatResponse(
     model: vscode.LanguageModelChatInformation,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
-    _options: vscode.ProvideLanguageModelChatResponseOptions,
+    options: vscode.ProvideLanguageModelChatResponseOptions,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken
   ): Promise<void> {
@@ -66,17 +70,24 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       throw new Error('Codex Model Provider credentials are missing. Run "Codex Model Provider: Set API Key" or configure ~/.codex/auth.json.');
     }
 
+    const selectedModel = parseModelIdentifier(model.id || config.model);
+    const reasoningEffort = getReasoningEffort(selectedModel.reasoningEffort, options.modelOptions);
+
     await streamResponseText({
       baseURL: config.baseURL,
       apiKey: credentials.apiKey,
       headers: credentials.headers,
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
-      model: model.id || config.model,
+      model: selectedModel.requestModel,
       instructions: config.instructions,
       input: convertMessagesToResponsesInput(messages),
+      tools: options.tools,
+      toolMode: options.toolMode,
+      reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
       maxOutputTokens: config.maxOutputTokens,
       token,
-      onTextDelta: (text) => progress.report(new vscode.LanguageModelTextPart(text))
+      onTextDelta: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
+      onToolCall: (callId, name, input) => progress.report(new vscode.LanguageModelToolCallPart(callId, name, input))
     });
   }
 
@@ -85,25 +96,70 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     text: string | vscode.LanguageModelChatRequestMessage,
     _token: vscode.CancellationToken
   ): Promise<number> {
-    const value = typeof text === 'string' ? text : getTextFromMessage(text);
-    return Math.ceil(value.length / 4);
+    return estimateTokenCount(text);
+  }
+
+  private async getAvailableModels(
+    config: ReturnType<typeof getProviderConfig>,
+    credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>,
+    token: vscode.CancellationToken
+  ): Promise<ResolvedProviderModel[]> {
+    const cacheKey = [
+      config.baseURL,
+      config.clientVersion,
+      config.model,
+      config.displayName,
+      config.maxInputTokens,
+      config.maxOutputTokens,
+      credentials.source
+    ].join('|');
+
+    if (this.cachedModels && this.cachedModels.key === cacheKey && this.cachedModels.expiresAt > Date.now()) {
+      return this.cachedModels.models;
+    }
+
+    let models: ResolvedProviderModel[];
+
+    try {
+      const upstreamModels = await fetchAvailableModels(config, credentials, token);
+      models = buildProviderModels(config, upstreamModels);
+    } catch {
+      models = [buildFallbackModel(config)];
+    }
+
+    this.cachedModels = {
+      key: cacheKey,
+      expiresAt: Date.now() + 60_000,
+      models
+    };
+
+    return models;
   }
 }
 
-function getModelDisplayName(model: string, configuredDisplayName: string): string {
-  const displayName = configuredDisplayName.trim();
-  if (displayName && displayName.toLowerCase() !== 'codex model provider') {
-    return displayName;
+function getReasoningEffort(
+  selectedReasoningEffort: ReasoningEffort | undefined,
+  modelOptions: vscode.ProvideLanguageModelChatResponseOptions['modelOptions']
+): ReasoningEffort | undefined {
+  const directEffort = normalizeReasoningEffort(modelOptions?.reasoningEffort);
+  if (directEffort) {
+    return directEffort;
   }
 
-  return formatCodexModelName(model);
+  const nestedEffort = normalizeReasoningEffort((modelOptions?.reasoning as { effort?: unknown } | undefined)?.effort);
+  return nestedEffort ?? selectedReasoningEffort;
 }
 
-function formatCodexModelName(model: string): string {
-  const normalized = model.trim() || 'gpt-5.5';
-  const cased = normalized
-    .replace(/^gpt/i, 'GPT')
-    .replace(/codex/gi, 'Codex');
-
-  return /codex/i.test(cased) ? cased : `${cased}-Codex`;
+function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  switch (value) {
+    case 'none':
+    case 'minimal':
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+      return value;
+    default:
+      return undefined;
+  }
 }

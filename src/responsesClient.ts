@@ -1,5 +1,7 @@
 import OpenAI from 'openai';
-import type * as vscode from 'vscode';
+import type { FunctionTool, ToolChoiceOptions } from 'openai/resources/responses/responses';
+import type { Reasoning } from 'openai/resources/shared';
+import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
 
 export interface StreamResponseTextOptions {
@@ -10,9 +12,13 @@ export interface StreamResponseTextOptions {
   model: string;
   instructions: string;
   input: ResponsesInputMessage[];
+  tools?: readonly vscode.LanguageModelChatTool[];
+  toolMode?: vscode.LanguageModelChatToolMode;
+  reasoning?: Reasoning;
   maxOutputTokens: number;
   token: vscode.CancellationToken;
   onTextDelta: (text: string) => void;
+  onToolCall?: (callId: string, name: string, input: object) => void;
 }
 
 export async function streamResponseText(options: StreamResponseTextOptions): Promise<void> {
@@ -31,12 +37,20 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       maxRetries: 0
     });
 
+    const tools = options.tools?.map(convertToolToResponseTool) ?? [];
     const request = {
       model: options.model,
       instructions: options.instructions,
       input: options.input,
       stream: true,
       store: false,
+      ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+      ...(tools.length > 0
+        ? {
+            tools,
+            tool_choice: mapToolChoice(options.toolMode)
+          }
+        : {}),
       ...(options.omitMaxOutputTokens ? {} : { max_output_tokens: options.maxOutputTokens })
     } as const;
 
@@ -58,6 +72,11 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         continue;
       }
 
+      if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
+        options.onToolCall?.(event.item.call_id, event.item.name, parseToolCallInput(event.item.arguments));
+        continue;
+      }
+
       if (event.type === 'response.failed') {
         const error = event.response.error;
         throw new Error(error?.message ?? 'Responses API request failed.');
@@ -71,6 +90,42 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
     throw normalizeResponsesError(error, options.baseURL);
   } finally {
     cancellation.dispose();
+  }
+}
+
+function convertToolToResponseTool(tool: vscode.LanguageModelChatTool): FunctionTool {
+  return {
+    type: 'function',
+    name: tool.name,
+    description: tool.description,
+    parameters: normalizeToolParameters(tool.inputSchema),
+    strict: false
+  };
+}
+
+function normalizeToolParameters(inputSchema: object | undefined): { [key: string]: unknown } | null {
+  return inputSchema ? (inputSchema as { [key: string]: unknown }) : null;
+}
+
+function mapToolChoice(toolMode: vscode.LanguageModelChatToolMode | undefined): ToolChoiceOptions {
+  return toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
+}
+
+function parseToolCallInput(argumentsJson: string): object {
+  if (!argumentsJson.trim()) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(argumentsJson);
+
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed;
+    }
+
+    return { value: parsed };
+  } catch {
+    return { _raw: argumentsJson };
   }
 }
 
@@ -88,6 +143,6 @@ function normalizeResponsesError(error: unknown, baseURL: string): Error {
   return error instanceof Error ? error : new Error(message);
 }
 
-function normalizeBaseURL(baseURL: string): string {
+export function normalizeBaseURL(baseURL: string): string {
   return baseURL.replace(/\/+(responses|chat\/completions|completions)\/?$/i, '').replace(/\/+$/, '');
 }

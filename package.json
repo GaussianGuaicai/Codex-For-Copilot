@@ -72,17 +72,22 @@
         "codexModelProvider.baseURL": {
           "type": "string",
           "default": "https://chatgpt.com/backend-api/codex/responses",
-          "description": "ChatGPT Codex Responses backend URL."
+          "description": "ChatGPT Codex backend URL used for both /responses and /models discovery."
+        },
+        "codexModelProvider.clientVersion": {
+          "type": "string",
+          "default": "0.0.0",
+          "description": "client_version query parameter used when discovering available upstream models."
         },
         "codexModelProvider.model": {
           "type": "string",
           "default": "gpt-5.5",
-          "description": "Model ID sent to Responses API."
+          "description": "Fallback model ID used when upstream model discovery is unavailable."
         },
         "codexModelProvider.displayName": {
           "type": "string",
-          "default": "GPT-5.5-Codex",
-          "description": "Model name displayed in VS Code model picker."
+          "default": "GPT-5.5",
+          "description": "Fallback model name used when upstream model discovery is unavailable."
         },
         "codexModelProvider.instructions": {
           "type": "string",

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 
 export interface ProviderConfig {
   baseURL: string;
+  clientVersion: string;
   model: string;
   displayName: string;
   instructions: string;
@@ -14,8 +15,9 @@ export function getProviderConfig(): ProviderConfig {
 
   return {
     baseURL: config.get('baseURL', 'https://chatgpt.com/backend-api/codex/responses'),
+    clientVersion: config.get('clientVersion', '0.0.0'),
     model: config.get('model', 'gpt-5.5'),
-    displayName: config.get('displayName', 'GPT-5.5-Codex'),
+    displayName: config.get('displayName', 'GPT-5.5'),
     instructions: config.get('instructions', 'You are a helpful coding assistant integrated with VS Code.'),
     maxInputTokens: config.get('maxInputTokens', 120000),
     maxOutputTokens: config.get('maxOutputTokens', 8192)

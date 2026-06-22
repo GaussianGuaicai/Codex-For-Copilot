@@ -1,8 +1,10 @@
 # Codex Model Provider
 
-This extension contributes one VS Code language model provider named **Codex Model Provider**. It sends text-only VS Code Chat requests to the ChatGPT Codex Responses backend and streams text deltas back into VS Code.
+This extension contributes one VS Code language model provider named **Codex Model Provider**. It discovers available models from the ChatGPT Codex backend, exposes them in the VS Code model picker, streams text deltas back into VS Code, and forwards VS Code function-style tools through the Responses API.
 
 Every request includes the configured `codexModelProvider.instructions` value as the top-level Responses API `instructions` field.
+
+Model discovery requests use `GET /models?client_version=...` against the normalized Codex backend root and fall back to the configured `codexModelProvider.model` when discovery is unavailable.
 
 ## Backend
 
@@ -45,18 +47,39 @@ local.codex-model-provider/0.0.1 Codex-Extension
 ```json
 {
   "codexModelProvider.baseURL": "https://chatgpt.com/backend-api/codex/responses",
+  "codexModelProvider.clientVersion": "0.0.0",
   "codexModelProvider.model": "gpt-5.5",
-  "codexModelProvider.displayName": "GPT-5.5-Codex",
+  "codexModelProvider.displayName": "GPT-5.5",
   "codexModelProvider.instructions": "You are a helpful coding assistant integrated with VS Code.",
   "codexModelProvider.maxInputTokens": 120000,
   "codexModelProvider.maxOutputTokens": 8192
 }
 ```
 
+## Model Picker
+
+When model discovery succeeds, the provider surfaces the backend's `display_name`, `context_window`, and supported reasoning levels.
+
+- The default reasoning entry keeps the plain upstream model name, for example `GPT-5.5`.
+- Additional reasoning levels show up as separate picker entries, for example `GPT-5.5 (Low)`.
+- The picker detail includes the context window and selected reasoning effort.
+
+When discovery fails, the provider falls back to the configured `codexModelProvider.model` and `codexModelProvider.displayName` values.
+
+## Tool Calling
+
+When VS Code supplies `options.tools`, the extension now:
+
+- serializes those tool definitions into Responses API `function` tools
+- respects VS Code's tool mode (`auto` or `required`)
+- emits `LanguageModelToolCallPart` values when the backend returns function calls
+- preserves prior tool calls and tool results when VS Code sends the follow-up turn
+
+Tool execution still happens in VS Code's caller flow. This provider bridges tool metadata and tool-call history to the backend; it does not directly run tools itself.
+
 ## What It Does Not Do
 
 - It does not depend on `codex-responses-api-proxy`.
-- It advertises tool-call compatibility so VS Code can show it in the Chat model picker, but the MVP still only streams text and does not execute agent tools.
 - It does not support image input, model discovery, webviews, or apply-patch/edit tools.
 - It does not keep multi-turn state with `previous_response_id`.
 
@@ -116,6 +139,6 @@ Check `codexModelProvider.baseURL`. The default value is `https://chatgpt.com/ba
 
 The MVP only forwards `response.output_text.delta` events. A model that returns only non-text output will not display text.
 
-### Agent Mode Does Not Work
+### Agent Mode Still Looks Wrong
 
-Tool execution is not implemented in the MVP. The model is visible in the Chat picker, but tool calls are ignored by the text-only Responses path.
+Check that the chat participant actually provided `options.tools`, and that the selected backend model supports function calling on the configured endpoint. This provider forwards tool definitions and tool-call history, but it does not invent tools on its own.

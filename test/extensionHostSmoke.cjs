@@ -10,6 +10,30 @@ async function run() {
   assert(extension.isActive, 'Extension did not activate.');
 
   const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-5.5',
+            display_name: 'GPT-5.5',
+            description: 'Mock Codex model',
+            context_window: 272000,
+            input_modalities: ['text'],
+            supported_in_api: true,
+            visibility: 'list',
+            comp_hash: 'mockhash',
+            default_reasoning_level: 'high',
+            supported_reasoning_levels: [
+              { effort: 'low', description: 'Low reasoning' },
+              { effort: 'high', description: 'High reasoning' }
+            ]
+          }
+        ]
+      }));
+      return;
+    }
+
     const chunks = [];
     for await (const chunk of request) {
       chunks.push(chunk);
@@ -50,8 +74,9 @@ async function run() {
 
     const models = await vscode.lm.selectChatModels({ vendor: 'codex-model-provider' });
     assert(models.length > 0, 'No codex-model-provider language model was selectable.');
-    assert.strictEqual(models[0].name, 'GPT-5.5-Codex');
-    assert.strictEqual(models[0].family, 'codex-model-provider');
+  assert.strictEqual(models[0].name, 'GPT-5.5');
+  assert.strictEqual(models[0].family, 'gpt-5.5');
+  assert.strictEqual(models[1].name, 'GPT-5.5 (Low)');
 
     const response = await models[0].sendRequest([vscode.LanguageModelChatMessage.User('Ping')]);
     let text = '';
