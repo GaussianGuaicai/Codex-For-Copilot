@@ -53,7 +53,7 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
 
   try {
     if (!options.instructions.trim()) {
-      throw new Error('Codex Model Provider requires a non-empty top-level instructions setting.');
+      throw new Error('Codex requires a non-empty top-level instructions setting.');
     }
 
     const client = new OpenAI({

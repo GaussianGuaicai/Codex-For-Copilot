@@ -90,7 +90,8 @@ async function run() {
 
     const models = await vscode.lm.selectChatModels({ vendor: 'codex-model-provider' });
     assert(models.length > 0, 'No codex-model-provider language model was selectable.');
-    assert.strictEqual(models[0].name, 'GPT-5.4');
+    assert.strictEqual(models[0].name, 'GPT-5.4 (Codex)');
+    assert.strictEqual(models[0].id, 'codex-model-provider::gpt-5.4');
     assert.strictEqual(models[0].family, 'gpt-5.4');
     assert.strictEqual(models[0].maxInputTokens, 272000);
     assert.strictEqual(models.length, 1);

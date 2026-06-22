@@ -58,7 +58,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     if (!credentials) {
       if (!options.silent) {
         const action = await vscode.window.showWarningMessage(
-          'Codex Model Provider needs Codex credentials. Set an API key in SecretStorage or add credentials to ~/.codex/auth.json.',
+          'Codex needs Codex credentials. Set an API key in SecretStorage or add credentials to ~/.codex/auth.json.',
           'Set API Key',
           'Open Settings'
         );
@@ -97,11 +97,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const credentials = await getApiCredentials(this.context);
 
     if (!credentials) {
-      throw new Error('Codex Model Provider credentials are missing. Run "Codex Model Provider: Set API Key" or configure ~/.codex/auth.json.');
+      throw new Error('Codex credentials are missing. Run "Codex: Set API Key" or configure ~/.codex/auth.json.');
     }
 
     const selectedModel = parseModelIdentifier(model.id || config.model);
-    const reasoningEffort = getReasoningEffort(selectedModel.reasoningEffort, options as RuntimeProvideLanguageModelChatResponseOptions);
+    const reasoningEffort = getReasoningEffort(
+      selectedModel.reasoningEffort,
+      options as RuntimeProvideLanguageModelChatResponseOptions,
+      config.defaultReasoningEffort
+    );
     const requestStartedAt = Date.now();
     const input = convertMessagesToResponsesInput(messages);
 
@@ -232,9 +236,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const cacheKey = [
       config.baseURL,
       config.clientVersion,
+      config.credentialsSource,
       config.model,
-      config.displayName,
-      config.maxInputTokens,
+      config.defaultReasoningEffort ?? 'auto',
       config.maxOutputTokens,
       credentials.source
     ].join('|');
@@ -276,7 +280,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
 function getReasoningEffort(
   selectedReasoningEffort: ReasoningEffort | undefined,
-  options: RuntimeProvideLanguageModelChatResponseOptions
+  options: RuntimeProvideLanguageModelChatResponseOptions,
+  defaultReasoningEffort: ReasoningEffort | undefined
 ): ReasoningEffort | undefined {
   const configuredEffort = normalizeReasoningEffort(options.modelConfiguration?.reasoningEffort ?? options.configuration?.reasoningEffort);
   if (configuredEffort) {
@@ -290,7 +295,7 @@ function getReasoningEffort(
   }
 
   const nestedEffort = normalizeReasoningEffort((modelOptions?.reasoning as { effort?: unknown } | undefined)?.effort);
-  return nestedEffort ?? selectedReasoningEffort;
+  return nestedEffort ?? defaultReasoningEffort ?? selectedReasoningEffort;
 }
 
 function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {

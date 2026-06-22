@@ -1,6 +1,6 @@
 {
   "name": "codex-model-provider",
-  "displayName": "Codex Model Provider",
+  "displayName": "Codex",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "version": "0.0.1",
   "publisher": "local",
@@ -44,34 +44,34 @@
     "languageModelChatProviders": [
       {
         "vendor": "codex-model-provider",
-        "displayName": "Codex Model Provider",
+        "displayName": "Codex",
         "managementCommand": "codexModelProvider.manage"
       }
     ],
     "commands": [
       {
         "command": "codexModelProvider.manage",
-        "title": "Codex Model Provider: Manage"
+        "title": "Codex: Manage"
       },
       {
         "command": "codexModelProvider.openDebugLogs",
-        "title": "Codex Model Provider: Open Debug Logs"
+        "title": "Codex: Open Debug Logs"
       },
       {
         "command": "codexModelProvider.openSettings",
-        "title": "Codex Model Provider: Open Settings"
+        "title": "Codex: Open Settings"
       },
       {
         "command": "codexModelProvider.setApiKey",
-        "title": "Codex Model Provider: Set API Key"
+        "title": "Codex: Set API Key"
       },
       {
         "command": "codexModelProvider.clearApiKey",
-        "title": "Codex Model Provider: Clear API Key"
+        "title": "Codex: Clear API Key"
       }
     ],
     "configuration": {
-      "title": "Codex Model Provider",
+      "title": "Codex",
       "properties": {
         "codexModelProvider.baseURL": {
           "type": "string",
@@ -81,30 +81,70 @@
         "codexModelProvider.clientVersion": {
           "type": "string",
           "default": "0.0.0",
-          "description": "client_version query parameter used when discovering available upstream models."
+          "description": "client_version query parameter used when discovering available upstream models.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.credentialsSource": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "codexAuth",
+            "secretStorage"
+          ],
+          "enumDescriptions": [
+            "Prefer ~/.codex/auth.json when present, then fall back to the API key saved in VS Code SecretStorage.",
+            "Only use credentials from ~/.codex/auth.json.",
+            "Only use the API key saved with 'Codex: Set API Key'."
+          ],
+          "description": "Select which credential source the provider uses."
         },
         "codexModelProvider.model": {
           "type": "string",
           "default": "gpt-5.5",
-          "description": "Fallback model ID used when upstream model discovery is unavailable."
-        },
-        "codexModelProvider.displayName": {
-          "type": "string",
-          "default": "GPT-5.5",
-          "description": "Fallback model name used when upstream model discovery is unavailable."
+          "description": "Fallback model ID used only when upstream model discovery is unavailable.",
+          "tags": [
+            "advanced"
+          ]
         },
         "codexModelProvider.instructions": {
           "type": "string",
           "default": "You are a helpful coding assistant integrated with VS Code.",
-          "description": "Top-level Responses API instructions. Sent with every request."
+          "description": "Top-level Responses API instructions. Sent with every request.",
+          "editPresentation": "multilineText"
         },
-        "codexModelProvider.maxInputTokens": {
-          "type": "number",
-          "default": 120000
+        "codexModelProvider.defaultReasoningEffort": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "enumDescriptions": [
+            "Use the backend or model metadata default unless the chat UI supplies a Thinking Effort value.",
+            "Disable reasoning when supported by the selected model.",
+            "Use minimal reasoning effort.",
+            "Use low reasoning effort.",
+            "Use medium reasoning effort.",
+            "Use high reasoning effort.",
+            "Use extra-high reasoning effort."
+          ],
+          "description": "Fallback reasoning effort used when the chat UI does not provide a Thinking Effort selection."
         },
         "codexModelProvider.maxOutputTokens": {
           "type": "number",
-          "default": 8192
+          "default": 8192,
+          "description": "Maximum output tokens to request when the active credential type supports max_output_tokens. Ignored for Codex account tokens.",
+          "tags": [
+            "advanced"
+          ]
         }
       }
     }

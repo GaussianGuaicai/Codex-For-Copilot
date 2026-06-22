@@ -3,10 +3,10 @@ import * as vscode from 'vscode';
 export interface ProviderConfig {
   baseURL: string;
   clientVersion: string;
+  credentialsSource: 'auto' | 'codexAuth' | 'secretStorage';
   model: string;
-  displayName: string;
   instructions: string;
-  maxInputTokens: number;
+  defaultReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   maxOutputTokens: number;
 }
 
@@ -16,10 +16,24 @@ export function getProviderConfig(): ProviderConfig {
   return {
     baseURL: config.get('baseURL', 'https://chatgpt.com/backend-api/codex/responses'),
     clientVersion: config.get('clientVersion', '0.0.0'),
+    credentialsSource: config.get('credentialsSource', 'auto'),
     model: config.get('model', 'gpt-5.5'),
-    displayName: config.get('displayName', 'GPT-5.5'),
     instructions: config.get('instructions', 'You are a helpful coding assistant integrated with VS Code.'),
-    maxInputTokens: config.get('maxInputTokens', 120000),
+    defaultReasoningEffort: normalizeDefaultReasoningEffort(config.get('defaultReasoningEffort', 'auto')),
     maxOutputTokens: config.get('maxOutputTokens', 8192)
   };
+}
+
+function normalizeDefaultReasoningEffort(value: string): ProviderConfig['defaultReasoningEffort'] {
+  switch (value) {
+    case 'none':
+    case 'minimal':
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+      return value;
+    default:
+      return undefined;
+  }
 }

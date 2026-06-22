@@ -18,22 +18,22 @@ export async function getApiKey(context: vscode.ExtensionContext): Promise<strin
 }
 
 export async function getApiCredentials(context: vscode.ExtensionContext): Promise<ApiCredentials | undefined> {
+  const credentialSource = vscode.workspace.getConfiguration('codexModelProvider').get<'auto' | 'codexAuth' | 'secretStorage'>('credentialsSource', 'auto');
+
+  if (credentialSource === 'secretStorage') {
+    return readSecretStorageCredentials(context);
+  }
+
+  if (credentialSource === 'codexAuth') {
+    return readCodexAuthCredentials();
+  }
+
   const codexCredentials = await readCodexAuthCredentials();
   if (codexCredentials) {
     return codexCredentials;
   }
 
-  const stored = await context.secrets.get(API_KEY_SECRET);
-  if (stored?.trim()) {
-    return {
-      apiKey: stored.trim(),
-      headers: { 'User-Agent': DEFAULT_USER_AGENT },
-      source: 'secretStorage',
-      omitMaxOutputTokens: false
-    };
-  }
-
-  return undefined;
+  return readSecretStorageCredentials(context);
 }
 
 export async function setApiKey(context: vscode.ExtensionContext, apiKey: string): Promise<void> {
@@ -80,6 +80,20 @@ async function readCodexAuthCredentials(): Promise<ApiCredentials | undefined> {
     }
   } catch {
     return undefined;
+  }
+
+  return undefined;
+}
+
+async function readSecretStorageCredentials(context: vscode.ExtensionContext): Promise<ApiCredentials | undefined> {
+  const stored = await context.secrets.get(API_KEY_SECRET);
+  if (stored?.trim()) {
+    return {
+      apiKey: stored.trim(),
+      headers: { 'User-Agent': DEFAULT_USER_AGENT },
+      source: 'secretStorage',
+      omitMaxOutputTokens: false
+    };
   }
 
   return undefined;

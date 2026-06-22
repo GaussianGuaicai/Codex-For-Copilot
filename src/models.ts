@@ -4,6 +4,8 @@ import type { ApiCredentials } from './secrets';
 import { normalizeBaseURL } from './responsesClient';
 
 const REASONING_ID_DELIMITER = '::reasoning=';
+const PROVIDER_MODEL_ID_PREFIX = 'codex::';
+const DEFAULT_FALLBACK_CONTEXT_WINDOW = 272000;
 const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5.5': 272000,
   'gpt-5.4': 272000,
@@ -98,19 +100,20 @@ export function buildProviderModels(config: ProviderConfig, upstreamModels: Upst
 }
 
 export function buildFallbackModel(config: ProviderConfig): ResolvedProviderModel {
+  const fallbackMaxInputTokens = getFallbackContextWindow(config.model);
   const reasoningEffort = normalizeReasoningEffort(undefined);
   return {
     requestModel: config.model,
     reasoningEffort,
     info: {
-      id: config.model,
-      name: getFallbackDisplayName(config.model, config.displayName),
+      id: toProviderModelId(config.model),
+      name: formatDisplayName(config.model),
       family: config.model,
       version: '1.0.0',
-      maxInputTokens: config.maxInputTokens,
+      maxInputTokens: fallbackMaxInputTokens,
       maxOutputTokens: config.maxOutputTokens,
       tooltip: 'ChatGPT Codex Responses model provider',
-      detail: `${config.baseURL} | Context: ${formatTokenCount(config.maxInputTokens)}`,
+      detail: `${config.baseURL} | Context: ${formatTokenCount(fallbackMaxInputTokens)}`,
       capabilities: {
         imageInput: false,
         toolCalling: true
@@ -120,21 +123,22 @@ export function buildFallbackModel(config: ProviderConfig): ResolvedProviderMode
 }
 
 export function parseModelIdentifier(modelId: string): ParsedModelIdentifier {
-  const delimiterIndex = modelId.indexOf(REASONING_ID_DELIMITER);
+  const normalizedModelId = stripProviderModelIdPrefix(modelId);
+  const delimiterIndex = normalizedModelId.indexOf(REASONING_ID_DELIMITER);
   if (delimiterIndex < 0) {
-    return { requestModel: modelId };
+    return { requestModel: normalizedModelId };
   }
 
-  const requestModel = modelId.slice(0, delimiterIndex);
-  const reasoningEffort = normalizeReasoningEffort(modelId.slice(delimiterIndex + REASONING_ID_DELIMITER.length));
+  const requestModel = normalizedModelId.slice(0, delimiterIndex);
+  const reasoningEffort = normalizeReasoningEffort(normalizedModelId.slice(delimiterIndex + REASONING_ID_DELIMITER.length));
   return { requestModel, reasoningEffort };
 }
 
 function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): ResolvedProviderModel {
   const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : config.model;
-  const displayName = getDiscoveredDisplayName(model, config);
+  const displayName = getDiscoveredDisplayName(model, config.model);
   const reasoningEfforts = getOrderedReasoningEfforts(model);
-  const maxInputTokens = getModelContextWindow(slug, model.context_window, config.maxInputTokens);
+  const maxInputTokens = getModelContextWindow(slug, model.context_window, getFallbackContextWindow(slug));
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
   const tooltip = typeof model.description === 'string' && model.description.trim()
     ? model.description.trim()
@@ -142,7 +146,7 @@ function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): Res
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
 
   const info: ModelPickerChatInformation = {
-    id: slug,
+    id: toProviderModelId(slug),
     name: displayName,
     family: slug,
     version: versionBase,
@@ -188,24 +192,13 @@ function getOrderedReasoningEfforts(model: UpstreamModel): ReasoningEffort[] {
   return ordered;
 }
 
-function getDiscoveredDisplayName(model: UpstreamModel, config: ProviderConfig): string {
+function getDiscoveredDisplayName(model: UpstreamModel, fallbackModel: string): string {
   if (typeof model.display_name === 'string' && model.display_name.trim()) {
     return model.display_name.trim();
   }
 
-  const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : config.model;
-  return getFallbackDisplayName(slug, config.displayName);
-}
-
-function getFallbackDisplayName(model: string, configuredDisplayName: string): string {
-  const displayName = configuredDisplayName.trim();
-  const legacyDefault = formatLegacyDisplayName(model);
-
-  if (!displayName || displayName.toLowerCase() === 'codex model provider' || displayName === legacyDefault) {
-    return formatDisplayName(model);
-  }
-
-  return displayName;
+  const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : fallbackModel;
+  return formatDisplayName(slug);
 }
 
 function formatDisplayName(model: string): string {
@@ -215,11 +208,6 @@ function formatDisplayName(model: string): string {
     .replace(/codex/gi, 'Codex');
 }
 
-function formatLegacyDisplayName(model: string): string {
-  const displayName = formatDisplayName(model);
-  return /codex/i.test(displayName) ? displayName : `${displayName}-Codex`;
-}
-
 function getModelContextWindow(model: string, discoveredContextWindow: unknown, fallbackContextWindow: number): number {
   const fixedContextWindow = FIXED_MODEL_CONTEXT_WINDOWS[model];
   if (fixedContextWindow) {
@@ -227,6 +215,20 @@ function getModelContextWindow(model: string, discoveredContextWindow: unknown, 
   }
 
   return getPositiveInteger(discoveredContextWindow) ?? fallbackContextWindow;
+}
+
+function getFallbackContextWindow(model: string): number {
+  return FIXED_MODEL_CONTEXT_WINDOWS[model] ?? DEFAULT_FALLBACK_CONTEXT_WINDOW;
+}
+
+function toProviderModelId(requestModel: string): string {
+  return `${PROVIDER_MODEL_ID_PREFIX}${requestModel}`;
+}
+
+function stripProviderModelIdPrefix(modelId: string): string {
+  return modelId.startsWith(PROVIDER_MODEL_ID_PREFIX)
+    ? modelId.slice(PROVIDER_MODEL_ID_PREFIX.length)
+    : modelId;
 }
 
 function buildModelDetail(maxInputTokens: number, reasoningEfforts?: readonly ReasoningEffort[]): string {
@@ -280,8 +282,16 @@ function isModelVisible(model: UpstreamModel): boolean {
     return false;
   }
 
-  if (typeof model.visibility === 'string' && model.visibility.trim().toLowerCase() === 'hidden') {
-    return false;
+  const slug = typeof model.slug === 'string' ? model.slug.trim().toLowerCase() : '';
+  if (slug === 'codex-auto-review') {
+    return true;
+  }
+
+  if (typeof model.visibility === 'string') {
+    const visibility = model.visibility.trim().toLowerCase();
+    if (visibility === 'hidden' || visibility === 'hide') {
+      return false;
+    }
   }
 
   return true;

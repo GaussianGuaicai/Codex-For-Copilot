@@ -1,6 +1,6 @@
-# Codex Model Provider
+# Codex
 
-This extension contributes one VS Code language model provider named **Codex Model Provider**. It discovers available models from the ChatGPT Codex backend, exposes them in the VS Code model picker, streams text deltas back into VS Code, and forwards VS Code function-style tools through the Responses API.
+This extension contributes one VS Code language model provider named **Codex**. It discovers available models from the ChatGPT Codex backend, exposes them in the VS Code model picker, streams text deltas back into VS Code, and forwards VS Code function-style tools through the Responses API.
 
 Every request includes the configured `codexModelProvider.instructions` value as the top-level Responses API `instructions` field.
 
@@ -31,10 +31,12 @@ When using Codex account tokens, the extension omits `max_output_tokens` because
 You can add a fallback API key in VS Code SecretStorage by running:
 
 ```text
-Codex Model Provider: Set API Key
+Codex: Set API Key
 ```
 
 That stores the API key in VS Code SecretStorage under `codexModelProvider.apiKey`. API keys are never stored in `settings.json`.
+
+You can control which credential source wins with `codexModelProvider.credentialsSource`.
 
 The default request `User-Agent` is:
 
@@ -48,10 +50,10 @@ local.codex-model-provider/0.0.1 Codex-Extension
 {
   "codexModelProvider.baseURL": "https://chatgpt.com/backend-api/codex/responses",
   "codexModelProvider.clientVersion": "0.0.0",
+  "codexModelProvider.credentialsSource": "auto",
   "codexModelProvider.model": "gpt-5.5",
-  "codexModelProvider.displayName": "GPT-5.5",
   "codexModelProvider.instructions": "You are a helpful coding assistant integrated with VS Code.",
-  "codexModelProvider.maxInputTokens": 120000,
+  "codexModelProvider.defaultReasoningEffort": "auto",
   "codexModelProvider.maxOutputTokens": 8192
 }
 ```
@@ -60,11 +62,11 @@ local.codex-model-provider/0.0.1 Codex-Extension
 
 When model discovery succeeds, the provider surfaces the backend's `display_name`, `context_window`, and supported reasoning levels.
 
-- The default reasoning entry keeps the plain upstream model name, for example `GPT-5.5`.
-- Additional reasoning levels show up as separate picker entries, for example `GPT-5.5 (Low)`.
-- The picker detail includes the context window and selected reasoning effort.
+- The picker keeps one entry per upstream model instead of duplicating models by reasoning level.
+- Supported reasoning levels are exposed through model metadata so VS Code can show a native Thinking Effort selector when that UI path is available.
+- `codexModelProvider.defaultReasoningEffort` acts as the fallback when the chat UI does not send a Thinking Effort choice.
 
-When discovery fails, the provider falls back to the configured `codexModelProvider.model` and `codexModelProvider.displayName` values.
+When discovery fails, the provider falls back to the configured `codexModelProvider.model` value and derives a readable name from that model ID.
 
 ## Tool Calling
 
@@ -121,7 +123,7 @@ If you only want to inspect the extension during development, you can still pres
 
 ### Model Does Not Appear
 
-Check that `~/.codex/auth.json` exists or run `Codex Model Provider: Set API Key`. Also confirm the extension activated and VS Code is version 1.104.0 or newer.
+Check that `~/.codex/auth.json` exists or run `Codex: Set API Key`. Also confirm the extension activated and VS Code is version 1.104.0 or newer.
 
 ### `Instructions are required`
 

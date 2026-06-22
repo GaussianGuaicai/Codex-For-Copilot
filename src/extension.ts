@@ -35,7 +35,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
         ['Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
-        { title: 'Codex Model Provider' }
+        { title: 'Codex' }
       );
 
       if (action === 'Open Debug Logs') {
