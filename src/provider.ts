@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { convertMessagesToResponsesInput, estimateTokenCount } from './convertMessages';
 import { getProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
-import { streamResponseText } from './responsesClient';
+import { countInputTokens, normalizeBaseURL, streamResponseText } from './responsesClient';
 import { getApiCredentials } from './secrets';
 
 export class CodexModelProvider implements vscode.LanguageModelChatProvider {
@@ -14,7 +14,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     models: ResolvedProviderModel[];
   };
 
-  constructor(private readonly context: vscode.ExtensionContext) {
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly outputChannel: vscode.OutputChannel
+  ) {
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     this.context.subscriptions.push(
       this.modelInfoChangedEmitter,
@@ -87,16 +90,43 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       maxOutputTokens: config.maxOutputTokens,
       token,
       onTextDelta: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
-      onToolCall: (callId, name, input) => progress.report(new vscode.LanguageModelToolCallPart(callId, name, input))
+      onToolCall: (callId, name, input) => progress.report(new vscode.LanguageModelToolCallPart(callId, name, input)),
+      onResponseCompleted: (response) => {
+        this.outputChannel.appendLine(formatUsageLogLine(selectedModel.requestModel, response.usage));
+      },
+      onResponseFailed: (message) => {
+        this.outputChannel.appendLine(`[Responses error] model=${selectedModel.requestModel} message=${message}`);
+      }
     });
   }
 
   async provideTokenCount(
-    _model: vscode.LanguageModelChatInformation,
+    model: vscode.LanguageModelChatInformation,
     text: string | vscode.LanguageModelChatRequestMessage,
-    _token: vscode.CancellationToken
+    token: vscode.CancellationToken
   ): Promise<number> {
-    return estimateTokenCount(text);
+    const config = getProviderConfig();
+    const credentials = await getApiCredentials(this.context);
+
+    if (!credentials || !supportsOfficialTokenCounting(config.baseURL)) {
+      return estimateTokenCount(text);
+    }
+
+    const selectedModel = parseModelIdentifier(model.id || config.model);
+    const input = typeof text === 'string' ? text : convertMessagesToResponsesInput([text]);
+
+    try {
+      return await countInputTokens({
+        baseURL: config.baseURL,
+        apiKey: credentials.apiKey,
+        headers: credentials.headers,
+        model: selectedModel.requestModel,
+        input,
+        token
+      });
+    } catch {
+      return estimateTokenCount(text);
+    }
   }
 
   private async getAvailableModels(
@@ -137,6 +167,32 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   }
 }
 
+function formatUsageLogLine(
+  model: string,
+  usage:
+    | {
+        input_tokens?: number | null;
+        output_tokens?: number | null;
+        total_tokens?: number | null;
+        input_tokens_details?: { cached_tokens?: number | null } | null;
+        output_tokens_details?: { reasoning_tokens?: number | null } | null;
+      }
+    | null
+    | undefined
+): string {
+  if (!usage) {
+    return `[Responses usage] model=${model} usage=unavailable`;
+  }
+
+  const inputTokens = usage.input_tokens ?? 'n/a';
+  const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 'n/a';
+  const outputTokens = usage.output_tokens ?? 'n/a';
+  const reasoningTokens = usage.output_tokens_details?.reasoning_tokens ?? 'n/a';
+  const totalTokens = usage.total_tokens ?? 'n/a';
+
+  return `[Responses usage] model=${model} input=${inputTokens} cached=${cachedTokens} output=${outputTokens} reasoning=${reasoningTokens} total=${totalTokens}`;
+}
+
 function getReasoningEffort(
   selectedReasoningEffort: ReasoningEffort | undefined,
   modelOptions: vscode.ProvideLanguageModelChatResponseOptions['modelOptions']
@@ -162,4 +218,9 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
     default:
       return undefined;
   }
+}
+
+function supportsOfficialTokenCounting(baseURL: string): boolean {
+  const normalizedBaseURL = normalizeBaseURL(baseURL).toLowerCase();
+  return !normalizedBaseURL.includes('chatgpt.com/backend-api/codex');
 }

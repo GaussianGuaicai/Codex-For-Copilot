@@ -4,6 +4,13 @@ import type { ApiCredentials } from './secrets';
 import { normalizeBaseURL } from './responsesClient';
 
 const REASONING_ID_DELIMITER = '::reasoning=';
+const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'gpt-5.5': 272000,
+  'gpt-5.4': 272000,
+  'gpt-5.4-mini': 272000,
+  'gpt-5.3-codex-spark-preview': 128000,
+  'codex-auto-review': 272000
+};
 
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
@@ -109,7 +116,7 @@ function buildDiscoveredVariants(model: UpstreamModel, config: ProviderConfig): 
   const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : config.model;
   const displayName = getDiscoveredDisplayName(model, config);
   const reasoningEfforts = getOrderedReasoningEfforts(model);
-  const maxInputTokens = getPositiveInteger(model.context_window) ?? config.maxInputTokens;
+  const maxInputTokens = getModelContextWindow(slug, model.context_window, config.maxInputTokens);
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
   const tooltip = typeof model.description === 'string' && model.description.trim()
     ? model.description.trim()
@@ -216,6 +223,15 @@ function formatDisplayName(model: string): string {
 function formatLegacyDisplayName(model: string): string {
   const displayName = formatDisplayName(model);
   return /codex/i.test(displayName) ? displayName : `${displayName}-Codex`;
+}
+
+function getModelContextWindow(model: string, discoveredContextWindow: unknown, fallbackContextWindow: number): number {
+  const fixedContextWindow = FIXED_MODEL_CONTEXT_WINDOWS[model];
+  if (fixedContextWindow) {
+    return fixedContextWindow;
+  }
+
+  return getPositiveInteger(discoveredContextWindow) ?? fallbackContextWindow;
 }
 
 function buildModelDetail(maxInputTokens: number, reasoningEffort?: ReasoningEffort, isDefaultEntry?: boolean): string {

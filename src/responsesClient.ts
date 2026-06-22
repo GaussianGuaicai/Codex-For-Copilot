@@ -4,6 +4,15 @@ import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
 
+export interface CountInputTokensOptions {
+  baseURL: string;
+  apiKey: string;
+  headers?: Record<string, string>;
+  model: string;
+  input: string | ResponsesInputMessage[];
+  token: vscode.CancellationToken;
+}
+
 export interface StreamResponseTextOptions {
   baseURL: string;
   apiKey: string;
@@ -19,6 +28,16 @@ export interface StreamResponseTextOptions {
   token: vscode.CancellationToken;
   onTextDelta: (text: string) => void;
   onToolCall?: (callId: string, name: string, input: object) => void;
+  onResponseCompleted?: (response: {
+    usage?: {
+      input_tokens?: number | null;
+      output_tokens?: number | null;
+      total_tokens?: number | null;
+      input_tokens_details?: { cached_tokens?: number | null } | null;
+      output_tokens_details?: { reasoning_tokens?: number | null } | null;
+    } | null;
+  }) => void;
+  onResponseFailed?: (message: string) => void;
 }
 
 export async function streamResponseText(options: StreamResponseTextOptions): Promise<void> {
@@ -77,8 +96,14 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         continue;
       }
 
+      if (event.type === 'response.completed') {
+        options.onResponseCompleted?.(event.response);
+        continue;
+      }
+
       if (event.type === 'response.failed') {
         const error = event.response.error;
+        options.onResponseFailed?.(error?.message ?? 'Responses API request failed.');
         throw new Error(error?.message ?? 'Responses API request failed.');
       }
     }
@@ -91,6 +116,34 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
   } finally {
     cancellation.dispose();
   }
+}
+
+export async function countInputTokens(options: CountInputTokensOptions): Promise<number> {
+  const response = await fetch(`${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${options.apiKey}`,
+      ...options.headers
+    },
+    body: JSON.stringify({
+      model: options.model,
+      input: options.input
+    }),
+    signal: toAbortSignal(options.token)
+  });
+
+  if (!response.ok) {
+    const body = await safeReadResponseBody(response);
+    throw new Error(`Responses input token count failed with ${response.status} ${response.statusText}.${body ? ` ${body}` : ''}`);
+  }
+
+  const payload = (await response.json()) as { input_tokens?: unknown };
+  if (typeof payload.input_tokens !== 'number' || !Number.isFinite(payload.input_tokens) || payload.input_tokens < 0) {
+    throw new Error('Responses input token count returned an invalid input_tokens value.');
+  }
+
+  return Math.floor(payload.input_tokens);
 }
 
 function convertToolToResponseTool(tool: vscode.LanguageModelChatTool): FunctionTool {
@@ -141,6 +194,27 @@ function normalizeResponsesError(error: unknown, baseURL: string): Error {
   }
 
   return error instanceof Error ? error : new Error(message);
+}
+
+async function safeReadResponseBody(response: Response): Promise<string> {
+  try {
+    const body = await response.text();
+    return body.trim();
+  } catch {
+    return '';
+  }
+}
+
+function toAbortSignal(token: vscode.CancellationToken): AbortSignal | undefined {
+  if (token.isCancellationRequested) {
+    const controller = new AbortController();
+    controller.abort();
+    return controller.signal;
+  }
+
+  const controller = new AbortController();
+  token.onCancellationRequested(() => controller.abort());
+  return controller.signal;
 }
 
 export function normalizeBaseURL(baseURL: string): string {

@@ -3,7 +3,10 @@
 ## Project Structure & Module Organization
 
 The extension source lives in [`src/`](src/). Key modules are:
+- `config.ts`: reads and normalizes extension settings
+- `convertMessages.ts`: adapts VS Code chat messages into Responses input
 - `extension.ts`: VS Code activation and command registration
+- `models.ts`: model discovery and provider metadata
 - `provider.ts`: language model provider surface
 - `responsesClient.ts`: streamed Responses API calls
 - `secrets.ts`: credential loading from `~/.codex/auth.json` or SecretStorage
@@ -29,6 +32,23 @@ There is no formatter or linter configured here, so keep edits stylistically con
 ## Testing Guidelines
 
 Add focused tests under `test/` when changing request construction, credential resolution, or VS Code integration points. Name tests by behavior, not implementation detail. Keep mock-based checks in the smoke tests and reserve `test:real-backend` for flows that truly need live backend validation.
+
+## VS Code AI References
+
+Relevant VS Code AI extension documentation for this repository:
+- AI extensibility overview: https://code.visualstudio.com/api/extension-guides/ai/ai-extensibility-overview
+- Language Model API guide: https://code.visualstudio.com/api/extension-guides/ai/language-model
+- Chat Participant API guide: https://code.visualstudio.com/api/extension-guides/ai/chat
+- Language Model Tool API guide: https://code.visualstudio.com/api/extension-guides/ai/tools
+- MCP extension guide: https://code.visualstudio.com/api/extension-guides/ai/mcp
+- VS Code LM API reference: https://code.visualstudio.com/api/references/vscode-api#lm
+- LanguageModelChatProvider reference: https://code.visualstudio.com/api/references/vscode-api#LanguageModelChatProvider
+- LanguageModelChatInformation reference: https://code.visualstudio.com/api/references/vscode-api#LanguageModelChatInformation
+
+Current platform limitation:
+- VS Code's Chat context usage widget is driven by internal `response.usage` data, not only by `maxInputTokens` or `provideTokenCount`.
+- The stable `LanguageModelChatProvider` API currently lets third-party providers stream text, tool calls, thinking, and data parts, but it does not expose a stable way to report `response.usage` back to that widget.
+- Because of that, this extension can expose context limits and token-count estimation, but it cannot force the built-in "Context Window used" ring/percentage to appear until VS Code exposes usage reporting for custom language model providers.
 
 ## Commit & Pull Request Guidelines
 
