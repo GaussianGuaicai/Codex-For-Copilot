@@ -5,6 +5,10 @@
   "version": "0.0.1",
   "publisher": "local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GaussianGuaicai/VSCode-Codex-Model-Provider.git"
+  },
   "engines": {
     "vscode": "^1.104.0"
   },
@@ -20,6 +24,7 @@
   "scripts": {
     "check": "tsc -p ./ --noEmit",
     "compile": "npm run check && node esbuild.mjs",
+    "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
     "test:smoke": "node test/smokeResponsesClient.mjs",
     "watch": "tsc -watch -p ./",

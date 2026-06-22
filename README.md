@@ -65,6 +65,7 @@ local.codex-model-provider/0.0.1 Codex-Extension
 ```bash
 npm install
 npm run compile
+npm run package:vsix
 npm run test:smoke
 npm run test:real-backend
 ```
@@ -72,6 +73,26 @@ npm run test:real-backend
 Press F5 in VS Code to launch an Extension Development Host.
 
 `npm run test:real-backend` uses the extension's real credential resolution path against the ChatGPT Codex backend. It expects `~/.codex/auth.json` to contain a valid ChatGPT Codex login and will use `HTTPS_PROXY` or `HTTP_PROXY` when present.
+
+## Build A VSIX
+
+Build the extension and package it into a local VSIX file:
+
+```bash
+npm install
+npm run compile
+npm run package:vsix
+```
+
+That produces a file like `codex-model-provider-0.0.1.vsix` in the repository root.
+
+To install the packaged extension into VS Code locally:
+
+```bash
+code --install-extension .\codex-model-provider-0.0.1.vsix --force
+```
+
+If you only want to inspect the extension during development, you can still press F5 to launch an Extension Development Host without creating a VSIX.
 
 ## Troubleshooting
 
