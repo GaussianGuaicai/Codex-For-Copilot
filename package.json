@@ -54,6 +54,10 @@
         "title": "Codex Model Provider: Manage"
       },
       {
+        "command": "codexModelProvider.openDebugLogs",
+        "title": "Codex Model Provider: Open Debug Logs"
+      },
+      {
         "command": "codexModelProvider.openSettings",
         "title": "Codex Model Provider: Open Settings"
       },

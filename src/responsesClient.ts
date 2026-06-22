@@ -28,7 +28,13 @@ export interface StreamResponseTextOptions {
   token: vscode.CancellationToken;
   onTextDelta: (text: string) => void;
   onToolCall?: (callId: string, name: string, input: object) => void;
+  onResponseCreated?: (response: {
+    id?: string;
+    status?: string;
+    service_tier?: string | null;
+  }) => void;
   onResponseCompleted?: (response: {
+    id?: string;
     usage?: {
       input_tokens?: number | null;
       output_tokens?: number | null;
@@ -93,6 +99,11 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
 
       if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
         options.onToolCall?.(event.item.call_id, event.item.name, parseToolCallInput(event.item.arguments));
+        continue;
+      }
+
+      if (event.type === 'response.created') {
+        options.onResponseCreated?.(event.response);
         continue;
       }
 

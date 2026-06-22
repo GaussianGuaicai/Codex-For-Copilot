@@ -3,12 +3,15 @@ import { CodexModelProvider } from './provider';
 import { clearApiKey, setApiKey } from './secrets';
 
 export function activate(context: vscode.ExtensionContext): void {
-  const outputChannel = vscode.window.createOutputChannel('Codex Model Provider');
+  const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
   const provider = new CodexModelProvider(context, outputChannel);
 
   context.subscriptions.push(
     outputChannel,
     vscode.lm.registerLanguageModelChatProvider('codex-model-provider', provider),
+    vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
+      outputChannel.show(true);
+    }),
     vscode.commands.registerCommand('codexModelProvider.openSettings', () => {
       return vscode.commands.executeCommand('workbench.action.openSettings', 'codexModelProvider');
     }),
@@ -31,11 +34,13 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex Model Provider' }
       );
 
-      if (action === 'Set API Key') {
+      if (action === 'Open Debug Logs') {
+        await vscode.commands.executeCommand('codexModelProvider.openDebugLogs');
+      } else if (action === 'Set API Key') {
         await vscode.commands.executeCommand('codexModelProvider.setApiKey');
       } else if (action === 'Clear API Key') {
         await vscode.commands.executeCommand('codexModelProvider.clearApiKey');
