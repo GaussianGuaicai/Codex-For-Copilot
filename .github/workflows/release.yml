@@ -46,6 +46,11 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "vsix=${VSIX}" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare Marketplace manifest
+        run: |
+          npm pkg set name=gaussian-codex-for-copilot
+          npm pkg set publisher=Gaussian
+
       - name: Validate VSCE_PAT
         shell: bash
         env:
