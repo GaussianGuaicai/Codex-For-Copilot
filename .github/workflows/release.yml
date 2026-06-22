@@ -92,16 +92,16 @@ jobs:
             -f target_commitish="${GITHUB_SHA}" \
             --jq .body > release-notes.md
 
-          cat >> release-notes.md <<EOF
-
-## Install VSIX manually
-
-Download \`${VSIX}\` from this release, then run:
-
-\`\`\`bash
-code --install-extension ${VSIX} --force
-\`\`\`
-EOF
+          {
+            echo
+            echo "## Install VSIX manually"
+            echo
+            echo "Download \`${VSIX}\` from this release, then run:"
+            echo
+            echo '```bash'
+            echo "code --install-extension ${VSIX} --force"
+            echo '```'
+          } >> release-notes.md
 
       - name: Create GitHub Release
         shell: bash
