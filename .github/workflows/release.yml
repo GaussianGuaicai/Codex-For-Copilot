@@ -68,17 +68,6 @@ jobs:
       - name: Package VSIX
         run: npx vsce package --out "${{ steps.version.outputs.vsix }}"
 
-      - name: Ensure release does not already exist
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            echo "::error::Release ${TAG} already exists. Bump package.json version before publishing again."
-            exit 1
-          fi
-
       - name: Generate release notes
         shell: bash
         env:
@@ -103,17 +92,25 @@ jobs:
             echo '```'
           } >> release-notes.md
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
           VSIX: ${{ steps.version.outputs.vsix }}
         run: |
-          gh release create "${TAG}" "${VSIX}" \
-            --title "${TAG}" \
-            --notes-file release-notes.md \
-            --target "${GITHUB_SHA}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" \
+              --title "${TAG}" \
+              --notes-file release-notes.md \
+              --target "${GITHUB_SHA}"
+            gh release upload "${TAG}" "${VSIX}" --clobber
+          else
+            gh release create "${TAG}" "${VSIX}" \
+              --title "${TAG}" \
+              --notes-file release-notes.md \
+              --target "${GITHUB_SHA}"
+          fi
 
       - name: Publish to VS Code Marketplace
         env:

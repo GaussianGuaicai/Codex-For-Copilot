@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "version": "1.0.0",
-  "publisher": "GaussianGuaicai",
+  "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
     "type": "git",
