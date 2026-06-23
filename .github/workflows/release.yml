@@ -48,7 +48,7 @@ jobs:
 
       - name: Prepare Marketplace manifest
         run: |
-          npm pkg set name=codex-for-copilot
+          npm pkg set name=gaussian-codex-for-copilot
           npm pkg set publisher=Gaussian
 
       - name: Validate VSCE_PAT
