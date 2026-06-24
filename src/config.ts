@@ -1,5 +1,11 @@
 import * as vscode from 'vscode';
 
+export interface ModelPricing {
+  input?: number;
+  cachedInput?: number;
+  output?: number;
+}
+
 export interface ProviderConfig {
   baseURL: string;
   clientVersion: string;
@@ -9,6 +15,8 @@ export interface ProviderConfig {
   defaultServiceTier?: 'default' | 'fast';
   defaultReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   maxOutputTokens: number;
+  showUsageInStatusBar: boolean;
+  modelPricingUsdPerMTok: Record<string, ModelPricing>;
 }
 
 export function getProviderConfig(): ProviderConfig {
@@ -22,7 +30,9 @@ export function getProviderConfig(): ProviderConfig {
     instructions: config.get('instructions', 'You are a helpful coding assistant integrated with VS Code.'),
     defaultServiceTier: normalizeDefaultServiceTier(config.get('defaultServiceTier', 'auto')),
     defaultReasoningEffort: normalizeDefaultReasoningEffort(config.get('defaultReasoningEffort', 'auto')),
-    maxOutputTokens: config.get('maxOutputTokens', 8192)
+    maxOutputTokens: config.get('maxOutputTokens', 8192),
+    showUsageInStatusBar: config.get('showUsageInStatusBar', true),
+    modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };
 }
 
@@ -48,4 +58,42 @@ function normalizeDefaultReasoningEffort(value: string): ProviderConfig['default
     default:
       return undefined;
   }
+}
+
+function normalizeModelPricing(value: unknown): Record<string, ModelPricing> {
+  if (!isObjectRecord(value)) {
+    return {};
+  }
+
+  const normalized: Record<string, ModelPricing> = {};
+
+  for (const [model, pricing] of Object.entries(value)) {
+    if (!isObjectRecord(pricing)) {
+      continue;
+    }
+
+    const normalizedPricing: ModelPricing = {
+      input: normalizePricingNumber(pricing.input),
+      cachedInput: normalizePricingNumber(pricing.cachedInput),
+      output: normalizePricingNumber(pricing.output)
+    };
+
+    if (
+      normalizedPricing.input !== undefined ||
+      normalizedPricing.cachedInput !== undefined ||
+      normalizedPricing.output !== undefined
+    ) {
+      normalized[model] = normalizedPricing;
+    }
+  }
+
+  return normalized;
+}
+
+function normalizePricingNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

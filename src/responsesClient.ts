@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import type { FunctionTool, ToolChoiceOptions } from 'openai/resources/responses/responses';
+import type { FunctionTool, ResponseUsage, ToolChoiceOptions } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
@@ -37,13 +37,7 @@ export interface StreamResponseTextOptions {
   }) => void;
   onResponseCompleted?: (response: {
     id?: string;
-    usage?: {
-      input_tokens?: number | null;
-      output_tokens?: number | null;
-      total_tokens?: number | null;
-      input_tokens_details?: { cached_tokens?: number | null } | null;
-      output_tokens_details?: { reasoning_tokens?: number | null } | null;
-    } | null;
+    usage?: ResponseUsage | null;
   }) => void;
   onResponseFailed?: (message: string) => void;
 }

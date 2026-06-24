@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { ResponseUsage } from 'openai/resources/responses/responses';
 import { convertMessagesToResponsesInput, estimateTokenCount } from './convertMessages';
 import { getProviderConfig, type ProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
@@ -16,6 +17,14 @@ type VSCodeWithThinkingPart = typeof vscode & {
 
 const USAGE_DATA_PART_MIME = 'usage';
 
+export interface UsageSink {
+  record(event: {
+    model: string;
+    usage: ResponseUsage;
+    completedAt: number;
+  }): void;
+}
+
 export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
@@ -27,7 +36,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly outputChannel: vscode.LogOutputChannel
+    private readonly outputChannel: vscode.LogOutputChannel,
+    private readonly usageSink?: UsageSink
   ) {
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     this.context.subscriptions.push(
@@ -171,6 +181,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         const usagePart = createUsageDataPart(response.usage);
         if (usagePart) {
           progress.report(usagePart);
+        }
+
+        if (response.usage) {
+          this.usageSink?.record({
+            model: selectedModel.requestModel,
+            usage: response.usage,
+            completedAt: Date.now()
+          });
         }
       },
       onResponseFailed: (message) => {
@@ -340,13 +358,7 @@ function createThinkingPart(text: string): vscode.LanguageModelResponsePart | un
   return new ThinkingPart(text) as vscode.LanguageModelResponsePart;
 }
 
-function createUsageDataPart(usage: {
-  input_tokens?: number | null;
-  output_tokens?: number | null;
-  total_tokens?: number | null;
-  input_tokens_details?: { cached_tokens?: number | null } | null;
-  output_tokens_details?: { reasoning_tokens?: number | null } | null;
-} | null | undefined): vscode.LanguageModelResponsePart | undefined {
+function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.LanguageModelResponsePart | undefined {
   if (!usage) {
     return undefined;
   }

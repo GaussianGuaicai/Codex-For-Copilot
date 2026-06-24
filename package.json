@@ -69,6 +69,10 @@
       {
         "command": "codexModelProvider.clearApiKey",
         "title": "Codex: Clear API Key"
+      },
+      {
+        "command": "codexModelProvider.showLastUsage",
+        "title": "Codex: View Last Usage"
       }
     ],
     "configuration": {
@@ -161,6 +165,16 @@
           "tags": [
             "advanced"
           ]
+        },
+        "codexModelProvider.showUsageInStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show last completed Codex response usage in the VS Code status bar."
+        },
+        "codexModelProvider.modelPricingUsdPerMTok": {
+          "type": "object",
+          "default": {},
+          "description": "Optional local USD pricing per 1M tokens to override the built-in official pricing used for estimated cost display."
         }
       }
     }
