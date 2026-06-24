@@ -1,8 +1,18 @@
-import OpenAI from 'openai';
+import OpenAI, {
+  APIConnectionError,
+  APIConnectionTimeoutError,
+  APIError,
+  AuthenticationError,
+  InternalServerError,
+  RateLimitError
+} from 'openai';
 import type { FunctionTool, ResponseUsage, ToolChoiceOptions } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
+
+const OPENAI_DEFAULT_MAX_RETRIES = 2;
+const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface CountInputTokensOptions {
   baseURL: string;
@@ -55,7 +65,8 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       apiKey: options.apiKey,
       baseURL: normalizeBaseURL(options.baseURL),
       defaultHeaders: options.headers,
-      maxRetries: 0
+      maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
+      timeout: OPENAI_DEFAULT_TIMEOUT_MS
     });
 
     const tools = options.tools?.map(convertToolToResponseTool) ?? [];
@@ -79,7 +90,9 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
     const stream = await client.responses.create(
       request,
       {
-        signal: abortController.signal
+        signal: abortController.signal,
+        maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
+        timeout: OPENAI_DEFAULT_TIMEOUT_MS
       }
     );
 
@@ -196,17 +209,95 @@ function parseToolCallInput(argumentsJson: string): object {
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {
+  const endpoint = `${normalizeBaseURL(baseURL)}/responses`;
+
+  if (error instanceof APIConnectionTimeoutError) {
+    return new Error(
+      `OpenAI request timed out while contacting ${endpoint}. The OpenAI SDK automatically retried transient timeouts, but the request still did not complete. Check network, proxy, or VPN stability and try again.`,
+      { cause: error }
+    );
+  }
+
+  if (error instanceof APIConnectionError) {
+    const causeMessage = getCauseMessage(error);
+    return new Error(
+      `Connection failure while contacting ${endpoint}. The OpenAI SDK automatically retried transient connection errors, but the request still failed.${causeMessage ? ` Root cause: ${causeMessage}` : ''}`,
+      { cause: error }
+    );
+  }
+
+  if (error instanceof AuthenticationError) {
+    return new Error(
+      `Responses API authentication failed. Check the stored API key or ~/.codex/auth.json credentials.${formatRequestId(error)} ${error.message}`.trim(),
+      { cause: error }
+    );
+  }
+
+  if (error instanceof RateLimitError) {
+    return new Error(
+      `OpenAI rate limit exceeded while contacting ${endpoint}.${formatRequestId(error)} ${error.message}`.trim(),
+      { cause: error }
+    );
+  }
+
+  if (error instanceof InternalServerError) {
+    return new Error(
+      `OpenAI server error while contacting ${endpoint}.${formatStatusAndRequestId(error)} ${error.message}`.trim(),
+      { cause: error }
+    );
+  }
+
+  if (error instanceof APIError) {
+    return new Error(
+      `OpenAI request failed while contacting ${endpoint}.${formatStatusAndRequestId(error)} ${error.message}`.trim(),
+      { cause: error }
+    );
+  }
+
   const message = error instanceof Error ? error.message : String(error);
 
   if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) {
-    return new Error(`Connection failure while contacting ChatGPT Codex Responses endpoint at ${baseURL}. Check codexModelProvider.baseURL. ${message}`);
+    return new Error(
+      `Connection failure while contacting ${endpoint}. Check codexModelProvider.baseURL and local network reachability. ${message}`,
+      { cause: error instanceof Error ? error : undefined }
+    );
   }
 
   if (message.includes('401') || /unauthorized|invalid api key/i.test(message)) {
-    return new Error(`Responses API authentication failed. Check the stored API key or ~/.codex/auth.json credentials. ${message}`);
+    return new Error(
+      `Responses API authentication failed. Check the stored API key or ~/.codex/auth.json credentials. ${message}`,
+      { cause: error instanceof Error ? error : undefined }
+    );
   }
 
   return error instanceof Error ? error : new Error(message);
+}
+
+function formatRequestId(error: Pick<APIError, 'requestID'>): string {
+  return error.requestID ? ` Request ID: ${error.requestID}.` : '';
+}
+
+function formatStatusAndRequestId(error: Pick<APIError, 'status' | 'requestID'>): string {
+  const status = error.status ? ` Status: ${error.status}.` : '';
+  const requestId = formatRequestId(error);
+  return `${status}${requestId}`;
+}
+
+function getCauseMessage(error: Error & { cause?: unknown }): string | undefined {
+  const cause = error.cause;
+  if (!cause) {
+    return undefined;
+  }
+
+  if (cause instanceof Error && cause.message.trim()) {
+    return cause.message.trim();
+  }
+
+  if (typeof cause === 'string' && cause.trim()) {
+    return cause.trim();
+  }
+
+  return undefined;
 }
 
 async function safeReadResponseBody(response: Response): Promise<string> {
