@@ -1,5 +1,7 @@
 # Codex For Copilot
 
+[![Install from VS Code Marketplace](https://img.shields.io/badge/VS%20Code%20Marketplace-Install-007ACC?logo=visualstudiocode&logoColor=white&style=for-the-badge)](https://marketplace.visualstudio.com/items?itemName=Gaussian.gaussian-codex-for-copilot)
+
 This extension contributes one VS Code language model provider named **Codex**. It discovers available models from the ChatGPT Codex backend, exposes them in the VS Code model picker, streams text deltas back into VS Code, and forwards VS Code function-style tools through the Responses API.
 
 Every request includes the configured `codexModelProvider.instructions` value as the top-level Responses API `instructions` field.
