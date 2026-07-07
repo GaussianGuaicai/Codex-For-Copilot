@@ -32,7 +32,8 @@
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {
-    "openai": "^6.44.0"
+    "openai": "^6.44.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
@@ -105,6 +106,21 @@
             "Only use the API key saved with 'Codex: Set API Key'."
           ],
           "description": "Select which credential source the provider uses."
+        },
+        "codexModelProvider.transport": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "http",
+            "websocket"
+          ],
+          "enumDescriptions": [
+            "Prefer the Responses WebSocket path and automatically fall back to HTTP streaming when the WebSocket transport is unavailable.",
+            "Always use the existing HTTP streaming path.",
+            "Always use the Responses WebSocket path and surface any transport error directly."
+          ],
+          "description": "Transport policy used for Responses streaming requests."
         },
         "codexModelProvider.model": {
           "type": "string",

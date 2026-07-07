@@ -8,10 +8,16 @@ The extension source lives in [`src/`](src/). Key modules are:
 - `extension.ts`: VS Code activation and command registration
 - `models.ts`: model discovery and provider metadata
 - `provider.ts`: language model provider surface
-- `responsesClient.ts`: streamed Responses API calls
+- `responsesClient.ts`: shared Responses request builder plus HTTP/WebSocket streaming transport facade
 - `secrets.ts`: credential loading from `~/.codex/auth.json` or SecretStorage
 
 Compiled output is written to `out/` and should be treated as build artifacts. Tests live in `test/`. Workspace debug helpers are in `.vscode/`.
+
+Transport-related constraints that must not break:
+- `codexModelProvider.transport` defaults to `auto`, which means WebSocket-first with HTTP fallback.
+- HTTP and WebSocket transports must emit the same provider-facing callbacks for text, reasoning, tool calls, completion, and failure.
+- ChatGPT/Codex custom headers for WebSocket requests are passed via the WebSocket constructor options, not via OpenAI client `defaultHeaders`.
+- The runtime now depends on the `ws` package because `openai/resources/responses/ws` requires it outside the SDK bundle.
 
 ## Build, Test, and Development Commands
 

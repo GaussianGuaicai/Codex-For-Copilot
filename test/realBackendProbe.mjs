@@ -9,6 +9,11 @@ import { ProxyAgent, fetch as undiciFetch } from 'undici';
 
 const requestedModel = process.env.CODEX_TEST_MODEL || 'gpt-5.5';
 const requestedServiceTier = process.env.CODEX_TEST_SERVICE_TIER;
+const requestedTransport = process.env.CODEX_TEST_TRANSPORT === 'websocket'
+  ? 'websocket'
+  : process.env.CODEX_TEST_TRANSPORT === 'auto'
+    ? 'auto'
+    : 'http';
 const requestServiceTier = requestedServiceTier === 'fast'
   ? 'priority'
   : requestedServiceTier === 'auto' || requestedServiceTier === undefined
@@ -93,10 +98,12 @@ try {
   const deltas = [];
   let createdServiceTier = null;
   let completedServiceTier = null;
+  let transportFallback = null;
   await streamResponseText({
     baseURL: 'https://chatgpt.com/backend-api/codex/responses',
     apiKey: credentials.apiKey,
     headers: credentials.headers,
+    transport: requestedTransport,
     omitMaxOutputTokens: credentials.omitMaxOutputTokens,
     model: requestedModel,
     instructions: 'You are a test assistant.',
@@ -113,16 +120,21 @@ try {
     },
     onResponseCompleted: (response) => {
       completedServiceTier = response.service_tier ?? null;
+    },
+    onTransportFallback: (event) => {
+      transportFallback = event;
     }
   });
 
   assertEqual(deltas.join('').trim(), 'OK', 'real backend output');
   console.log(JSON.stringify({
     model: requestedModel,
+    transport: requestedTransport,
     requestedServiceTier: requestedServiceTier ?? null,
     requestServiceTier: requestServiceTier ?? null,
     createdServiceTier,
     completedServiceTier,
+    transportFallback,
     output: deltas.join('').trim()
   }));
 } finally {

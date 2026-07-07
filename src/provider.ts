@@ -122,6 +122,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     this.outputChannel.info('provideLanguageModelChatResponse start', {
       modelId: model.id,
       requestModel: selectedModel.requestModel,
+      transport: config.transport,
       serviceTier: config.defaultServiceTier ?? 'auto',
       reasoningEffort: reasoningEffort ?? null,
       messageCount: messages.length,
@@ -136,6 +137,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       baseURL: config.baseURL,
       apiKey: credentials.apiKey,
       headers: credentials.headers,
+      transport: config.transport,
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
       model: selectedModel.requestModel,
       instructions: config.instructions,
@@ -193,6 +195,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       },
       onResponseFailed: (message) => {
         this.outputChannel.error(`response failed model=${selectedModel.requestModel} message=${message}`);
+      },
+      onTransportFallback: ({ from, to, reason }) => {
+        this.outputChannel.warn('response transport fallback', {
+          requestModel: selectedModel.requestModel,
+          from,
+          to,
+          reason
+        });
       }
     });
   }

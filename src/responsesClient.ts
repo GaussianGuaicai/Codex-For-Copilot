@@ -6,7 +6,14 @@ import OpenAI, {
   InternalServerError,
   RateLimitError
 } from 'openai';
-import type { FunctionTool, ResponseUsage, ToolChoiceOptions } from 'openai/resources/responses/responses';
+import { ResponsesWS, type ResponsesWSClientOptions } from 'openai/resources/responses/ws';
+import type {
+  ResponsesClientEvent,
+  FunctionTool,
+  ResponsesServerEvent,
+  ResponseUsage,
+  ToolChoiceOptions
+} from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
@@ -27,6 +34,7 @@ export interface StreamResponseTextOptions {
   baseURL: string;
   apiKey: string;
   headers?: Record<string, string>;
+  transport?: 'auto' | 'http' | 'websocket';
   omitMaxOutputTokens?: boolean;
   model: string;
   instructions: string;
@@ -50,6 +58,11 @@ export interface StreamResponseTextOptions {
     usage?: ResponseUsage | null;
   }) => void;
   onResponseFailed?: (message: string) => void;
+  onTransportFallback?: (event: {
+    from: 'websocket';
+    to: 'http';
+    reason: string;
+  }) => void;
 }
 
 export async function streamResponseText(options: StreamResponseTextOptions): Promise<void> {
@@ -61,78 +74,31 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       throw new Error('Codex requires a non-empty top-level instructions setting.');
     }
 
-    const client = new OpenAI({
-      apiKey: options.apiKey,
-      baseURL: normalizeBaseURL(options.baseURL),
-      defaultHeaders: options.headers,
-      maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
-      timeout: OPENAI_DEFAULT_TIMEOUT_MS
-    });
+    const transport = options.transport ?? 'http';
 
-    const tools = options.tools?.map(convertToolToResponseTool) ?? [];
-    const request = {
-      model: options.model,
-      instructions: options.instructions,
-      input: options.input,
-      stream: true,
-      store: false,
-      ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-      ...(options.reasoning ? { reasoning: options.reasoning } : {}),
-      ...(tools.length > 0
-        ? {
-            tools,
-            tool_choice: mapToolChoice(options.toolMode)
-          }
-        : {}),
-      ...(options.omitMaxOutputTokens ? {} : { max_output_tokens: options.maxOutputTokens })
-    } as const;
+    if (transport === 'websocket') {
+      await streamResponseTextOverWebSocket(options, abortController);
+      return;
+    }
 
-    const stream = await client.responses.create(
-      request,
-      {
-        signal: abortController.signal,
-        maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
-        timeout: OPENAI_DEFAULT_TIMEOUT_MS
-      }
-    );
-
-    for await (const event of stream) {
-      if (options.token.isCancellationRequested) {
-        abortController.abort();
+    if (transport === 'auto') {
+      try {
+        await streamResponseTextOverWebSocket(options, abortController);
         return;
-      }
+      } catch (error) {
+        if (!shouldFallbackToHttp(error, options.token, abortController.signal)) {
+          throw error;
+        }
 
-      if (event.type === 'response.output_text.delta') {
-        options.onTextDelta(event.delta);
-        continue;
-      }
-
-      if (event.type === 'response.reasoning_text.delta') {
-        options.onReasoningTextDelta?.(event.delta);
-        continue;
-      }
-
-      if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
-        options.onToolCall?.(event.item.call_id, event.item.name, parseToolCallInput(event.item.arguments));
-        continue;
-      }
-
-      if (event.type === 'response.created') {
-        options.onResponseCreated?.(event.response);
-        continue;
-      }
-
-      if (event.type === 'response.completed') {
-        options.onResponseCompleted?.(event.response);
-        continue;
-      }
-
-      if (event.type === 'response.failed') {
-        const error = event.response.error;
-        options.onResponseFailed?.(error?.message ?? 'Responses API request failed.');
-        throw new Error(error?.message ?? 'Responses API request failed.');
+        options.onTransportFallback?.({
+          from: 'websocket',
+          to: 'http',
+          reason: error instanceof Error ? error.message : String(error)
+        });
       }
     }
+
+    await streamResponseTextOverHttp(options, abortController);
   } catch (error) {
     if (options.token.isCancellationRequested || abortController.signal.aborted) {
       return;
@@ -141,6 +107,204 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
     throw normalizeResponsesError(error, options.baseURL);
   } finally {
     cancellation.dispose();
+  }
+}
+
+async function streamResponseTextOverHttp(
+  options: StreamResponseTextOptions,
+  abortController: AbortController
+): Promise<void> {
+  const client = createOpenAIClient(options);
+  const request = buildResponsesCreateRequest(options);
+
+  const stream = await client.responses.create(
+    request,
+    {
+      signal: abortController.signal,
+      maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
+      timeout: OPENAI_DEFAULT_TIMEOUT_MS
+    }
+  );
+
+  for await (const event of stream) {
+    if (options.token.isCancellationRequested) {
+      abortController.abort();
+      return;
+    }
+
+    handleResponsesServerEvent(event, options);
+  }
+}
+
+async function streamResponseTextOverWebSocket(
+  options: StreamResponseTextOptions,
+  abortController: AbortController
+): Promise<void> {
+  const client = createOpenAIClient(options);
+  const socketOptions = (options.headers
+    ? { headers: options.headers }
+    : {}) as ResponsesWSClientOptions;
+
+  const socket = new ResponsesWS(client, socketOptions);
+
+  const closeSocket = (code = 1000, reason = 'OK') => {
+    try {
+      socket.close({ code, reason });
+    } catch {
+      // Best effort close. The stream iterator will surface any underlying error.
+    }
+  };
+
+  const abortListener = () => closeSocket(1000, 'cancelled');
+  abortController.signal.addEventListener('abort', abortListener, { once: true });
+
+  let sawResponseActivity = false;
+  let sawTerminalEvent = false;
+
+  try {
+    socket.send(buildResponsesCreateEvent(options));
+
+    for await (const streamEvent of socket.stream()) {
+      if (options.token.isCancellationRequested) {
+        abortController.abort();
+        return;
+      }
+
+      if (streamEvent.type === 'message') {
+        sawResponseActivity = true;
+        const message = streamEvent.message;
+        handleResponsesServerEvent(message, options);
+
+        if (message.type === 'response.completed' || message.type === 'response.failed') {
+          sawTerminalEvent = true;
+          closeSocket();
+          return;
+        }
+
+        continue;
+      }
+
+      if (streamEvent.type === 'error') {
+        if (!sawResponseActivity) {
+          throw new WebSocketTransportUnavailableError(streamEvent.error.message, { cause: streamEvent.error });
+        }
+
+        throw streamEvent.error;
+      }
+
+      if (streamEvent.type === 'close') {
+        if (sawTerminalEvent || options.token.isCancellationRequested || abortController.signal.aborted) {
+          return;
+        }
+
+        const message = streamEvent.reason || `WebSocket closed with code ${streamEvent.code}.`;
+
+        if (!sawResponseActivity) {
+          throw new WebSocketTransportUnavailableError(message);
+        }
+
+        throw new Error(message);
+      }
+    }
+
+    if (!sawTerminalEvent && !options.token.isCancellationRequested && !abortController.signal.aborted) {
+      throw new Error('Responses WebSocket stream ended before the response completed.');
+    }
+  } finally {
+    abortController.signal.removeEventListener('abort', abortListener);
+    closeSocket();
+  }
+}
+
+function createOpenAIClient(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): OpenAI {
+  return new OpenAI({
+    apiKey: options.apiKey,
+    baseURL: normalizeBaseURL(options.baseURL),
+    defaultHeaders: options.headers,
+    maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
+    timeout: OPENAI_DEFAULT_TIMEOUT_MS
+  });
+}
+
+function buildResponsesCreateRequest(options: StreamResponseTextOptions) {
+  const tools = options.tools?.map(convertToolToResponseTool) ?? [];
+
+  return {
+    model: options.model,
+    instructions: options.instructions,
+    input: options.input,
+    stream: true,
+    store: false,
+    ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
+    ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+    ...(tools.length > 0
+      ? {
+          tools,
+          tool_choice: mapToolChoice(options.toolMode)
+        }
+      : {}),
+    ...(options.omitMaxOutputTokens ? {} : { max_output_tokens: options.maxOutputTokens })
+  } as const;
+}
+
+function buildResponsesCreateEvent(options: StreamResponseTextOptions): ResponsesClientEvent {
+  const { stream: _stream, ...request } = buildResponsesCreateRequest(options);
+
+  return {
+    type: 'response.create',
+    ...request
+  };
+}
+
+function handleResponsesServerEvent(event: ResponsesServerEvent, options: StreamResponseTextOptions): void {
+  if (event.type === 'response.output_text.delta') {
+    options.onTextDelta(event.delta);
+    return;
+  }
+
+  if (event.type === 'response.reasoning_text.delta') {
+    options.onReasoningTextDelta?.(event.delta);
+    return;
+  }
+
+  if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
+    options.onToolCall?.(event.item.call_id, event.item.name, parseToolCallInput(event.item.arguments));
+    return;
+  }
+
+  if (event.type === 'response.created') {
+    options.onResponseCreated?.(event.response);
+    return;
+  }
+
+  if (event.type === 'response.completed') {
+    options.onResponseCompleted?.(event.response);
+    return;
+  }
+
+  if (event.type === 'response.failed') {
+    const error = event.response.error;
+    options.onResponseFailed?.(error?.message ?? 'Responses API request failed.');
+    throw new Error(error?.message ?? 'Responses API request failed.');
+  }
+}
+
+function shouldFallbackToHttp(
+  error: unknown,
+  token: vscode.CancellationToken,
+  abortSignal: AbortSignal
+): boolean {
+  if (token.isCancellationRequested || abortSignal.aborted) {
+    return false;
+  }
+
+  return error instanceof WebSocketTransportUnavailableError;
+}
+
+class WebSocketTransportUnavailableError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'WebSocketTransportUnavailableError';
   }
 }
 
