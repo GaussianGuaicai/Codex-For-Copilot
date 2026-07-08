@@ -6,7 +6,7 @@ import { clearApiKey, setApiKey } from './secrets';
 export function activate(context: vscode.ExtensionContext): void {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
   const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, outputChannel);
-  const provider = new CodexModelProvider(context, outputChannel, undefined, accountUsageStatusBar);
+  const provider = new CodexModelProvider(context, outputChannel, undefined, accountUsageStatusBar, accountUsageStatusBar);
 
   context.subscriptions.push(
     outputChannel,

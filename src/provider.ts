@@ -29,6 +29,10 @@ export interface SelectedModelSink {
   setSelectedModel(model: string): void;
 }
 
+export interface AccountUsageRefreshSink {
+  refresh(): Promise<void>;
+}
+
 export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
@@ -42,6 +46,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     private readonly context: vscode.ExtensionContext,
     private readonly outputChannel: vscode.LogOutputChannel,
     private readonly usageSink?: UsageSink,
+    private readonly accountUsageRefreshSink?: AccountUsageRefreshSink,
     private readonly selectedModelSink?: SelectedModelSink
   ) {
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
@@ -196,6 +201,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             completedAt: Date.now()
           });
         }
+
+        void this.accountUsageRefreshSink?.refresh();
       },
       onResponseFailed: (message) => {
         this.outputChannel.error(`response failed model=${selectedModel.requestModel} message=${message}`);
