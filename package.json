@@ -71,10 +71,6 @@
         "title": "Codex: Clear API Key"
       },
       {
-        "command": "codexModelProvider.showLastUsage",
-        "title": "Codex: View Last Usage"
-      },
-      {
         "command": "codexModelProvider.refreshAccountLimits",
         "title": "Codex: Refresh Account Limits"
       }
@@ -169,11 +165,6 @@
           "tags": [
             "advanced"
           ]
-        },
-        "codexModelProvider.showUsageInStatusBar": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show last completed Codex response usage in the VS Code status bar."
         },
         "codexModelProvider.modelPricingUsdPerMTok": {
           "type": "object",

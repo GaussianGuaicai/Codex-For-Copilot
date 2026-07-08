@@ -52,7 +52,6 @@ Common settings:
 - `codexModelProvider.defaultServiceTier`: default `service_tier` behavior
 - `codexModelProvider.defaultReasoningEffort`: fallback Thinking Effort setting
 - `codexModelProvider.maxOutputTokens`: maximum output tokens when supported
-- `codexModelProvider.showUsageInStatusBar`: show the last completed usage summary
 
 ## Commands
 
@@ -61,7 +60,6 @@ Common settings:
 - `Codex: Clear API Key`
 - `Codex: Open Settings`
 - `Codex: Open Debug Logs`
-- `Codex: View Last Usage`
 - `Codex: Refresh Account Limits`
 
 ## Development
