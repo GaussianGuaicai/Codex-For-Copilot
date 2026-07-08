@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import type { ResponseUsage } from 'openai/resources/responses/responses';
-import { convertMessagesToResponsesInput, estimateTokenCount } from './convertMessages';
+import { compareResponsesInputHistory, convertMessagesToResponsesInput, estimateTokenCount, stableSerialize, type ResponsesInputMessage } from './convertMessages';
 import { getProviderConfig, type ProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
-import { countInputTokens, normalizeBaseURL, streamResponseText } from './responsesClient';
+import { countInputTokens, disposeReusableResponsesWebSockets, isResponsesContinuationMissError, normalizeBaseURL, streamResponseText } from './responsesClient';
+import { ResponseBranchStore } from './responseBranchStore';
 import { getApiCredentials } from './secrets';
 
 type RuntimeProvideLanguageModelChatResponseOptions = vscode.ProvideLanguageModelChatResponseOptions & {
@@ -28,6 +29,7 @@ export interface UsageSink {
 export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
+  private readonly responseBranchStore = new ResponseBranchStore();
   private cachedModels?: {
     key: string;
     expiresAt: number;
@@ -42,6 +44,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     this.context.subscriptions.push(
       this.modelInfoChangedEmitter,
+      new vscode.Disposable(() => disposeReusableResponsesWebSockets()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('codexModelProvider')) {
           this.cachedModels = undefined;
@@ -118,11 +121,36 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     );
     const requestStartedAt = Date.now();
     const input = convertMessagesToResponsesInput(messages);
+    const reuseKey = buildResponseBranchReuseKey({
+      baseURL: normalizeBaseURL(config.baseURL),
+      authIdentity: getCredentialIdentity(credentials),
+      model: selectedModel.requestModel,
+      instructions: config.instructions,
+      reasoningEffort,
+      toolMode: options.toolMode,
+      tools: options.tools
+    });
+    const reusableBranch = this.responseBranchStore.findReusableBranch(reuseKey, input);
+    const reuseMissDiagnostic = reusableBranch
+      ? undefined
+      : this.responseBranchStore.explainReuseMiss(reuseKey, input);
+    const initialRequestInput = reusableBranch?.comparison.appendedInput.length ? reusableBranch.comparison.appendedInput : input;
+    const initialPreviousResponseId = reusableBranch?.comparison.appendedInput.length ? reusableBranch.responseId : undefined;
+    let activeBranchId = initialPreviousResponseId ? reusableBranch?.branchId : undefined;
+    let createdResponseId: string | undefined;
+    let completedResponseId: string | undefined;
 
     this.outputChannel.info('provideLanguageModelChatResponse start', {
       modelId: model.id,
       requestModel: selectedModel.requestModel,
       transport: config.transport,
+      reuse: initialPreviousResponseId
+        ? {
+            branchId: reusableBranch?.branchId,
+            matchedPrefixCount: reusableBranch?.comparison.matchedPrefixCount,
+            appendedInputCount: reusableBranch?.comparison.appendedInput.length
+          }
+        : null,
       serviceTier: config.defaultServiceTier ?? 'auto',
       reasoningEffort: reasoningEffort ?? null,
       messageCount: messages.length,
@@ -133,78 +161,171 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       maxOutputTokens: config.maxOutputTokens
     });
 
-    await streamResponseText({
-      baseURL: config.baseURL,
-      apiKey: credentials.apiKey,
-      headers: credentials.headers,
-      transport: config.transport,
-      omitMaxOutputTokens: credentials.omitMaxOutputTokens,
-      model: selectedModel.requestModel,
-      instructions: config.instructions,
-      serviceTier: getRequestServiceTier(config.defaultServiceTier),
-      input,
-      tools: options.tools,
-      toolMode: options.toolMode,
-      reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
-      maxOutputTokens: config.maxOutputTokens,
-      token,
-      onTextDelta: (text) => progress.report(new vscode.LanguageModelTextPart(text)),
-      onReasoningTextDelta: (text) => {
-        const thinkingPart = createThinkingPart(text);
-        if (thinkingPart) {
-          progress.report(thinkingPart);
-        }
-      },
-      onToolCall: (callId, name, input) => {
-        this.outputChannel.debug('response tool call', {
-          requestModel: selectedModel.requestModel,
-          callId,
-          name,
-          input
-        });
-        progress.report(new vscode.LanguageModelToolCallPart(callId, name, input));
-      },
-      onResponseCreated: (response) => {
-        this.outputChannel.debug('response created', {
-          requestModel: selectedModel.requestModel,
-          responseId: response.id,
-          status: response.status,
-          serviceTier: response.service_tier ?? null
-        });
-      },
-      onResponseCompleted: (response) => {
-        this.outputChannel.info('response completed', {
-          requestModel: selectedModel.requestModel,
-          responseId: response.id,
-          durationMs: Date.now() - requestStartedAt,
-          usage: response.usage ?? null
-        });
+    if (reuseMissDiagnostic) {
+      this.outputChannel.info('response reuse miss', {
+        requestModel: selectedModel.requestModel,
+        branchId: reuseMissDiagnostic.branchId,
+        previousResponseId: reuseMissDiagnostic.responseId,
+        comparisonKind: reuseMissDiagnostic.comparison.kind,
+        matchedPrefixCount: reuseMissDiagnostic.comparison.matchedPrefixCount,
+        previousInputCount: reuseMissDiagnostic.previousInputCount,
+        currentInputCount: reuseMissDiagnostic.currentInputCount,
+        appendedInputCount: reuseMissDiagnostic.comparison.appendedInput.length,
+        mismatchIndex: reuseMissDiagnostic.comparison.mismatch?.index ?? null,
+        mismatchPreviousItem: reuseMissDiagnostic.comparison.mismatch?.previousItemSummary ?? reuseMissDiagnostic.previousNextItemSummary,
+        mismatchCurrentItem: reuseMissDiagnostic.comparison.mismatch?.currentItemSummary ?? reuseMissDiagnostic.currentNextItemSummary
+      });
+    }
 
-        const usagePart = createUsageDataPart(response.usage);
-        if (usagePart) {
-          progress.report(usagePart);
+    const streamRequest = async (requestInput: ResponsesInputMessage[], previousResponseId?: string) => {
+      const streamStartedAt = Date.now();
+      let actualTransport: 'http' | 'http-fallback' | 'websocket-fresh' | 'websocket-reused' = config.transport === 'http'
+        ? 'http'
+        : 'http-fallback';
+      let firstVisibleOutput:
+        | {
+            kind: 'text' | 'reasoning' | 'tool_call';
+            latencyMs: number;
+          }
+        | undefined;
+
+      const recordFirstVisibleOutput = (kind: 'text' | 'reasoning' | 'tool_call') => {
+        if (firstVisibleOutput) {
+          return;
         }
 
-        if (response.usage) {
-          this.usageSink?.record({
-            model: selectedModel.requestModel,
-            usage: response.usage,
-            completedAt: Date.now()
+        firstVisibleOutput = {
+          kind,
+          latencyMs: Date.now() - streamStartedAt
+        };
+      };
+
+      await streamResponseText({
+        baseURL: config.baseURL,
+        apiKey: credentials.apiKey,
+        headers: credentials.headers,
+        transport: config.transport,
+        previousResponseId,
+        omitMaxOutputTokens: credentials.omitMaxOutputTokens,
+        model: selectedModel.requestModel,
+        instructions: config.instructions,
+        serviceTier: getRequestServiceTier(config.defaultServiceTier),
+        input: requestInput,
+        tools: options.tools,
+        toolMode: options.toolMode,
+        reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
+        maxOutputTokens: config.maxOutputTokens,
+        token,
+        onTextDelta: (text) => {
+          recordFirstVisibleOutput('text');
+          progress.report(new vscode.LanguageModelTextPart(text));
+        },
+        onReasoningTextDelta: (text) => {
+          recordFirstVisibleOutput('reasoning');
+          const thinkingPart = createThinkingPart(text);
+          if (thinkingPart) {
+            progress.report(thinkingPart);
+          }
+        },
+        onToolCall: (callId, name, toolInput) => {
+          recordFirstVisibleOutput('tool_call');
+          this.outputChannel.debug('response tool call', {
+            requestModel: selectedModel.requestModel,
+            callId,
+            name,
+            input: toolInput
+          });
+          progress.report(new vscode.LanguageModelToolCallPart(callId, name, toolInput));
+        },
+        onResponseCreated: (response) => {
+          createdResponseId = response.id ?? createdResponseId;
+          this.outputChannel.debug('response created', {
+            requestModel: selectedModel.requestModel,
+            responseId: response.id,
+            status: response.status,
+            serviceTier: response.service_tier ?? null,
+            previousResponseId: previousResponseId ?? null
+          });
+        },
+        onResponseCompleted: (response) => {
+          completedResponseId = response.id ?? completedResponseId;
+          this.outputChannel.info('response completed', {
+            requestModel: selectedModel.requestModel,
+            responseId: response.id,
+            durationMs: Date.now() - requestStartedAt,
+            streamDurationMs: Date.now() - streamStartedAt,
+            actualTransport,
+            firstVisibleOutputLatencyMs: firstVisibleOutput?.latencyMs ?? null,
+            firstVisibleOutputKind: firstVisibleOutput?.kind ?? null,
+            usage: response.usage ?? null,
+            previousResponseId: previousResponseId ?? null
+          });
+
+          const usagePart = createUsageDataPart(response.usage);
+          if (usagePart) {
+            progress.report(usagePart);
+          }
+
+          if (response.usage) {
+            this.usageSink?.record({
+              model: selectedModel.requestModel,
+              usage: response.usage,
+              completedAt: Date.now()
+            });
+          }
+        },
+        onResponseFailed: (message) => {
+          this.outputChannel.error(`response failed model=${selectedModel.requestModel} previousResponseId=${previousResponseId ?? 'none'} message=${message}`);
+        },
+        onTransportFallback: ({ from, to, reason }) => {
+          actualTransport = 'http-fallback';
+          this.outputChannel.warn('response transport fallback', {
+            requestModel: selectedModel.requestModel,
+            from,
+            to,
+            reason,
+            previousResponseId: previousResponseId ?? null
+          });
+        },
+        onWebSocketSession: ({ reused }) => {
+          actualTransport = reused ? 'websocket-reused' : 'websocket-fresh';
+          this.outputChannel.debug('response websocket session', {
+            requestModel: selectedModel.requestModel,
+            reused,
+            previousResponseId: previousResponseId ?? null
           });
         }
-      },
-      onResponseFailed: (message) => {
-        this.outputChannel.error(`response failed model=${selectedModel.requestModel} message=${message}`);
-      },
-      onTransportFallback: ({ from, to, reason }) => {
-        this.outputChannel.warn('response transport fallback', {
-          requestModel: selectedModel.requestModel,
-          from,
-          to,
-          reason
-        });
+      });
+    };
+
+    try {
+      await streamRequest(initialRequestInput, initialPreviousResponseId);
+    } catch (error) {
+      if (!initialPreviousResponseId || !isResponsesContinuationMissError(error)) {
+        throw error;
       }
-    });
+
+      this.outputChannel.warn('response continuation reset', {
+        requestModel: selectedModel.requestModel,
+        branchId: reusableBranch?.branchId ?? null,
+        previousResponseId: initialPreviousResponseId,
+        reason: error.message
+      });
+
+      if (reusableBranch) {
+        this.responseBranchStore.invalidate(reusableBranch.branchId);
+      }
+
+      createdResponseId = undefined;
+      completedResponseId = undefined;
+      activeBranchId = undefined;
+      await streamRequest(input);
+    }
+
+    const finalResponseId = completedResponseId ?? createdResponseId;
+    if (finalResponseId) {
+      activeBranchId = this.responseBranchStore.recordSuccess(reuseKey, input, finalResponseId, activeBranchId);
+    }
   }
 
   async provideTokenCount(
@@ -387,4 +508,43 @@ function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.La
     },
     USAGE_DATA_PART_MIME
   ) as vscode.LanguageModelResponsePart;
+}
+
+export function buildResponseBranchReuseKey(options: {
+  baseURL: string;
+  authIdentity: string;
+  model: string;
+  instructions: string;
+  reasoningEffort: ReasoningEffort | undefined;
+  toolMode: vscode.LanguageModelChatToolMode | undefined;
+  tools: readonly vscode.LanguageModelChatTool[] | undefined;
+}): string {
+  return stableSerialize({
+    baseURL: options.baseURL,
+    authIdentity: options.authIdentity,
+    model: options.model,
+    instructions: options.instructions,
+    reasoningEffort: options.reasoningEffort ?? null,
+    toolMode: options.toolMode ?? null,
+    tools: (options.tools ?? [])
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema ?? null
+      }))
+      .sort((left, right) => {
+        const leftKey = stableSerialize(left);
+        const rightKey = stableSerialize(right);
+        return leftKey.localeCompare(rightKey);
+      })
+  });
+}
+
+function getCredentialIdentity(credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>): string {
+  const accountId = credentials.headers['ChatGPT-Account-ID'];
+  if (typeof accountId === 'string' && accountId.length > 0) {
+    return `${credentials.source}:${accountId}`;
+  }
+
+  return `${credentials.source}:${credentials.apiKey.slice(0, 16)}`;
 }

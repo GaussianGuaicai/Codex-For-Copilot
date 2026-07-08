@@ -34,15 +34,18 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { streamResponseText } = require(bundlePath);
+const { disposeReusableResponsesWebSockets, streamResponseText } = require(bundlePath);
 
 try {
   await runHttpTransportSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
   await runWebSocketTransportSmokeTest(streamResponseText);
+  await runWebSocketContinuationSmokeTest(streamResponseText);
+  await runWebSocketSequentialReuseSmokeTest(streamResponseText);
 
   console.log('Smoke tests passed: HTTP, auto fallback, and WebSocket transports are correct.');
 } finally {
+  disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
 }
@@ -156,6 +159,7 @@ async function runAutoFallbackSmokeTest(streamResponseText) {
 async function runWebSocketTransportSmokeTest(streamResponseText) {
   let capturedUpgrade;
   let capturedClientEvent;
+  let sessionEvent;
   const server = createServer();
   const webSocketServer = new WebSocketServer({ noServer: true });
 
@@ -199,7 +203,10 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
       input: [{ role: 'user', content: 'Ping' }],
       maxOutputTokens: 32,
       token: createCancellationToken(),
-      onTextDelta: (text) => deltas.push(text)
+      onTextDelta: (text) => deltas.push(text),
+      onWebSocketSession: (event) => {
+        sessionEvent = event;
+      }
     });
 
     assertEqual(capturedUpgrade.url, '/backend-api/codex/responses', 'WebSocket upgrade path');
@@ -214,6 +221,150 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
     assertEqual('max_output_tokens' in capturedClientEvent, false, 'WebSocket max output tokens omitted for Codex account auth');
     assertEqual(JSON.stringify(capturedClientEvent.input), JSON.stringify([{ role: 'user', content: 'Ping' }]), 'WebSocket input');
     assertEqual(deltas.join(''), 'hello websocket', 'WebSocket streamed text');
+    assertEqual(sessionEvent?.reused, false, 'WebSocket initial session reuse state');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runWebSocketContinuationSmokeTest(streamResponseText) {
+  let capturedClientEvent;
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', (data) => {
+      capturedClientEvent = JSON.parse(data.toString('utf8'));
+      webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_cont', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'continued' }));
+      webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_cont', status: 'completed' } }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const deltas = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      previousResponseId: 'resp_previous',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Only the delta' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => deltas.push(text)
+    });
+
+    assertEqual(capturedClientEvent.type, 'response.create', 'continuation client event type');
+    assertEqual(capturedClientEvent.previous_response_id, 'resp_previous', 'continuation previous response id');
+    assertEqual(JSON.stringify(capturedClientEvent.input), JSON.stringify([{ role: 'user', content: 'Only the delta' }]), 'continuation delta input');
+    assertEqual(deltas.join(''), 'continued', 'continuation streamed text');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runWebSocketSequentialReuseSmokeTest(streamResponseText) {
+  let upgradeCount = 0;
+  let connectionCount = 0;
+  const receivedEvents = [];
+  const sessionEvents = [];
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    upgradeCount += 1;
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    connectionCount += 1;
+
+    webSocket.on('message', (data) => {
+      const event = JSON.parse(data.toString('utf8'));
+      receivedEvents.push(event);
+
+      if (receivedEvents.length === 1) {
+        webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_reuse_1', status: 'in_progress' } }));
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'first' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_reuse_1', status: 'completed' } }));
+        return;
+      }
+
+      webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_reuse_2', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: ' second' }));
+      webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_reuse_2', status: 'completed' } }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const firstDeltas = [];
+    const secondDeltas = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'First turn' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => firstDeltas.push(text),
+      onWebSocketSession: (event) => {
+        sessionEvents.push(event);
+      }
+    });
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      previousResponseId: 'resp_ws_reuse_1',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Second turn delta' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => secondDeltas.push(text),
+      onWebSocketSession: (event) => {
+        sessionEvents.push(event);
+      }
+    });
+
+    assertEqual(upgradeCount, 1, 'sequential reuse upgrade count');
+    assertEqual(connectionCount, 1, 'sequential reuse connection count');
+    assertEqual(receivedEvents.length, 2, 'sequential reuse message count');
+    assertEqual(receivedEvents[1].previous_response_id, 'resp_ws_reuse_1', 'sequential reuse previous response id');
+    assertEqual(firstDeltas.join(''), 'first', 'sequential reuse first output');
+    assertEqual(secondDeltas.join(''), ' second', 'sequential reuse second output');
+    assertEqual(sessionEvents.length, 2, 'sequential reuse session event count');
+    assertEqual(sessionEvents[0].reused, false, 'sequential reuse first session state');
+    assertEqual(sessionEvents[1].reused, true, 'sequential reuse second session state');
   } finally {
     webSocketServer.close();
     server.close();

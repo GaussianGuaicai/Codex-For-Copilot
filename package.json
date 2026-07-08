@@ -27,7 +27,7 @@
     "compile": "npm run check && node esbuild.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
-    "test:smoke": "node test/smokeResponsesClient.mjs",
+    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeConversationReuse.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },

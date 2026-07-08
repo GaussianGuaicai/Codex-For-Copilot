@@ -10,6 +10,7 @@
 - `provider.ts`: VS Code `LanguageModelChatProvider` implementation and logging.
 - `responsesClient.ts`: shared request builder and the HTTP/WebSocket transport facade for Responses streaming.
 - `convertMessages.ts`: conversion from VS Code chat messages into Responses input items.
+- `responseBranchStore.ts`: in-memory branch reuse cache keyed by normalized request envelope and transcript prefix.
 - `models.ts`: upstream model discovery and provider model shaping.
 
 ## Constraints
@@ -18,3 +19,4 @@
 - Keep ChatGPT Codex compatibility logic centralized in `responsesClient.ts`, `config.ts`, and `secrets.ts`; do not duplicate header or base URL normalization across call sites.
 - WebSocket requests must send `response.create` payloads without the HTTP-only `stream` field.
 - When `transport` is `auto`, only fall back to HTTP for transport availability failures, not for successful in-band model responses.
+- Conversation reuse is allowed only for append-only transcript growth with an identical request envelope; tool or schema changes must bust reuse.

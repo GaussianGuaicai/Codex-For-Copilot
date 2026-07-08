@@ -20,6 +20,20 @@ import type { ResponsesInputMessage } from './convertMessages';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 2;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const REUSABLE_WEBSOCKET_TTL_MS = 10 * 60 * 1000;
+const MAX_REUSABLE_WEBSOCKETS = 32;
+const WEBSOCKET_OPEN = 1;
+const WEBSOCKET_CLOSING = 2;
+const WEBSOCKET_CLOSED = 3;
+
+interface ReusableResponsesWebSocketSession {
+  socket: ResponsesWS;
+  key?: string;
+  inUse: boolean;
+  updatedAt: number;
+}
+
+const reusableWebSocketSessions = new Map<string, ReusableResponsesWebSocketSession>();
 
 export interface CountInputTokensOptions {
   baseURL: string;
@@ -35,6 +49,7 @@ export interface StreamResponseTextOptions {
   apiKey: string;
   headers?: Record<string, string>;
   transport?: 'auto' | 'http' | 'websocket';
+  previousResponseId?: string;
   omitMaxOutputTokens?: boolean;
   model: string;
   instructions: string;
@@ -63,6 +78,22 @@ export interface StreamResponseTextOptions {
     to: 'http';
     reason: string;
   }) => void;
+  onWebSocketSession?: (event: {
+    reused: boolean;
+  }) => void;
+}
+
+export function isResponsesContinuationMissError(error: unknown): error is ResponsesContinuationMissError {
+  return error instanceof ResponsesContinuationMissError;
+}
+
+export function disposeReusableResponsesWebSockets(): void {
+  const sessions = new Set(reusableWebSocketSessions.values());
+  reusableWebSocketSessions.clear();
+
+  for (const session of sessions) {
+    closeReusableWebSocketSession(session);
+  }
 }
 
 export async function streamResponseText(options: StreamResponseTextOptions): Promise<void> {
@@ -140,14 +171,18 @@ async function streamResponseTextOverWebSocket(
   options: StreamResponseTextOptions,
   abortController: AbortController
 ): Promise<void> {
-  const client = createOpenAIClient(options);
-  const socketOptions = (options.headers
-    ? { headers: options.headers }
-    : {}) as ResponsesWSClientOptions;
+  evictReusableWebSocketSessions();
 
-  const socket = new ResponsesWS(client, socketOptions);
+  const reusedSession = takeReusableWebSocketSession(options);
+  const session = reusedSession ?? createReusableWebSocketSession(options);
+  const socket = session.socket;
+  let reusableResponseId: string | undefined;
+  let keepSession = false;
+
+  options.onWebSocketSession?.({ reused: Boolean(reusedSession) });
 
   const closeSocket = (code = 1000, reason = 'OK') => {
+    releaseReusableWebSocketSession(session, undefined, false);
     try {
       socket.close({ code, reason });
     } catch {
@@ -175,7 +210,14 @@ async function streamResponseTextOverWebSocket(
         const message = streamEvent.message;
         handleResponsesServerEvent(message, options);
 
-        if (message.type === 'response.completed' || message.type === 'response.failed') {
+        if (message.type === 'response.completed') {
+          sawTerminalEvent = true;
+          reusableResponseId = message.response.id ?? reusableResponseId;
+          keepSession = Boolean(reusableResponseId) && isReusableWebSocketSessionOpen(session);
+          return;
+        }
+
+        if (message.type === 'response.failed') {
           sawTerminalEvent = true;
           closeSocket();
           return;
@@ -185,10 +227,21 @@ async function streamResponseTextOverWebSocket(
       }
 
       if (streamEvent.type === 'error') {
+        if (options.previousResponseId && isPreviousResponseNotFoundError(streamEvent.error.error?.code, streamEvent.error.error?.message)) {
+          releaseReusableWebSocketSession(session, undefined, false);
+          throw new ResponsesContinuationMissError(
+            streamEvent.error.error?.message ?? streamEvent.error.message,
+            options.previousResponseId,
+            { cause: streamEvent.error }
+          );
+        }
+
         if (!sawResponseActivity) {
+          releaseReusableWebSocketSession(session, undefined, false);
           throw new WebSocketTransportUnavailableError(streamEvent.error.message, { cause: streamEvent.error });
         }
 
+        releaseReusableWebSocketSession(session, undefined, false);
         throw streamEvent.error;
       }
 
@@ -200,19 +253,140 @@ async function streamResponseTextOverWebSocket(
         const message = streamEvent.reason || `WebSocket closed with code ${streamEvent.code}.`;
 
         if (!sawResponseActivity) {
+          releaseReusableWebSocketSession(session, undefined, false);
           throw new WebSocketTransportUnavailableError(message);
         }
 
+        releaseReusableWebSocketSession(session, undefined, false);
         throw new Error(message);
       }
     }
 
     if (!sawTerminalEvent && !options.token.isCancellationRequested && !abortController.signal.aborted) {
+      releaseReusableWebSocketSession(session, undefined, false);
       throw new Error('Responses WebSocket stream ended before the response completed.');
     }
   } finally {
     abortController.signal.removeEventListener('abort', abortListener);
-    closeSocket();
+
+    if (keepSession) {
+      releaseReusableWebSocketSession(session, reusableResponseId, true);
+    } else if (!options.token.isCancellationRequested && !abortController.signal.aborted) {
+      releaseReusableWebSocketSession(session, undefined, false);
+    }
+  }
+}
+
+function createReusableWebSocketSession(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): ReusableResponsesWebSocketSession {
+  const client = createOpenAIClient(options);
+  const socketOptions = (options.headers
+    ? { headers: options.headers }
+    : {}) as ResponsesWSClientOptions;
+
+  return {
+    socket: new ResponsesWS(client, socketOptions),
+    inUse: true,
+    updatedAt: Date.now()
+  };
+}
+
+function takeReusableWebSocketSession(options: Pick<StreamResponseTextOptions, 'previousResponseId'>): ReusableResponsesWebSocketSession | undefined {
+  if (!options.previousResponseId) {
+    return undefined;
+  }
+
+  const session = reusableWebSocketSessions.get(options.previousResponseId);
+  if (!session) {
+    return undefined;
+  }
+
+  reusableWebSocketSessions.delete(options.previousResponseId);
+  session.key = undefined;
+
+  if (session.inUse || !isReusableWebSocketSessionOpen(session)) {
+    closeReusableWebSocketSession(session);
+    return undefined;
+  }
+
+  session.inUse = true;
+  session.updatedAt = Date.now();
+  return session;
+}
+
+function releaseReusableWebSocketSession(
+  session: ReusableResponsesWebSocketSession,
+  responseId: string | undefined,
+  keepAlive: boolean
+): void {
+  if (!keepAlive || !responseId || !isReusableWebSocketSessionOpen(session)) {
+    closeReusableWebSocketSession(session);
+    return;
+  }
+
+  if (session.key) {
+    reusableWebSocketSessions.delete(session.key);
+  }
+
+  session.inUse = false;
+  session.key = responseId;
+  session.updatedAt = Date.now();
+  reusableWebSocketSessions.set(responseId, session);
+  evictReusableWebSocketSessions();
+}
+
+function closeReusableWebSocketSession(session: ReusableResponsesWebSocketSession): void {
+  if (session.key) {
+    reusableWebSocketSessions.delete(session.key);
+    session.key = undefined;
+  }
+
+  session.inUse = false;
+  session.updatedAt = Date.now();
+
+  if (session.socket.socket.readyState === WEBSOCKET_CLOSED || session.socket.socket.readyState === WEBSOCKET_CLOSING) {
+    return;
+  }
+
+  try {
+    session.socket.close({ code: 1000, reason: 'OK' });
+  } catch {
+    // Best effort close for session disposal.
+  }
+}
+
+function isReusableWebSocketSessionOpen(session: ReusableResponsesWebSocketSession): boolean {
+  return session.socket.socket.readyState === WEBSOCKET_OPEN;
+}
+
+function evictReusableWebSocketSessions(): void {
+  const now = Date.now();
+
+  for (const [key, session] of reusableWebSocketSessions.entries()) {
+    if (session.inUse) {
+      continue;
+    }
+
+    if (now - session.updatedAt > REUSABLE_WEBSOCKET_TTL_MS || !isReusableWebSocketSessionOpen(session)) {
+      reusableWebSocketSessions.delete(key);
+      closeReusableWebSocketSession(session);
+    }
+  }
+
+  if (reusableWebSocketSessions.size <= MAX_REUSABLE_WEBSOCKETS) {
+    return;
+  }
+
+  const sessionsByAge = [...reusableWebSocketSessions.entries()]
+    .sort((left, right) => left[1].updatedAt - right[1].updatedAt);
+
+  while (reusableWebSocketSessions.size > MAX_REUSABLE_WEBSOCKETS && sessionsByAge.length > 0) {
+    const oldest = sessionsByAge.shift();
+    if (!oldest) {
+      break;
+    }
+
+    reusableWebSocketSessions.delete(oldest[0]);
+    closeReusableWebSocketSession(oldest[1]);
   }
 }
 
@@ -235,6 +409,7 @@ function buildResponsesCreateRequest(options: StreamResponseTextOptions) {
     input: options.input,
     stream: true,
     store: false,
+    ...(options.previousResponseId ? { previous_response_id: options.previousResponseId } : {}),
     ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
     ...(options.reasoning ? { reasoning: options.reasoning } : {}),
     ...(tools.length > 0
@@ -284,6 +459,14 @@ function handleResponsesServerEvent(event: ResponsesServerEvent, options: Stream
 
   if (event.type === 'response.failed') {
     const error = event.response.error;
+
+    if (options.previousResponseId && isPreviousResponseNotFoundError(error?.code, error?.message)) {
+      throw new ResponsesContinuationMissError(
+        error?.message ?? 'Responses API previous_response_id was not found.',
+        options.previousResponseId
+      );
+    }
+
     options.onResponseFailed?.(error?.message ?? 'Responses API request failed.');
     throw new Error(error?.message ?? 'Responses API request failed.');
   }
@@ -305,6 +488,17 @@ class WebSocketTransportUnavailableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = 'WebSocketTransportUnavailableError';
+  }
+}
+
+class ResponsesContinuationMissError extends Error {
+  constructor(
+    message: string,
+    readonly previousResponseId: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'ResponsesContinuationMissError';
   }
 }
 
@@ -370,6 +564,14 @@ function parseToolCallInput(argumentsJson: string): object {
   } catch {
     return { _raw: argumentsJson };
   }
+}
+
+function isPreviousResponseNotFoundError(code: unknown, message: unknown): boolean {
+  if (code === 'previous_response_not_found') {
+    return true;
+  }
+
+  return typeof message === 'string' && message.includes('previous_response_not_found');
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {
