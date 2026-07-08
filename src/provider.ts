@@ -25,6 +25,10 @@ export interface UsageSink {
   }): void;
 }
 
+export interface SelectedModelSink {
+  setSelectedModel(model: string): void;
+}
+
 export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
@@ -37,7 +41,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly outputChannel: vscode.LogOutputChannel,
-    private readonly usageSink?: UsageSink
+    private readonly usageSink?: UsageSink,
+    private readonly selectedModelSink?: SelectedModelSink
   ) {
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     this.context.subscriptions.push(
@@ -111,6 +116,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     const selectedModel = parseModelIdentifier(model.id || config.model);
+    this.selectedModelSink?.setSelectedModel(selectedModel.requestModel);
     const reasoningEffort = getReasoningEffort(
       selectedModel.reasoningEffort,
       options as RuntimeProvideLanguageModelChatResponseOptions,

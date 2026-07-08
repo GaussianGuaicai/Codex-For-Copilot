@@ -27,7 +27,7 @@
     "compile": "npm run check && node esbuild.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
-    "test:smoke": "node test/smokeResponsesClient.mjs",
+    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeAccountUsage.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
@@ -73,6 +73,10 @@
       {
         "command": "codexModelProvider.showLastUsage",
         "title": "Codex: View Last Usage"
+      },
+      {
+        "command": "codexModelProvider.refreshAccountLimits",
+        "title": "Codex: Refresh Account Limits"
       }
     ],
     "configuration": {
