@@ -211,7 +211,7 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
 
     assertEqual(capturedUpgrade.url, '/backend-api/codex/responses', 'WebSocket upgrade path');
     assertEqual(capturedUpgrade.authorization, 'Bearer test-api-key', 'WebSocket authorization header');
-    assertEqual(capturedUpgrade.userAgent, 'local.codex-for-copilot/1.0.0 Codex-Extension', 'WebSocket user agent');
+    assertEqual(capturedUpgrade.userAgent, 'local.codex-for-copilot/1.0.1 Codex-Extension', 'WebSocket user agent');
     assertEqual(capturedUpgrade.accountId, 'acct-test', 'WebSocket ChatGPT account id header');
     assertEqual(capturedClientEvent.type, 'response.create', 'WebSocket client event type');
     assertEqual(capturedClientEvent.model, 'gpt-5.5', 'WebSocket model');
@@ -373,7 +373,7 @@ async function runWebSocketSequentialReuseSmokeTest(streamResponseText) {
 
 function createHeaders() {
   return {
-    'User-Agent': 'local.codex-for-copilot/1.0.0 Codex-Extension',
+    'User-Agent': 'local.codex-for-copilot/1.0.1 Codex-Extension',
     'ChatGPT-Account-ID': 'acct-test'
   };
 }
@@ -389,7 +389,7 @@ function assertHttpRequest(capturedRequest, expectedUrl) {
   assertEqual(capturedRequest.method, 'POST', 'method');
   assertEqual(capturedRequest.url, expectedUrl, 'request path');
   assertEqual(capturedRequest.authorization, 'Bearer test-api-key', 'authorization header');
-  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot/1.0.0 Codex-Extension', 'user agent');
+  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot/1.0.1 Codex-Extension', 'user agent');
   assertEqual(capturedRequest.accountId, 'acct-test', 'ChatGPT account id header');
   assertEqual(capturedRequest.body.model, 'gpt-5.5', 'model');
   assertEqual(capturedRequest.body.instructions, 'Smoke test instructions', 'top-level instructions');

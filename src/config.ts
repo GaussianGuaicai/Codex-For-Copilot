@@ -16,7 +16,6 @@ export interface ProviderConfig {
   defaultServiceTier?: 'default' | 'fast';
   defaultReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   maxOutputTokens: number;
-  showUsageInStatusBar: boolean;
   modelPricingUsdPerMTok: Record<string, ModelPricing>;
 }
 
@@ -33,7 +32,6 @@ export function getProviderConfig(): ProviderConfig {
     defaultServiceTier: normalizeDefaultServiceTier(config.get('defaultServiceTier', 'auto')),
     defaultReasoningEffort: normalizeDefaultReasoningEffort(config.get('defaultReasoningEffort', 'auto')),
     maxOutputTokens: config.get('maxOutputTokens', 8192),
-    showUsageInStatusBar: config.get('showUsageInStatusBar', true),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };
 }

@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import * as vscode from 'vscode';
 
 export const API_KEY_SECRET = 'codexModelProvider.apiKey';
-export const DEFAULT_USER_AGENT = 'local.codex-for-copilot/1.0.0 Codex-Extension';
+export const DEFAULT_USER_AGENT = 'local.codex-for-copilot/1.0.1 Codex-Extension';
 
 export interface ApiCredentials {
   apiKey: string;
   headers: Record<string, string>;
   source: 'secretStorage' | 'codexAuth';
+  kind: 'codexAccessToken' | 'openaiApiKey';
   omitMaxOutputTokens: boolean;
 }
 
@@ -66,6 +67,7 @@ async function readCodexAuthCredentials(): Promise<ApiCredentials | undefined> {
         apiKey: auth.tokens.access_token.trim(),
         headers,
         source: 'codexAuth',
+        kind: 'codexAccessToken',
         omitMaxOutputTokens: true
       };
     }
@@ -75,6 +77,7 @@ async function readCodexAuthCredentials(): Promise<ApiCredentials | undefined> {
         apiKey: auth.OPENAI_API_KEY.trim(),
         headers: { 'User-Agent': DEFAULT_USER_AGENT },
         source: 'codexAuth',
+        kind: 'openaiApiKey',
         omitMaxOutputTokens: false
       };
     }
@@ -92,6 +95,7 @@ async function readSecretStorageCredentials(context: vscode.ExtensionContext): P
       apiKey: stored.trim(),
       headers: { 'User-Agent': DEFAULT_USER_AGENT },
       source: 'secretStorage',
+      kind: 'openaiApiKey',
       omitMaxOutputTokens: false
     };
   }

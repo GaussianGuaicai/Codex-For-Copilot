@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -27,7 +27,7 @@
     "compile": "npm run check && node esbuild.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
-    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeConversationReuse.mjs",
+    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
@@ -72,8 +72,8 @@
         "title": "Codex: Clear API Key"
       },
       {
-        "command": "codexModelProvider.showLastUsage",
-        "title": "Codex: View Last Usage"
+        "command": "codexModelProvider.refreshAccountLimits",
+        "title": "Codex: Refresh Account Limits"
       }
     ],
     "configuration": {
@@ -181,11 +181,6 @@
           "tags": [
             "advanced"
           ]
-        },
-        "codexModelProvider.showUsageInStatusBar": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show last completed Codex response usage in the VS Code status bar."
         },
         "codexModelProvider.modelPricingUsdPerMTok": {
           "type": "object",

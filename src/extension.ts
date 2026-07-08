@@ -1,16 +1,16 @@
 import * as vscode from 'vscode';
+import { CodexAccountUsageStatusBar } from './accountUsageStatusBar';
 import { CodexModelProvider } from './provider';
 import { clearApiKey, setApiKey } from './secrets';
-import { UsageStatusBar } from './usageStatusBar';
 
 export function activate(context: vscode.ExtensionContext): void {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
-  const usageStatusBar = new UsageStatusBar(context);
-  const provider = new CodexModelProvider(context, outputChannel, usageStatusBar);
+  const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, outputChannel);
+  const provider = new CodexModelProvider(context, outputChannel, undefined, accountUsageStatusBar, accountUsageStatusBar);
 
   context.subscriptions.push(
     outputChannel,
-    usageStatusBar,
+    accountUsageStatusBar,
     vscode.lm.registerLanguageModelChatProvider('codex-for-copilot', provider),
     vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
       outputChannel.show(true);
@@ -35,17 +35,18 @@ export function activate(context: vscode.ExtensionContext): void {
       await clearApiKey(context);
       vscode.window.showInformationMessage('Responses API key cleared.');
     }),
-    vscode.commands.registerCommand('codexModelProvider.showLastUsage', async () => {
-      await usageStatusBar.showLastUsage();
+    vscode.commands.registerCommand('codexModelProvider.refreshAccountLimits', async () => {
+      await accountUsageStatusBar.refresh();
+      await accountUsageStatusBar.showDetails();
     }),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['View Last Usage', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Refresh Account Limits', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex' }
       );
 
-      if (action === 'View Last Usage') {
-        await vscode.commands.executeCommand('codexModelProvider.showLastUsage');
+      if (action === 'Refresh Account Limits') {
+        await vscode.commands.executeCommand('codexModelProvider.refreshAccountLimits');
       } else if (action === 'Open Debug Logs') {
         await vscode.commands.executeCommand('codexModelProvider.openDebugLogs');
       } else if (action === 'Set API Key') {
