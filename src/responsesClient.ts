@@ -10,6 +10,8 @@ import type { FunctionTool, ResponseUsage, ToolChoiceOptions } from 'openai/reso
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
+import type { CodexAuthManager } from './auth/codexAuthManager';
+import { codexFetch } from './auth/codexAuthRequest';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 2;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -18,6 +20,7 @@ export interface CountInputTokensOptions {
   baseURL: string;
   apiKey: string;
   headers?: Record<string, string>;
+  authManager?: CodexAuthManager;
   model: string;
   input: string | ResponsesInputMessage[];
   token: vscode.CancellationToken;
@@ -145,11 +148,10 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
 }
 
 export async function countInputTokens(options: CountInputTokensOptions): Promise<number> {
-  const response = await fetch(`${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, {
+  const init = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${options.apiKey}`,
       ...options.headers
     },
     body: JSON.stringify({
@@ -157,7 +159,16 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
       input: options.input
     }),
     signal: toAbortSignal(options.token)
-  });
+  };
+  const response = options.authManager
+    ? await codexFetch(options.authManager, `${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, init)
+    : await fetch(`${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, {
+        ...init,
+        headers: {
+          ...init.headers,
+          Authorization: `Bearer ${options.apiKey}`
+        }
+      });
 
   if (!response.ok) {
     const body = await safeReadResponseBody(response);

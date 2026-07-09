@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { ProviderConfig } from './config';
 import type { ApiCredentials } from './secrets';
 import { normalizeBaseURL } from './responsesClient';
+import { codexFetch } from './auth/codexAuthRequest';
 
 const REASONING_ID_DELIMITER = '::reasoning=';
 const PROVIDER_MODEL_ID_PREFIX = 'codex::';
@@ -110,14 +111,20 @@ export async function fetchAvailableModels(
   const modelsURL = new URL(`${normalizeBaseURL(config.baseURL)}/models`);
   modelsURL.searchParams.set('client_version', config.clientVersion);
 
-  const response = await fetch(modelsURL, {
+  const init = {
     method: 'GET',
-    headers: {
-      Authorization: `Bearer ${credentials.apiKey}`,
-      ...credentials.headers
-    },
+    headers: credentials.headers,
     signal: toAbortSignal(token)
-  });
+  };
+  const response = credentials.authManager
+    ? await codexFetch(credentials.authManager, modelsURL, init)
+    : await fetch(modelsURL, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${credentials.apiKey}`,
+          ...credentials.headers
+        }
+      });
 
   if (!response.ok) {
     throw new Error(`Model discovery failed with ${response.status} ${response.statusText}`);
