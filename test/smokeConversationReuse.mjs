@@ -111,6 +111,8 @@ try {
   runToolOrderReuseKeySmokeTest(buildResponseBranchReuseKey);
   runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore);
   runImageToolResultSmokeTest(convertMessagesToResponsesInput);
+  runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
+  runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
 
   console.log('Smoke tests passed: conversation reuse comparison and branch storage are correct.');
 } finally {
@@ -329,6 +331,93 @@ function runImageToolResultSmokeTest(convertMessagesToResponsesInput) {
   const convertedDataUrlResult = convertMessagesToResponsesInput([dataUrlMessage]);
   assertEqual(convertedDataUrlResult[0].output[0].type, 'input_image', 'data url tool result content type');
   assertEqual(convertedDataUrlResult[0].output[0].image_url, 'data:image/png;base64,AQIDBA==', 'data url tool result content value');
+}
+
+function runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore) {
+  const previousImageResult = convertMessagesToResponsesInput([{
+    role: vscodeStub.LanguageModelChatMessageRole.User,
+    content: [
+      new vscodeStub.LanguageModelToolResultPart('call_prev_image', [
+        vscodeStub.LanguageModelDataPart.image(new Uint8Array([1, 2, 3, 4]), 'image/png')
+      ])
+    ]
+  }])[0];
+
+  const replayedImageResult = convertMessagesToResponsesInput([{
+    role: vscodeStub.LanguageModelChatMessageRole.User,
+    content: [
+      new vscodeStub.LanguageModelToolResultPart('call_replayed_image', [
+        new vscodeStub.LanguageModelTextPart('[Image was previously shown to you. Image URI: vscode-chat-response-resource://session/tool/call/file.png]')
+      ])
+    ]
+  }])[0];
+
+  const previousInput = [
+    { type: 'message', role: 'user', content: 'Analyze this screenshot.' },
+    { type: 'function_call', call_id: 'call_prev_image', name: 'view_image', arguments: '{"filePath":"before.png"}' },
+    previousImageResult
+  ];
+  const currentInput = [
+    { type: 'message', role: 'user', content: 'Analyze this screenshot.' },
+    { type: 'function_call', call_id: 'call_replayed_image', name: 'view_image', arguments: '{"filePath":"before.png"}' },
+    replayedImageResult,
+    { type: 'message', role: 'user', content: 'Now continue.' }
+  ];
+
+  const comparison = compareResponsesInputHistory(previousInput, currentInput);
+  assertEqual(comparison.kind, 'append', 'image placeholder comparison kind');
+  assertEqual(comparison.matchedPrefixCount, previousInput.length, 'image placeholder matched prefix count');
+  assertEqual(JSON.stringify(comparison.appendedInput), JSON.stringify([currentInput[3]]), 'image placeholder delta');
+
+  const store = new ResponseBranchStore();
+  store.recordSuccess('reuse-key-image-placeholder', previousInput, 'resp_image_placeholder');
+  const reusableMatch = store.findReusableBranch('reuse-key-image-placeholder', currentInput);
+  assertEqual(reusableMatch?.responseId, 'resp_image_placeholder', 'image placeholder reuse previous response id');
+  assertEqual(JSON.stringify(reusableMatch?.comparison.appendedInput ?? []), JSON.stringify([currentInput[3]]), 'image placeholder reuse delta');
+}
+
+function runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore) {
+  const previousImageResult = convertMessagesToResponsesInput([{
+    role: vscodeStub.LanguageModelChatMessageRole.User,
+    content: [
+      new vscodeStub.LanguageModelToolResultPart('call_prev_image_annotation', [
+        vscodeStub.LanguageModelDataPart.image(new Uint8Array([1, 2, 3, 4]), 'image/png'),
+        new vscodeStub.LanguageModelTextPart('\n[Image URI: vscode-chat-response-resource://session/tool/call_prev_image_annotation/0/file.png]')
+      ])
+    ]
+  }])[0];
+
+  const replayedImageResult = convertMessagesToResponsesInput([{
+    role: vscodeStub.LanguageModelChatMessageRole.User,
+    content: [
+      new vscodeStub.LanguageModelToolResultPart('call_replayed_image_annotation', [
+        new vscodeStub.LanguageModelTextPart('[Image was previously shown to you. Image URI: vscode-chat-response-resource://session/tool/call_replayed_image_annotation/0/file.png]')
+      ])
+    ]
+  }])[0];
+
+  const previousInput = [
+    { type: 'message', role: 'user', content: 'Inspect the first screenshot.' },
+    { type: 'function_call', call_id: 'call_prev_image_annotation', name: 'view_image', arguments: '{"filePath":"before.png"}' },
+    previousImageResult
+  ];
+  const currentInput = [
+    { type: 'message', role: 'user', content: 'Inspect the first screenshot.' },
+    { type: 'function_call', call_id: 'call_replayed_image_annotation', name: 'view_image', arguments: '{"filePath":"before.png"}' },
+    replayedImageResult,
+    { type: 'message', role: 'user', content: 'Continue from that image.' }
+  ];
+
+  const comparison = compareResponsesInputHistory(previousInput, currentInput);
+  assertEqual(comparison.kind, 'append', 'image URI annotation comparison kind');
+  assertEqual(comparison.matchedPrefixCount, previousInput.length, 'image URI annotation matched prefix count');
+  assertEqual(JSON.stringify(comparison.appendedInput), JSON.stringify([currentInput[3]]), 'image URI annotation delta');
+
+  const store = new ResponseBranchStore();
+  store.recordSuccess('reuse-key-image-uri-annotation', previousInput, 'resp_image_uri_annotation');
+  const reusableMatch = store.findReusableBranch('reuse-key-image-uri-annotation', currentInput);
+  assertEqual(reusableMatch?.responseId, 'resp_image_uri_annotation', 'image URI annotation reuse previous response id');
+  assertEqual(JSON.stringify(reusableMatch?.comparison.appendedInput ?? []), JSON.stringify([currentInput[3]]), 'image URI annotation reuse delta');
 }
 
 function assertEqual(actual, expected, label) {

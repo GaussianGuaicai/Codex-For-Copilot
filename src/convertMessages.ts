@@ -26,6 +26,9 @@ const textDecoder = new TextDecoder();
 const USAGE_DATA_PART_MIME = 'usage';
 const CACHE_CONTROL_DATA_PART_MIME = 'cache_control';
 const IMAGE_DATA_URL_PATTERN = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i;
+const HISTORY_IMAGE_URI_PLACEHOLDER_PATTERN = /^\[Image was previously shown to you\. Image URI: ([^\]]+)\]$/;
+const HISTORY_IMAGE_URI_ANNOTATION_PATTERN = /^\s*\[Image URI: ([^\]]+)\]\s*$/;
+const IGNORED_HISTORY_CONTENT = Symbol('ignored-history-content');
 
 export function convertMessagesToResponsesInput(messages: readonly vscode.LanguageModelChatRequestMessage[]): ResponsesInputMessage[] {
   return messages.flatMap((message) => convertMessageToResponsesInput(message));
@@ -413,15 +416,173 @@ function normalizeHistoryItemForComparison(
     callIdAliases: Map<string, string>;
     nextCallOrdinal: number;
   }
-): ResponsesInputMessage {
-  if (item.type !== 'function_call' && item.type !== 'function_call_output') {
-    return item;
+): unknown {
+  if (item.type === 'message') {
+    return {
+      ...item,
+      content: normalizeHistoryRichContentForComparison(item.content, 'message')
+    };
   }
 
+  if (item.type === 'function_call') {
+    return {
+      ...item,
+      call_id: canonicalizeHistoryCallId(item.call_id, state)
+    };
+  }
+
+  if (item.type === 'function_call_output') {
+    const canonicalCallId = canonicalizeHistoryCallId(item.call_id, state);
+    return {
+      ...item,
+      call_id: canonicalCallId,
+      output: normalizeHistoryRichContentForComparison(item.output, `${canonicalCallId}:output`)
+    };
+  }
+
+  return item;
+}
+
+function normalizeHistoryRichContentForComparison(content: unknown, imageRefPrefix: string): unknown {
+  const imageOrdinal = { current: 1 };
+  if (typeof content === 'string') {
+    const normalizedImage = normalizeHistoryImageString(content, imageRefPrefix, imageOrdinal);
+    if (normalizedImage) {
+      return [normalizedImage];
+    }
+  }
+
+  const normalized = normalizeHistoryRichContentNode(content, imageRefPrefix, imageOrdinal, true);
+  return normalized === IGNORED_HISTORY_CONTENT ? [] : normalized;
+}
+
+function normalizeHistoryRichContentNode(
+  value: unknown,
+  imageRefPrefix: string,
+  imageOrdinal: { current: number },
+  allowBareStringImage: boolean
+): unknown {
+  if (typeof value === 'string') {
+    if (allowBareStringImage) {
+      const normalizedImage = normalizeHistoryImageString(value, imageRefPrefix, imageOrdinal);
+      if (normalizedImage) {
+        return normalizedImage;
+      }
+    }
+
+    if (isIgnorableHistoryText(value)) {
+      return IGNORED_HISTORY_CONTENT;
+    }
+
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => normalizeHistoryRichContentNode(entry, imageRefPrefix, imageOrdinal, true))
+      .filter((entry) => entry !== IGNORED_HISTORY_CONTENT);
+  }
+
+  if (typeof value !== 'object' || value === null) {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.type === 'input_image') {
+    return createNormalizedHistoryImage(record, imageRefPrefix, imageOrdinal);
+  }
+
+  if (record.type === 'input_text' && typeof record.text === 'string') {
+    const normalizedImage = normalizeHistoryImageString(record.text, imageRefPrefix, imageOrdinal);
+    if (normalizedImage) {
+      return normalizedImage;
+    }
+
+    if (isIgnorableHistoryText(record.text)) {
+      return IGNORED_HISTORY_CONTENT;
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entryValue]) => [
+      key,
+      normalizeHistoryRichContentNode(entryValue, imageRefPrefix, imageOrdinal, false)
+    ])
+  );
+}
+
+function normalizeHistoryImageString(
+  value: string,
+  imageRefPrefix: string,
+  imageOrdinal: { current: number }
+): Record<string, unknown> | undefined {
+  const trimmed = value.trim();
+  if (!IMAGE_DATA_URL_PATTERN.test(trimmed) && !HISTORY_IMAGE_URI_PLACEHOLDER_PATTERN.test(trimmed)) {
+    return undefined;
+  }
+
+  return createNormalizedHistoryImage({
+    type: 'input_image',
+    detail: 'auto',
+    image_url: trimmed
+  }, imageRefPrefix, imageOrdinal);
+}
+
+function isIgnorableHistoryText(value: string): boolean {
+  return HISTORY_IMAGE_URI_ANNOTATION_PATTERN.test(value.trim());
+}
+
+function createNormalizedHistoryImage(
+  image: Record<string, unknown>,
+  imageRefPrefix: string,
+  imageOrdinal: { current: number }
+): Record<string, unknown> {
+  const comparisonImageRef = `${imageRefPrefix}:image_${imageOrdinal.current++}`;
+  const imageURL = typeof image.image_url === 'string' ? image.image_url.trim() : undefined;
+
   return {
-    ...item,
-    call_id: canonicalizeHistoryCallId(item.call_id, state)
+    type: 'input_image',
+    detail: image.detail ?? 'auto',
+    comparison_image_ref: comparisonImageRef,
+    comparison_media_type: inferComparisonImageMediaType(imageURL)
   };
+}
+
+function inferComparisonImageMediaType(imageURL: string | undefined): string | undefined {
+  if (!imageURL) {
+    return undefined;
+  }
+
+  const dataUrlMatch = /^data:(image\/[a-z0-9.+-]+);base64,/i.exec(imageURL);
+  if (dataUrlMatch) {
+    return dataUrlMatch[1].toLowerCase();
+  }
+
+  const placeholderMatch = HISTORY_IMAGE_URI_PLACEHOLDER_PATTERN.exec(imageURL);
+  if (!placeholderMatch) {
+    return undefined;
+  }
+
+  const extensionMatch = /\.([a-z0-9]+)$/i.exec(placeholderMatch[1]);
+  if (!extensionMatch) {
+    return undefined;
+  }
+
+  switch (extensionMatch[1].toLowerCase()) {
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    case 'bmp':
+      return 'image/bmp';
+    default:
+      return `image/${extensionMatch[1].toLowerCase()}`;
+  }
 }
 
 function canonicalizeHistoryCallId(
