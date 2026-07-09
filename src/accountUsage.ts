@@ -1,5 +1,6 @@
 import { normalizeBaseURL } from './responsesClient';
 import type { ApiCredentials } from './secrets';
+import { codexFetch } from './auth/codexAuthRequest';
 
 const FIVE_HOUR_WINDOW_MINUTES = 300;
 const WEEKLY_WINDOW_MINUTES = 10080;
@@ -41,15 +42,23 @@ export async function fetchCodexAccountUsage(options: {
 
   const errors: string[] = [];
   for (const usageURL of getCodexAccountUsageURLs(options.baseURL)) {
-    const response = await fetch(usageURL, {
+    const requestInit = {
       method: 'GET',
       headers: {
         Accept: 'application/json',
-        Authorization: `Bearer ${options.credentials.apiKey}`,
         ...options.credentials.headers
       },
       signal: options.signal
-    });
+    };
+    const response = options.credentials.authManager
+      ? await codexFetch(options.credentials.authManager, usageURL, requestInit)
+      : await fetch(usageURL, {
+          ...requestInit,
+          headers: {
+            Authorization: `Bearer ${options.credentials.apiKey}`,
+            ...requestInit.headers
+          }
+        });
 
     if (!response.ok) {
       errors.push(`${usageURL}: ${response.status} ${response.statusText}`);

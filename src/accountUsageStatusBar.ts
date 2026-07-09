@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { buildCodexAccountUsageDisplay, fetchCodexAccountUsage, type CodexAccountUsageSnapshot } from './accountUsage';
+import type { CodexAuthManager } from './auth/codexAuthManager';
 import { getProviderConfig } from './config';
 import { getApiCredentials } from './secrets';
 
@@ -15,7 +16,8 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly outputChannel: vscode.LogOutputChannel
+    private readonly outputChannel: vscode.LogOutputChannel,
+    private readonly authManager?: CodexAuthManager
   ) {
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
     this.statusBarItem.name = 'Codex Account Limits';
@@ -85,7 +87,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
 
   private async refreshNow(): Promise<void> {
     const config = getProviderConfig();
-    const credentials = await getApiCredentials(this.context);
+    const credentials = await getApiCredentials(this.context, this.authManager);
 
     if (!credentials || credentials.kind !== 'codexAccessToken') {
       this.lastSnapshot = undefined;

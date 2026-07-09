@@ -9,12 +9,12 @@ import { clearApiKey, setApiKey } from './secrets';
 
 export function activate(context: vscode.ExtensionContext): void {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
-  const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, outputChannel);
   void vscode.workspace.fs.createDirectory(context.globalStorageUri);
   const authManager = new CodexAuthManager(
     new CodexSecretStore(context.secrets),
     new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, 'codex-auth-refresh.lock'))
   );
+  const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, outputChannel, authManager);
   const provider = new CodexModelProvider(context, outputChannel, undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
 
   context.subscriptions.push(
