@@ -8,6 +8,7 @@ import { build } from 'esbuild';
 const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-auth-'));
 const bundlePath = join(tempDir, 'auth.cjs');
 const entryPath = join(tempDir, 'auth-entry.ts');
+const repoImport = (relativePath) => JSON.stringify(join(process.cwd(), relativePath));
 const require = createRequire(import.meta.url);
 const moduleLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
@@ -20,10 +21,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 await import('node:fs/promises').then(({ writeFile }) => writeFile(entryPath, `
-export * from '${process.cwd()}/src/auth/codexAuthJsonImporter';
-export * from '${process.cwd()}/src/auth/codexJwt';
-export * from '${process.cwd()}/src/auth/codexAuthManager';
-export * from '${process.cwd()}/src/auth/codexAuthRequest';
+export * from ${repoImport('src/auth/codexAuthJsonImporter')};
+export * from ${repoImport('src/auth/codexJwt')};
+export * from ${repoImport('src/auth/codexAuthManager')};
+export * from ${repoImport('src/auth/codexAuthRequest')};
 `));
 
 await build({
