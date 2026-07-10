@@ -12,6 +12,11 @@ export interface ReusableResponseBranchMatch {
   comparison: ResponsesInputHistoryComparison;
 }
 
+export interface ResponseBranchReuseEnvelope {
+  identityKey: string;
+  toolSignatures?: ResponseBranchToolSignatures;
+}
+
 export interface ResponseBranchReuseMissDiagnostic {
   branchId: string;
   responseId: string;
@@ -20,11 +25,20 @@ export interface ResponseBranchReuseMissDiagnostic {
   currentInputCount: number;
   previousNextItemSummary: string | null;
   currentNextItemSummary: string | null;
+  toolCompatibility?: ResponseBranchToolCompatibility;
+}
+
+export type ResponseBranchToolSignatures = Readonly<Record<string, string>>;
+
+export interface ResponseBranchToolCompatibility {
+  compatible: boolean;
+  missingToolNames: string[];
+  changedToolNames: string[];
 }
 
 interface ResponseBranchEntry {
   id: string;
-  reuseKey: string;
+  envelope: ResponseBranchReuseEnvelope;
   input: ResponsesInputMessage[];
   continuationInput: ResponsesInputMessage[];
   responseId: string;
@@ -41,10 +55,13 @@ export class ResponseBranchStore {
     private readonly maxBranches = 64
   ) {}
 
-  findReusableBranch(reuseKey: string, currentInput: readonly ResponsesInputMessage[]): ReusableResponseBranchMatch | undefined {
+  findReusableBranch(
+    envelope: ResponseBranchReuseEnvelope,
+    currentInput: readonly ResponsesInputMessage[]
+  ): ReusableResponseBranchMatch | undefined {
     this.evictExpiredEntries();
 
-    if (this.disabledReuseKeys.has(reuseKey)) {
+    if (this.disabledReuseKeys.has(envelope.identityKey)) {
       return undefined;
     }
 
@@ -53,7 +70,11 @@ export class ResponseBranchStore {
     let bestMatch: ReusableResponseBranchMatch | undefined;
 
     for (const branch of this.branches.values()) {
-      if (branch.reuseKey !== reuseKey) {
+      if (branch.envelope.identityKey !== envelope.identityKey) {
+        continue;
+      }
+
+      if (!compareToolSignatures(branch.envelope.toolSignatures, envelope.toolSignatures).compatible) {
         continue;
       }
 
@@ -74,10 +95,13 @@ export class ResponseBranchStore {
     return bestMatch;
   }
 
-  explainReuseMiss(reuseKey: string, currentInput: readonly ResponsesInputMessage[]): ResponseBranchReuseMissDiagnostic | undefined {
+  explainReuseMiss(
+    envelope: ResponseBranchReuseEnvelope,
+    currentInput: readonly ResponsesInputMessage[]
+  ): ResponseBranchReuseMissDiagnostic | undefined {
     this.evictExpiredEntries();
 
-    if (this.disabledReuseKeys.has(reuseKey)) {
+    if (this.disabledReuseKeys.has(envelope.identityKey)) {
       return undefined;
     }
 
@@ -86,10 +110,11 @@ export class ResponseBranchStore {
     let bestDiagnostic: ResponseBranchReuseMissDiagnostic | undefined;
 
     for (const branch of this.branches.values()) {
-      if (branch.reuseKey !== reuseKey) {
+      if (branch.envelope.identityKey !== envelope.identityKey) {
         continue;
       }
 
+      const toolCompatibility = compareToolSignatures(branch.envelope.toolSignatures, envelope.toolSignatures);
       const comparison = compareResponsesInputHistory(branch.continuationInput, currentContinuationInput);
       if (!bestDiagnostic || comparison.matchedPrefixCount > bestDiagnostic.comparison.matchedPrefixCount) {
         bestDiagnostic = {
@@ -99,7 +124,8 @@ export class ResponseBranchStore {
           previousInputCount: branch.continuationInput.length,
           currentInputCount: currentContinuationInput.length,
           previousNextItemSummary: summarizeResponsesInputMessageForLog(branch.continuationInput[comparison.matchedPrefixCount]),
-          currentNextItemSummary: summarizeResponsesInputMessageForLog(currentContinuationInput[comparison.matchedPrefixCount])
+          currentNextItemSummary: summarizeResponsesInputMessageForLog(currentContinuationInput[comparison.matchedPrefixCount]),
+          toolCompatibility
         };
       }
     }
@@ -108,19 +134,19 @@ export class ResponseBranchStore {
   }
 
   recordSuccess(
-    reuseKey: string,
+    envelope: ResponseBranchReuseEnvelope,
     currentInput: readonly ResponsesInputMessage[],
     responseId: string,
     branchId?: string
   ): string {
     this.evictExpiredEntries();
-    this.disabledReuseKeys.delete(reuseKey);
+    this.disabledReuseKeys.delete(envelope.identityKey);
     const continuationInput = projectResponsesInputForContinuation(currentInput);
 
     if (branchId) {
       const existing = this.branches.get(branchId);
       if (existing) {
-        existing.reuseKey = reuseKey;
+        existing.envelope = envelope;
         existing.input = [...currentInput];
         existing.continuationInput = continuationInput;
         existing.responseId = responseId;
@@ -130,7 +156,7 @@ export class ResponseBranchStore {
     }
 
     for (const branch of this.branches.values()) {
-      if (branch.reuseKey !== reuseKey) {
+      if (branch.envelope.identityKey !== envelope.identityKey) {
         continue;
       }
 
@@ -139,6 +165,7 @@ export class ResponseBranchStore {
         branch.input = [...currentInput];
         branch.continuationInput = continuationInput;
         branch.responseId = responseId;
+        branch.envelope = envelope;
         branch.updatedAt = Date.now();
         return branch.id;
       }
@@ -147,7 +174,7 @@ export class ResponseBranchStore {
     const id = `branch_${this.nextBranchId++}`;
     this.branches.set(id, {
       id,
-      reuseKey,
+      envelope,
       input: [...currentInput],
       continuationInput,
       responseId,
@@ -169,9 +196,9 @@ export class ResponseBranchStore {
     }
   }
 
-  disableReuse(reuseKey: string): void {
+  disableReuse(envelope: ResponseBranchReuseEnvelope): void {
     this.evictExpiredEntries();
-    this.disabledReuseKeys.set(reuseKey, Date.now());
+    this.disabledReuseKeys.set(envelope.identityKey, Date.now());
   }
 
   private evictExpiredEntries(): void {
@@ -205,4 +232,39 @@ export class ResponseBranchStore {
       }
     }
   }
+}
+
+function compareToolSignatures(
+  previousToolSignatures: ResponseBranchToolSignatures | undefined,
+  currentToolSignatures: ResponseBranchToolSignatures | undefined
+): ResponseBranchToolCompatibility {
+  const missingToolNames: string[] = [];
+  const changedToolNames: string[] = [];
+
+  if (!previousToolSignatures) {
+    return {
+      compatible: true,
+      missingToolNames,
+      changedToolNames
+    };
+  }
+
+  for (const [name, previousSignature] of Object.entries(previousToolSignatures)) {
+    const currentSignature = currentToolSignatures?.[name];
+
+    if (currentSignature === undefined) {
+      missingToolNames.push(name);
+      continue;
+    }
+
+    if (currentSignature !== previousSignature) {
+      changedToolNames.push(name);
+    }
+  }
+
+  return {
+    compatible: missingToolNames.length === 0 && changedToolNames.length === 0,
+    missingToolNames,
+    changedToolNames
+  };
 }

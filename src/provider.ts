@@ -4,7 +4,7 @@ import { compareResponsesInputHistory, convertMessagesToResponsesInput, estimate
 import { getProviderConfig, type ProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
 import { countInputTokens, disposeReusableResponsesWebSockets, isResponsesContinuationMissError, normalizeBaseURL, streamResponseText } from './responsesClient';
-import { ResponseBranchStore } from './responseBranchStore';
+import { ResponseBranchStore, type ResponseBranchReuseEnvelope, type ResponseBranchToolSignatures } from './responseBranchStore';
 import { getApiCredentials } from './secrets';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 
@@ -136,7 +136,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     );
     const requestStartedAt = Date.now();
     const input = convertMessagesToResponsesInput(messages);
-    const reuseKey = buildResponseBranchReuseKey({
+    const reuseEnvelope = buildResponseBranchReuseEnvelope({
       baseURL: normalizeBaseURL(config.baseURL),
       authIdentity: getCredentialIdentity(credentials),
       model: selectedModel.requestModel,
@@ -145,10 +145,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       toolMode: options.toolMode,
       tools: options.tools
     });
-    const reusableBranch = this.responseBranchStore.findReusableBranch(reuseKey, input);
+    const reusableBranch = this.responseBranchStore.findReusableBranch(reuseEnvelope, input);
     const reuseMissDiagnostic = reusableBranch
       ? undefined
-      : this.responseBranchStore.explainReuseMiss(reuseKey, input);
+      : this.responseBranchStore.explainReuseMiss(reuseEnvelope, input);
     const initialRequestInput = reusableBranch?.comparison.appendedInput.length ? reusableBranch.comparison.appendedInput : input;
     const initialPreviousResponseId = reusableBranch?.comparison.appendedInput.length ? reusableBranch.responseId : undefined;
     let activeBranchId = initialPreviousResponseId ? reusableBranch?.branchId : undefined;
@@ -188,7 +188,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         appendedInputCount: reuseMissDiagnostic.comparison.appendedInput.length,
         mismatchIndex: reuseMissDiagnostic.comparison.mismatch?.index ?? null,
         mismatchPreviousItem: reuseMissDiagnostic.comparison.mismatch?.previousItemSummary ?? reuseMissDiagnostic.previousNextItemSummary,
-        mismatchCurrentItem: reuseMissDiagnostic.comparison.mismatch?.currentItemSummary ?? reuseMissDiagnostic.currentNextItemSummary
+        mismatchCurrentItem: reuseMissDiagnostic.comparison.mismatch?.currentItemSummary ?? reuseMissDiagnostic.currentNextItemSummary,
+        toolCompatibility: reuseMissDiagnostic.toolCompatibility ?? null
       });
     }
 
@@ -335,7 +336,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         branchId: reusableBranch?.branchId ?? null
       });
 
-      this.responseBranchStore.disableReuse(reuseKey);
+      this.responseBranchStore.disableReuse(reuseEnvelope);
       this.responseBranchStore.invalidateResponseId(initialPreviousResponseId);
 
       if (reusableBranch) {
@@ -350,7 +351,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     const finalResponseId = completedResponseId ?? createdResponseId;
     if (finalResponseId) {
-      activeBranchId = this.responseBranchStore.recordSuccess(reuseKey, input, finalResponseId, activeBranchId);
+      activeBranchId = this.responseBranchStore.recordSuccess(reuseEnvelope, input, finalResponseId, activeBranchId);
     }
   }
 
@@ -537,7 +538,7 @@ function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.La
   ) as vscode.LanguageModelResponsePart;
 }
 
-export function buildResponseBranchReuseKey(options: {
+export function buildResponseBranchReuseEnvelope(options: {
   baseURL: string;
   authIdentity: string;
   model: string;
@@ -545,26 +546,34 @@ export function buildResponseBranchReuseKey(options: {
   reasoningEffort: ReasoningEffort | undefined;
   toolMode: vscode.LanguageModelChatToolMode | undefined;
   tools: readonly vscode.LanguageModelChatTool[] | undefined;
-}): string {
-  return stableSerialize({
-    baseURL: options.baseURL,
-    authIdentity: options.authIdentity,
-    model: options.model,
-    instructions: options.instructions,
-    reasoningEffort: options.reasoningEffort ?? null,
-    toolMode: options.toolMode ?? null,
-    tools: (options.tools ?? [])
-      .map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema ?? null
-      }))
-      .sort((left, right) => {
-        const leftKey = stableSerialize(left);
-        const rightKey = stableSerialize(right);
-        return leftKey.localeCompare(rightKey);
-      })
-  });
+}): ResponseBranchReuseEnvelope {
+  return {
+    identityKey: stableSerialize({
+      baseURL: options.baseURL,
+      authIdentity: options.authIdentity,
+      model: options.model,
+      instructions: options.instructions,
+      reasoningEffort: options.reasoningEffort ?? null,
+      toolMode: options.toolMode ?? null
+    }),
+    toolSignatures: buildResponseBranchToolSignatures(options.tools)
+  };
+}
+
+export function buildResponseBranchToolSignatures(
+  tools: readonly vscode.LanguageModelChatTool[] | undefined
+): ResponseBranchToolSignatures {
+  return Object.fromEntries(
+    (tools ?? [])
+      .map((tool) => [
+        tool.name,
+        stableSerialize({
+          description: tool.description,
+          inputSchema: tool.inputSchema ?? null
+        })
+      ])
+      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+  );
 }
 
 function getCredentialIdentity(credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>): string {

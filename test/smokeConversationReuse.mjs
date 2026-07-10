@@ -100,7 +100,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const { compareResponsesInputHistory, convertMessagesToResponsesInput, stableSerialize } = require(compareBundlePath);
 const { ResponseBranchStore } = require(branchStoreBundlePath);
-const { buildResponseBranchReuseKey } = require(providerBundlePath);
+const { buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures } = require(providerBundlePath);
 
 try {
   runStableSerializeSmokeTest(stableSerialize);
@@ -109,7 +109,7 @@ try {
   runBranchStoreSmokeTest(ResponseBranchStore);
   runBranchStoreDisableReuseSmokeTest(ResponseBranchStore);
   runBranchStoreToolContinuationSmokeTest(ResponseBranchStore);
-  runToolOrderReuseKeySmokeTest(buildResponseBranchReuseKey);
+  runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, ResponseBranchStore);
   runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore);
   runImageToolResultSmokeTest(convertMessagesToResponsesInput);
   runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
@@ -171,8 +171,8 @@ function runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory) {
 
 function runBranchStoreSmokeTest(ResponseBranchStore) {
   const store = new ResponseBranchStore();
-  const reuseKey = 'reuse-key-a';
-  const toolChangedReuseKey = 'reuse-key-b';
+  const envelope = reuseEnvelope('reuse-key-a');
+  const toolChangedEnvelope = reuseEnvelope('reuse-key-b');
   const previousInput = [
     { type: 'message', role: 'user', content: 'hello' },
     { type: 'message', role: 'assistant', content: 'hi' }
@@ -183,22 +183,22 @@ function runBranchStoreSmokeTest(ResponseBranchStore) {
     { type: 'message', role: 'assistant', content: 'different' }
   ];
 
-  const branchId = store.recordSuccess(reuseKey, previousInput, 'resp_1');
-  const reusableMatch = store.findReusableBranch(reuseKey, appendInput);
+  const branchId = store.recordSuccess(envelope, previousInput, 'resp_1');
+  const reusableMatch = store.findReusableBranch(envelope, appendInput);
   assertEqual(reusableMatch?.branchId, branchId, 'reusable branch id');
   assertEqual(reusableMatch?.responseId, 'resp_1', 'reusable previous response id');
   assertEqual(JSON.stringify(reusableMatch?.comparison.appendedInput ?? []), JSON.stringify([appendInput[2]]), 'reusable delta input');
 
-  const toolChangedMatch = store.findReusableBranch(toolChangedReuseKey, appendInput);
+  const toolChangedMatch = store.findReusableBranch(toolChangedEnvelope, appendInput);
   assertEqual(toolChangedMatch, undefined, 'tool change busts reuse');
 
-  const forkMatch = store.findReusableBranch(reuseKey, forkInput);
+  const forkMatch = store.findReusableBranch(envelope, forkInput);
   assertEqual(forkMatch, undefined, 'fork does not reuse previous branch');
 }
 
 function runBranchStoreDisableReuseSmokeTest(ResponseBranchStore) {
   const store = new ResponseBranchStore();
-  const reuseKey = 'reuse-key-disabled';
+  const envelope = reuseEnvelope('reuse-key-disabled');
   const previousInput = [
     { type: 'message', role: 'user', content: 'hello' },
     { type: 'message', role: 'assistant', content: 'hi' }
@@ -206,23 +206,23 @@ function runBranchStoreDisableReuseSmokeTest(ResponseBranchStore) {
   const appendInput = [...previousInput, { type: 'message', role: 'user', content: 'continue' }];
   const secondAppendInput = [...appendInput, { type: 'message', role: 'user', content: 'one more step' }];
 
-  store.recordSuccess(reuseKey, previousInput, 'resp_missing_anchor');
-  store.recordSuccess(reuseKey, appendInput, 'resp_duplicate_missing_anchor');
+  store.recordSuccess(envelope, previousInput, 'resp_missing_anchor');
+  store.recordSuccess(envelope, appendInput, 'resp_duplicate_missing_anchor');
 
-  store.disableReuse(reuseKey);
-  assertEqual(store.findReusableBranch(reuseKey, secondAppendInput), undefined, 'disabled reuse bypasses continuation anchor');
+  store.disableReuse(envelope);
+  assertEqual(store.findReusableBranch(envelope, secondAppendInput), undefined, 'disabled reuse bypasses continuation anchor');
 
   store.invalidateResponseId('resp_missing_anchor');
   store.invalidateResponseId('resp_duplicate_missing_anchor');
-  store.recordSuccess(reuseKey, appendInput, 'resp_recovered_anchor');
+  store.recordSuccess(envelope, appendInput, 'resp_recovered_anchor');
 
-  const recoveredMatch = store.findReusableBranch(reuseKey, secondAppendInput);
+  const recoveredMatch = store.findReusableBranch(envelope, secondAppendInput);
   assertEqual(recoveredMatch?.responseId, 'resp_recovered_anchor', 'full-input success re-enables reuse with a fresh anchor');
 }
 
 function runBranchStoreToolContinuationSmokeTest(ResponseBranchStore) {
   const store = new ResponseBranchStore();
-  const reuseKey = 'reuse-key-tool-continuation';
+  const envelope = reuseEnvelope('reuse-key-tool-continuation');
   const previousInput = [
     { type: 'message', role: 'user', content: 'Find the file that handles auth.' },
     { type: 'message', role: 'assistant', content: 'I will inspect the source tree.' },
@@ -239,8 +239,8 @@ function runBranchStoreToolContinuationSmokeTest(ResponseBranchStore) {
     { type: 'function_call_output', call_id: 'call_replayed_2', output: 'export async function getApiCredentials() {}' }
   ];
 
-  const branchId = store.recordSuccess(reuseKey, previousInput, 'resp_tool_step_1');
-  const reusableMatch = store.findReusableBranch(reuseKey, currentInput);
+  const branchId = store.recordSuccess(envelope, previousInput, 'resp_tool_step_1');
+  const reusableMatch = store.findReusableBranch(envelope, currentInput);
   assertEqual(reusableMatch?.branchId, branchId, 'tool continuation branch id');
   assertEqual(reusableMatch?.responseId, 'resp_tool_step_1', 'tool continuation previous response id');
   assertEqual(
@@ -252,7 +252,7 @@ function runBranchStoreToolContinuationSmokeTest(ResponseBranchStore) {
   );
 }
 
-function runToolOrderReuseKeySmokeTest(buildResponseBranchReuseKey) {
+function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, ResponseBranchStore) {
   const baseOptions = {
     baseURL: 'https://chatgpt.com/backend-api/codex/responses',
     authIdentity: 'codexAuth:acct-test',
@@ -261,24 +261,53 @@ function runToolOrderReuseKeySmokeTest(buildResponseBranchReuseKey) {
     reasoningEffort: 'high',
     toolMode: 1
   };
+  const previousInput = [
+    { type: 'message', role: 'user', content: 'Inspect the repo.' }
+  ];
+  const currentInput = [
+    ...previousInput,
+    { type: 'message', role: 'user', content: 'Now continue.' }
+  ];
+  const previousTools = [
+    { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: { filePath: { type: 'string' } } } },
+    { name: 'list_dir', description: 'List a directory', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }
+  ];
+  const currentToolsWithAddition = [
+    { name: 'run_in_terminal', description: 'Run a shell command', inputSchema: { type: 'object', properties: { command: { type: 'string' } } } },
+    { name: 'list_dir', description: 'List a directory', inputSchema: { properties: { path: { type: 'string' } }, type: 'object' } },
+    { name: 'read_file', description: 'Read a file', inputSchema: { properties: { filePath: { type: 'string' } }, type: 'object' } }
+  ];
+  const currentToolsWithChange = [
+    { name: 'list_dir', description: 'List a directory recursively', inputSchema: { properties: { path: { type: 'string' } }, type: 'object' } },
+    { name: 'read_file', description: 'Read a file', inputSchema: { properties: { filePath: { type: 'string' } }, type: 'object' } }
+  ];
+  const currentToolsWithRemoval = [
+    { name: 'read_file', description: 'Read a file', inputSchema: { properties: { filePath: { type: 'string' } }, type: 'object' } }
+  ];
 
-  const left = buildResponseBranchReuseKey({
+  const left = buildResponseBranchReuseEnvelope({
     ...baseOptions,
-    tools: [
-      { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: { filePath: { type: 'string' } } } },
-      { name: 'list_dir', description: 'List a directory', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }
-    ]
+    tools: previousTools
   });
 
-  const right = buildResponseBranchReuseKey({
+  const right = buildResponseBranchReuseEnvelope({
     ...baseOptions,
-    tools: [
-      { name: 'list_dir', description: 'List a directory', inputSchema: { properties: { path: { type: 'string' } }, type: 'object' } },
-      { name: 'read_file', description: 'Read a file', inputSchema: { properties: { filePath: { type: 'string' } }, type: 'object' } }
-    ]
+    tools: currentToolsWithAddition
   });
 
-  assertEqual(left, right, 'tool order does not bust reuse key');
+  assertEqual(left.identityKey, right.identityKey, 'tool catalog does not bust reuse identity key');
+
+  const store = new ResponseBranchStore();
+  const branchId = store.recordSuccess(left, previousInput, 'resp_tool_catalog_base');
+  const additiveMatch = store.findReusableBranch(right, currentInput);
+  assertEqual(additiveMatch?.branchId, branchId, 'additive tool catalog keeps reusable branch');
+  assertEqual(additiveMatch?.responseId, 'resp_tool_catalog_base', 'additive tool catalog reuses previous response id');
+
+  const changedMatch = store.findReusableBranch(reuseEnvelope(left.identityKey, buildResponseBranchToolSignatures(currentToolsWithChange)), currentInput);
+  assertEqual(changedMatch, undefined, 'changed existing tool busts reuse');
+
+  const removedMatch = store.findReusableBranch(reuseEnvelope(left.identityKey, buildResponseBranchToolSignatures(currentToolsWithRemoval)), currentInput);
+  assertEqual(removedMatch, undefined, 'removed existing tool busts reuse');
 }
 
 function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore) {
@@ -309,7 +338,7 @@ function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, Res
   );
 
   const store = new ResponseBranchStore();
-  const reuseKey = 'reuse-key-cache-control';
+  const envelope = reuseEnvelope('reuse-key-cache-control');
   const previousInput = [
     { type: 'message', role: 'user', content: 'Show me the asset name.' },
     convertedWithCacheControl[0]
@@ -320,8 +349,8 @@ function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, Res
     { type: 'message', role: 'user', content: 'Continue.' }
   ];
 
-  store.recordSuccess(reuseKey, previousInput, 'resp_cache_control');
-  const reusableMatch = store.findReusableBranch(reuseKey, currentInput);
+  store.recordSuccess(envelope, previousInput, 'resp_cache_control');
+  const reusableMatch = store.findReusableBranch(envelope, currentInput);
   assertEqual(reusableMatch?.responseId, 'resp_cache_control', 'cache_control reuse previous response id');
   assertEqual(reusableMatch?.comparison.kind, 'append', 'cache_control reuse comparison kind');
 }
@@ -395,8 +424,9 @@ function runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convert
   assertEqual(JSON.stringify(comparison.appendedInput), JSON.stringify([currentInput[3]]), 'image placeholder delta');
 
   const store = new ResponseBranchStore();
-  store.recordSuccess('reuse-key-image-placeholder', previousInput, 'resp_image_placeholder');
-  const reusableMatch = store.findReusableBranch('reuse-key-image-placeholder', currentInput);
+  const envelope = reuseEnvelope('reuse-key-image-placeholder');
+  store.recordSuccess(envelope, previousInput, 'resp_image_placeholder');
+  const reusableMatch = store.findReusableBranch(envelope, currentInput);
   assertEqual(reusableMatch?.responseId, 'resp_image_placeholder', 'image placeholder reuse previous response id');
   assertEqual(JSON.stringify(reusableMatch?.comparison.appendedInput ?? []), JSON.stringify([currentInput[3]]), 'image placeholder reuse delta');
 }
@@ -439,8 +469,9 @@ function runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, conve
   assertEqual(JSON.stringify(comparison.appendedInput), JSON.stringify([currentInput[3]]), 'image URI annotation delta');
 
   const store = new ResponseBranchStore();
-  store.recordSuccess('reuse-key-image-uri-annotation', previousInput, 'resp_image_uri_annotation');
-  const reusableMatch = store.findReusableBranch('reuse-key-image-uri-annotation', currentInput);
+  const envelope = reuseEnvelope('reuse-key-image-uri-annotation');
+  store.recordSuccess(envelope, previousInput, 'resp_image_uri_annotation');
+  const reusableMatch = store.findReusableBranch(envelope, currentInput);
   assertEqual(reusableMatch?.responseId, 'resp_image_uri_annotation', 'image URI annotation reuse previous response id');
   assertEqual(JSON.stringify(reusableMatch?.comparison.appendedInput ?? []), JSON.stringify([currentInput[3]]), 'image URI annotation reuse delta');
 }
@@ -449,4 +480,8 @@ function assertEqual(actual, expected, label) {
   if (actual !== expected) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
+}
+
+function reuseEnvelope(identityKey, toolSignatures) {
+  return { identityKey, toolSignatures };
 }
