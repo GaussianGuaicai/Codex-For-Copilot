@@ -107,6 +107,7 @@ try {
   runCompareHistorySmokeTest(compareResponsesInputHistory);
   runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory);
   runBranchStoreSmokeTest(ResponseBranchStore);
+  runBranchStoreDisableReuseSmokeTest(ResponseBranchStore);
   runBranchStoreToolContinuationSmokeTest(ResponseBranchStore);
   runToolOrderReuseKeySmokeTest(buildResponseBranchReuseKey);
   runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore);
@@ -193,6 +194,30 @@ function runBranchStoreSmokeTest(ResponseBranchStore) {
 
   const forkMatch = store.findReusableBranch(reuseKey, forkInput);
   assertEqual(forkMatch, undefined, 'fork does not reuse previous branch');
+}
+
+function runBranchStoreDisableReuseSmokeTest(ResponseBranchStore) {
+  const store = new ResponseBranchStore();
+  const reuseKey = 'reuse-key-disabled';
+  const previousInput = [
+    { type: 'message', role: 'user', content: 'hello' },
+    { type: 'message', role: 'assistant', content: 'hi' }
+  ];
+  const appendInput = [...previousInput, { type: 'message', role: 'user', content: 'continue' }];
+  const secondAppendInput = [...appendInput, { type: 'message', role: 'user', content: 'one more step' }];
+
+  store.recordSuccess(reuseKey, previousInput, 'resp_missing_anchor');
+  store.recordSuccess(reuseKey, appendInput, 'resp_duplicate_missing_anchor');
+
+  store.disableReuse(reuseKey);
+  assertEqual(store.findReusableBranch(reuseKey, secondAppendInput), undefined, 'disabled reuse bypasses continuation anchor');
+
+  store.invalidateResponseId('resp_missing_anchor');
+  store.invalidateResponseId('resp_duplicate_missing_anchor');
+  store.recordSuccess(reuseKey, appendInput, 'resp_recovered_anchor');
+
+  const recoveredMatch = store.findReusableBranch(reuseKey, secondAppendInput);
+  assertEqual(recoveredMatch?.responseId, 'resp_recovered_anchor', 'full-input success re-enables reuse with a fresh anchor');
 }
 
 function runBranchStoreToolContinuationSmokeTest(ResponseBranchStore) {

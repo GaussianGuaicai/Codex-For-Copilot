@@ -325,6 +325,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         reason: error.message
       });
 
+      this.outputChannel.warn('response reuse temporarily disabled until next full-input success', {
+        requestModel: selectedModel.requestModel,
+        previousResponseId: initialPreviousResponseId,
+        branchId: reusableBranch?.branchId ?? null
+      });
+
+      this.responseBranchStore.disableReuse(reuseKey);
+      this.responseBranchStore.invalidateResponseId(initialPreviousResponseId);
+
       if (reusableBranch) {
         this.responseBranchStore.invalidate(reusableBranch.branchId);
       }

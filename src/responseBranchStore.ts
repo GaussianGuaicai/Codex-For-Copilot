@@ -33,6 +33,7 @@ interface ResponseBranchEntry {
 
 export class ResponseBranchStore {
   private readonly branches = new Map<string, ResponseBranchEntry>();
+  private readonly disabledReuseKeys = new Map<string, number>();
   private nextBranchId = 1;
 
   constructor(
@@ -42,6 +43,11 @@ export class ResponseBranchStore {
 
   findReusableBranch(reuseKey: string, currentInput: readonly ResponsesInputMessage[]): ReusableResponseBranchMatch | undefined {
     this.evictExpiredEntries();
+
+    if (this.disabledReuseKeys.has(reuseKey)) {
+      return undefined;
+    }
+
     const currentContinuationInput = projectResponsesInputForContinuation(currentInput);
 
     let bestMatch: ReusableResponseBranchMatch | undefined;
@@ -70,6 +76,11 @@ export class ResponseBranchStore {
 
   explainReuseMiss(reuseKey: string, currentInput: readonly ResponsesInputMessage[]): ResponseBranchReuseMissDiagnostic | undefined {
     this.evictExpiredEntries();
+
+    if (this.disabledReuseKeys.has(reuseKey)) {
+      return undefined;
+    }
+
     const currentContinuationInput = projectResponsesInputForContinuation(currentInput);
 
     let bestDiagnostic: ResponseBranchReuseMissDiagnostic | undefined;
@@ -103,6 +114,7 @@ export class ResponseBranchStore {
     branchId?: string
   ): string {
     this.evictExpiredEntries();
+    this.disabledReuseKeys.delete(reuseKey);
     const continuationInput = projectResponsesInputForContinuation(currentInput);
 
     if (branchId) {
@@ -149,12 +161,31 @@ export class ResponseBranchStore {
     this.branches.delete(branchId);
   }
 
+  invalidateResponseId(responseId: string): void {
+    for (const [branchId, branch] of this.branches.entries()) {
+      if (branch.responseId === responseId) {
+        this.branches.delete(branchId);
+      }
+    }
+  }
+
+  disableReuse(reuseKey: string): void {
+    this.evictExpiredEntries();
+    this.disabledReuseKeys.set(reuseKey, Date.now());
+  }
+
   private evictExpiredEntries(): void {
     const now = Date.now();
 
     for (const [branchId, branch] of this.branches.entries()) {
       if (now - branch.updatedAt > this.ttlMs) {
         this.branches.delete(branchId);
+      }
+    }
+
+    for (const [reuseKey, disabledAt] of this.disabledReuseKeys.entries()) {
+      if (now - disabledAt > this.ttlMs) {
+        this.disabledReuseKeys.delete(reuseKey);
       }
     }
   }
