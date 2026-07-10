@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -27,7 +27,7 @@
     "compile": "npm run check && node esbuild.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
-    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs",
+    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
@@ -74,6 +74,22 @@
       {
         "command": "codexModelProvider.refreshAccountLimits",
         "title": "Codex: Refresh Account Limits"
+      },
+      {
+        "command": "codexForCopilot.auth.importAuthJson",
+        "title": "Codex for Copilot: Import Codex auth.json"
+      },
+      {
+        "command": "codexForCopilot.auth.signOut",
+        "title": "Codex for Copilot: Sign Out"
+      },
+      {
+        "command": "codexForCopilot.auth.showStatus",
+        "title": "Codex for Copilot: Show Auth Status"
+      },
+      {
+        "command": "codexForCopilot.auth.signInWithDeviceCode",
+        "title": "Codex for Copilot: Sign in with Device Code"
       }
     ],
     "configuration": {

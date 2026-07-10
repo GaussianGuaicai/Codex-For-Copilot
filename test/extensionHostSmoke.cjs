@@ -43,7 +43,7 @@ async function run() {
 
     if (request.method === 'POST' && request.url === '/backend-api/codex/responses/input_tokens') {
       assert.strictEqual(request.headers.authorization?.startsWith('Bearer '), true, 'Missing bearer authorization header for token count.');
-      assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot/1.0.1 Codex-Extension');
+      assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot Codex for Copilot');
       assert.strictEqual(body.model, 'gpt-5.4');
       assert.strictEqual(body.input, 'Ping');
 
@@ -58,7 +58,7 @@ async function run() {
     assert.strictEqual(request.method, 'POST');
     assert.strictEqual(request.url, '/backend-api/codex/responses');
     assert(request.headers.authorization?.startsWith('Bearer '), 'Missing bearer authorization header.');
-    assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot/1.0.1 Codex-Extension');
+    assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot Codex for Copilot');
     assert.strictEqual(body.instructions, 'Extension host smoke instructions');
     assert.strictEqual(body.stream, true);
     assert.strictEqual(body.store, false);

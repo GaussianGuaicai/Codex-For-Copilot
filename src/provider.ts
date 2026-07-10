@@ -6,6 +6,7 @@ import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseMod
 import { countInputTokens, disposeReusableResponsesWebSockets, isResponsesContinuationMissError, normalizeBaseURL, streamResponseText } from './responsesClient';
 import { ResponseBranchStore } from './responseBranchStore';
 import { getApiCredentials } from './secrets';
+import type { CodexAuthManager } from './auth/codexAuthManager';
 
 type RuntimeProvideLanguageModelChatResponseOptions = vscode.ProvideLanguageModelChatResponseOptions & {
   readonly modelConfiguration?: Record<string, unknown>;
@@ -49,7 +50,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     private readonly outputChannel: vscode.LogOutputChannel,
     private readonly usageSink?: UsageSink,
     private readonly accountUsageRefreshSink?: AccountUsageRefreshSink,
-    private readonly selectedModelSink?: SelectedModelSink
+    private readonly selectedModelSink?: SelectedModelSink,
+    private readonly authManager?: CodexAuthManager
   ) {
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     this.context.subscriptions.push(
@@ -69,7 +71,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<vscode.LanguageModelChatInformation[]> {
     const config = getProviderConfig();
-    const credentials = await getApiCredentials(this.context);
+    const credentials = await getApiCredentials(this.context, this.authManager);
 
     this.outputChannel.debug('provideLanguageModelChatInformation start', {
       silent: options.silent,
@@ -81,15 +83,17 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     if (!credentials) {
       if (!options.silent) {
         const action = await vscode.window.showWarningMessage(
-          'Codex needs Codex credentials. Set an API key in SecretStorage or add credentials to ~/.codex/auth.json.',
-          'Set API Key',
-          'Open Settings'
+          'Codex credentials are required.',
+          { modal: true },
+          'Import auth.json',
+          'Sign in with Device Code',
+          'Cancel'
         );
 
-        if (action === 'Set API Key') {
-          await vscode.commands.executeCommand('codexModelProvider.setApiKey');
-        } else if (action === 'Open Settings') {
-          await vscode.commands.executeCommand('codexModelProvider.openSettings');
+        if (action === 'Import auth.json') {
+          await vscode.commands.executeCommand('codexForCopilot.auth.importAuthJson');
+        } else if (action === 'Sign in with Device Code') {
+          await vscode.commands.executeCommand('codexForCopilot.auth.signInWithDeviceCode');
         }
       }
 
@@ -117,10 +121,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<void> {
     const config = getProviderConfig();
-    const credentials = await getApiCredentials(this.context);
+    const credentials = await getApiCredentials(this.context, this.authManager);
 
     if (!credentials) {
-      throw new Error('Codex credentials are missing. Run "Codex: Set API Key" or configure ~/.codex/auth.json.');
+      throw new Error('Codex credentials are missing. Run "Codex for Copilot: Import Codex auth.json".');
     }
 
     const selectedModel = parseModelIdentifier(model.id || config.model);
@@ -356,7 +360,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<number> {
     const config = getProviderConfig();
-    const credentials = await getApiCredentials(this.context);
+    const credentials = await getApiCredentials(this.context, this.authManager);
 
     if (!credentials || !supportsOfficialTokenCounting(config.baseURL)) {
       const estimated = estimateTokenCount(text);
@@ -378,6 +382,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         baseURL: config.baseURL,
         apiKey: credentials.apiKey,
         headers: credentials.headers,
+        authManager: credentials.authManager,
         model: selectedModel.requestModel,
         input,
         token
