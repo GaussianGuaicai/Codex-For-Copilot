@@ -239,7 +239,7 @@ async function streamResponseTextOverWebSocket(
           );
         }
 
-        if (!sawResponseActivity) {
+        if (!sawResponseActivity && !streamEvent.error.error) {
           releaseReusableWebSocketSession(session, undefined, false);
           throw new WebSocketTransportUnavailableError(streamEvent.error.message, { cause: streamEvent.error });
         }
