@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 
 export const API_KEY_SECRET = 'codexModelProvider.apiKey';
-export const DEFAULT_USER_AGENT = 'local.codex-for-copilot/1.0.1 Codex-Extension';
+export const DEFAULT_USER_AGENT = 'local.codex-for-copilot Codex for Copilot';
 
 export interface ApiCredentials {
   apiKey: string;

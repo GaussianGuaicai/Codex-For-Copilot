@@ -105,7 +105,7 @@ try {
     credentials: {
       apiKey: 'test-access-token',
       headers: {
-        'User-Agent': 'local.codex-for-copilot/1.0.0 Codex-Extension',
+        'User-Agent': 'local.codex-for-copilot Codex for Copilot',
         'ChatGPT-Account-ID': 'acct-test'
       },
       source: 'codexAuth',
@@ -118,7 +118,7 @@ try {
   assertEqual(capturedRequest.method, 'GET', 'method');
   assertEqual(capturedRequest.url, '/backend-api/wham/usage', 'request path');
   assertEqual(capturedRequest.authorization, 'Bearer test-access-token', 'authorization header');
-  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot/1.0.0 Codex-Extension', 'user agent');
+  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot Codex for Copilot', 'user agent');
   assertEqual(capturedRequest.accountId, 'acct-test', 'ChatGPT account id header');
   assertEqual(display.compactText, 'Codex: 5h 64% · weekly 82% · 25 credits', 'compact display priority');
   assertIncludes(display.tooltip, 'Plan: Pro', 'plan tooltip');
@@ -142,7 +142,7 @@ try {
     credentials: {
       apiKey: 'stale-access-token',
       headers: {
-        'User-Agent': 'local.codex-for-copilot/1.0.0 Codex-Extension'
+        'User-Agent': 'local.codex-for-copilot Codex for Copilot'
       },
       source: 'codexAuth',
       authManager,
