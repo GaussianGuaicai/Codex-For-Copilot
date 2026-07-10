@@ -1,3 +1,4 @@
+import { open } from 'node:fs/promises';
 import * as vscode from 'vscode';
 
 const STALE_LOCK_MS = 60_000;
@@ -21,21 +22,25 @@ export class CodexAuthLock {
 
   private async acquire(): Promise<void> {
     while (true) {
-      if (!(await this.lockExists())) {
-        await vscode.workspace.fs.writeFile(this.lockUri, Buffer.from(String(Date.now())));
+      if (await this.tryCreateLock()) {
         return;
       }
 
       if (await this.replaceIfStale()) {
-        return;
+        continue;
       }
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     }
   }
 
-  private async lockExists(): Promise<boolean> {
+  private async tryCreateLock(): Promise<boolean> {
     try {
-      await vscode.workspace.fs.stat(this.lockUri);
+      const handle = await open(this.lockUri.fsPath, 'wx');
+      try {
+        await handle.writeFile(String(Date.now()), 'utf8');
+      } finally {
+        await handle.close();
+      }
       return true;
     } catch {
       return false;
@@ -49,7 +54,6 @@ export class CodexAuthLock {
         return false;
       }
       await vscode.workspace.fs.delete(this.lockUri);
-      await vscode.workspace.fs.writeFile(this.lockUri, Buffer.from(String(Date.now())));
       return true;
     } catch {
       return false;

@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import Module from 'node:module';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
@@ -14,6 +14,17 @@ const moduleLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === 'vscode') {
     return {
+      workspace: {
+        fs: {
+          stat: async (uri) => {
+            const fileStat = await stat(uri.fsPath);
+            return { mtime: fileStat.mtimeMs };
+          },
+          delete: async (uri) => {
+            await rm(uri.fsPath);
+          }
+        }
+      },
       window: { showErrorMessage: async () => undefined, showInformationMessage: async () => undefined },
       commands: { executeCommand: async () => undefined }
     };
@@ -25,6 +36,7 @@ export * from ${repoImport('src/auth/codexAuthJsonImporter')};
 export * from ${repoImport('src/auth/codexJwt')};
 export * from ${repoImport('src/auth/codexAuthManager')};
 export * from ${repoImport('src/auth/codexAuthRequest')};
+export * from ${repoImport('src/auth/codexAuthLock')};
 `));
 
 await build({
@@ -64,6 +76,19 @@ try {
   assertEqual(auth.isJwtExpiringSoon(soonToken, 5 * 60 * 1000), true, 'expiring soon');
   assertEqual(auth.needsRefresh({ ...valid, tokens: { ...valid.tokens, access_token: soonToken } }), true, 'refresh when access token expires soon');
   assertEqual(auth.needsRefresh({ ...valid, last_refresh: new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString() }), true, 'refresh when last_refresh is old');
+
+  const lock = new auth.CodexAuthLock({ fsPath: join(tempDir, 'refresh.lock') });
+  let activeLocks = 0;
+  let maxConcurrentLocks = 0;
+  await Promise.all(
+    Array.from({ length: 4 }, async () => lock.withLock(async () => {
+      activeLocks += 1;
+      maxConcurrentLocks = Math.max(maxConcurrentLocks, activeLocks);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      activeLocks -= 1;
+    }))
+  );
+  assertEqual(maxConcurrentLocks, 1, 'refresh lock serializes concurrent callers');
 
   let calls = 0;
   const manager = {
