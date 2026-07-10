@@ -124,6 +124,36 @@ try {
   assertIncludes(display.tooltip, 'Plan: Pro', 'plan tooltip');
   assertIncludes(display.tooltip, 'Other limits:', 'other limits tooltip');
 
+  const authManager = {
+    accessTokenCalls: 0,
+    refreshCalls: 0,
+    async getAccessToken() {
+      this.accessTokenCalls += 1;
+      return 'manager-access-token';
+    },
+    async refreshAfter401() {
+      this.refreshCalls += 1;
+    }
+  };
+
+  await fetchCodexAccountUsage({
+    baseURL,
+    selectedModel: 'gpt-5.5',
+    credentials: {
+      apiKey: 'stale-access-token',
+      headers: {
+        'User-Agent': 'local.codex-for-copilot/1.0.0 Codex-Extension'
+      },
+      source: 'codexAuth',
+      authManager,
+      kind: 'codexAccessToken',
+      omitMaxOutputTokens: true
+    }
+  });
+  assertEqual(capturedRequest.authorization, 'Bearer manager-access-token', 'authManager authorization header');
+  assertEqual(authManager.accessTokenCalls, 1, 'authManager access token calls without retry');
+  assertEqual(authManager.refreshCalls, 0, 'authManager no refresh on success');
+
   const fallbackSnapshot = parseCodexAccountUsage({ credits_balance: 25 }, Date.now(), 'gpt-5.5');
   assertEqual(buildCodexAccountUsageDisplay(fallbackSnapshot, 'gpt-5.5').compactText, 'Codex: 25 credits', 'credits fallback');
 
