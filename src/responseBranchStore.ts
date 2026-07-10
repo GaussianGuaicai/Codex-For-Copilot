@@ -33,6 +33,7 @@ export type ResponseBranchToolSignatures = Readonly<Record<string, string>>;
 export interface ResponseBranchToolCompatibility {
   compatible: boolean;
   missingToolNames: string[];
+  addedToolNames: string[];
   changedToolNames: string[];
 }
 
@@ -238,18 +239,13 @@ function compareToolSignatures(
   previousToolSignatures: ResponseBranchToolSignatures | undefined,
   currentToolSignatures: ResponseBranchToolSignatures | undefined
 ): ResponseBranchToolCompatibility {
+  const previousEntries = Object.entries(previousToolSignatures ?? {});
+  const currentEntries = Object.entries(currentToolSignatures ?? {});
   const missingToolNames: string[] = [];
+  const addedToolNames: string[] = [];
   const changedToolNames: string[] = [];
 
-  if (!previousToolSignatures) {
-    return {
-      compatible: true,
-      missingToolNames,
-      changedToolNames
-    };
-  }
-
-  for (const [name, previousSignature] of Object.entries(previousToolSignatures)) {
+  for (const [name, previousSignature] of previousEntries) {
     const currentSignature = currentToolSignatures?.[name];
 
     if (currentSignature === undefined) {
@@ -262,9 +258,16 @@ function compareToolSignatures(
     }
   }
 
+  for (const [name] of currentEntries) {
+    if (previousToolSignatures?.[name] === undefined) {
+      addedToolNames.push(name);
+    }
+  }
+
   return {
-    compatible: missingToolNames.length === 0 && changedToolNames.length === 0,
+    compatible: missingToolNames.length === 0 && addedToolNames.length === 0 && changedToolNames.length === 0,
     missingToolNames,
+    addedToolNames,
     changedToolNames
   };
 }
