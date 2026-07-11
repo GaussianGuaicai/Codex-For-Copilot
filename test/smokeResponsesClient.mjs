@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { WebSocketServer } from 'ws';
 
 const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-provider-'));
 const bundlePath = join(tempDir, 'responsesClient.cjs');
@@ -33,65 +34,362 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { streamResponseText } = require(bundlePath);
-
-let capturedRequest;
-const server = createServer(async (request, response) => {
-  const chunks = [];
-  for await (const chunk of request) {
-    chunks.push(chunk);
-  }
-
-  capturedRequest = {
-    method: request.method,
-    url: request.url,
-    authorization: request.headers.authorization,
-    userAgent: request.headers['user-agent'],
-    accountId: request.headers['chatgpt-account-id'],
-    body: JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  };
-
-  response.writeHead(200, {
-    'content-type': 'text/event-stream',
-    'cache-control': 'no-cache',
-    connection: 'keep-alive'
-  });
-  response.write('data: {"type":"response.output_text.delta","delta":"hello"}\n\n');
-  response.write('data: {"type":"response.output_text.delta","delta":" world"}\n\n');
-  response.write('data: {"type":"response.completed","response":{"id":"resp_mock","object":"response","status":"completed"}}\n\n');
-  response.write('data: [DONE]\n\n');
-  response.end();
-});
-
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+const { disposeReusableResponsesWebSockets, streamResponseText } = require(bundlePath);
 
 try {
-  const address = server.address();
-  const deltas = [];
+  await runHttpTransportSmokeTest(streamResponseText);
+  await runAutoFallbackSmokeTest(streamResponseText);
+  await runWebSocketTransportSmokeTest(streamResponseText);
+  await runWebSocketContinuationSmokeTest(streamResponseText);
+  await runWebSocketSequentialReuseSmokeTest(streamResponseText);
 
-  await streamResponseText({
-    baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
-    apiKey: 'test-api-key',
-    headers: {
-      'User-Agent': 'local.codex-for-copilot Codex for Copilot',
-      'ChatGPT-Account-ID': 'acct-test'
-    },
-    omitMaxOutputTokens: true,
-    model: 'gpt-5.5',
-    instructions: 'Smoke test instructions',
-    input: [{ role: 'user', content: 'Ping' }],
-    maxOutputTokens: 32,
-    token: {
-      isCancellationRequested: false,
-      onCancellationRequested: () => ({ dispose() {} })
-    },
-    onTextDelta: (text) => deltas.push(text)
+  console.log('Smoke tests passed: HTTP, auto fallback, and WebSocket transports are correct.');
+} finally {
+  disposeReusableResponsesWebSockets();
+  Module._load = moduleLoad;
+  await rm(tempDir, { recursive: true, force: true });
+}
+
+async function runHttpTransportSmokeTest(streamResponseText) {
+  let capturedRequest;
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    capturedRequest = {
+      method: request.method,
+      url: request.url,
+      authorization: request.headers.authorization,
+      userAgent: request.headers['user-agent'],
+      accountId: request.headers['chatgpt-account-id'],
+      body: JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    };
+
+    writeSseResponse(response, ['hello', ' world']);
   });
 
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const deltas = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'http',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Ping' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => deltas.push(text)
+    });
+
+    assertHttpRequest(capturedRequest, '/backend-api/codex/responses');
+    assertEqual(deltas.join(''), 'hello world', 'HTTP streamed text');
+  } finally {
+    server.close();
+  }
+}
+
+async function runAutoFallbackSmokeTest(streamResponseText) {
+  let capturedRequest;
+  let fallbackEvent;
+  const server = createServer(async (request, response) => {
+    if (request.method !== 'POST') {
+      response.writeHead(426, { connection: 'close' });
+      response.end('WebSocket upgrade not supported by this test server.');
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    capturedRequest = {
+      method: request.method,
+      url: request.url,
+      authorization: request.headers.authorization,
+      userAgent: request.headers['user-agent'],
+      accountId: request.headers['chatgpt-account-id'],
+      body: JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    };
+
+    writeSseResponse(response, ['fallback', ' path']);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const deltas = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'auto',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Ping' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => deltas.push(text),
+      onTransportFallback: (event) => {
+        fallbackEvent = event;
+      }
+    });
+
+    assertHttpRequest(capturedRequest, '/backend-api/codex/responses');
+    assertEqual(deltas.join(''), 'fallback path', 'auto fallback streamed text');
+    assertEqual(fallbackEvent?.from, 'websocket', 'fallback from transport');
+    assertEqual(fallbackEvent?.to, 'http', 'fallback to transport');
+  } finally {
+    server.close();
+  }
+}
+
+async function runWebSocketTransportSmokeTest(streamResponseText) {
+  let capturedUpgrade;
+  let capturedClientEvent;
+  let sessionEvent;
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    capturedUpgrade = {
+      url: request.url,
+      authorization: request.headers.authorization,
+      userAgent: request.headers['user-agent'],
+      accountId: request.headers['chatgpt-account-id']
+    };
+
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', (data) => {
+      capturedClientEvent = JSON.parse(data.toString('utf8'));
+      webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'hello' }));
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: ' websocket' }));
+      webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws', status: 'completed' } }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const deltas = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Ping' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => deltas.push(text),
+      onWebSocketSession: (event) => {
+        sessionEvent = event;
+      }
+    });
+
+    assertEqual(capturedUpgrade.url, '/backend-api/codex/responses', 'WebSocket upgrade path');
+    assertEqual(capturedUpgrade.authorization, 'Bearer test-api-key', 'WebSocket authorization header');
+    assertEqual(capturedUpgrade.userAgent, 'local.codex-for-copilot/1.0.1 Codex-Extension', 'WebSocket user agent');
+    assertEqual(capturedUpgrade.accountId, 'acct-test', 'WebSocket ChatGPT account id header');
+    assertEqual(capturedClientEvent.type, 'response.create', 'WebSocket client event type');
+    assertEqual(capturedClientEvent.model, 'gpt-5.5', 'WebSocket model');
+    assertEqual(capturedClientEvent.instructions, 'Smoke test instructions', 'WebSocket instructions');
+    assertEqual(capturedClientEvent.store, false, 'WebSocket store flag');
+    assertEqual('stream' in capturedClientEvent, false, 'WebSocket stream flag omitted');
+    assertEqual('max_output_tokens' in capturedClientEvent, false, 'WebSocket max output tokens omitted for Codex account auth');
+    assertEqual(JSON.stringify(capturedClientEvent.input), JSON.stringify([{ role: 'user', content: 'Ping' }]), 'WebSocket input');
+    assertEqual(deltas.join(''), 'hello websocket', 'WebSocket streamed text');
+    assertEqual(sessionEvent?.reused, false, 'WebSocket initial session reuse state');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runWebSocketContinuationSmokeTest(streamResponseText) {
+  let capturedClientEvent;
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', (data) => {
+      capturedClientEvent = JSON.parse(data.toString('utf8'));
+      webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_cont', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'continued' }));
+      webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_cont', status: 'completed' } }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const deltas = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      previousResponseId: 'resp_previous',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Only the delta' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => deltas.push(text)
+    });
+
+    assertEqual(capturedClientEvent.type, 'response.create', 'continuation client event type');
+    assertEqual(capturedClientEvent.previous_response_id, 'resp_previous', 'continuation previous response id');
+    assertEqual(JSON.stringify(capturedClientEvent.input), JSON.stringify([{ role: 'user', content: 'Only the delta' }]), 'continuation delta input');
+    assertEqual(deltas.join(''), 'continued', 'continuation streamed text');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runWebSocketSequentialReuseSmokeTest(streamResponseText) {
+  let upgradeCount = 0;
+  let connectionCount = 0;
+  const receivedEvents = [];
+  const sessionEvents = [];
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    upgradeCount += 1;
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    connectionCount += 1;
+
+    webSocket.on('message', (data) => {
+      const event = JSON.parse(data.toString('utf8'));
+      receivedEvents.push(event);
+
+      if (receivedEvents.length === 1) {
+        webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_reuse_1', status: 'in_progress' } }));
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'first' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_reuse_1', status: 'completed' } }));
+        return;
+      }
+
+      webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_reuse_2', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: ' second' }));
+      webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_reuse_2', status: 'completed' } }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const firstDeltas = [];
+    const secondDeltas = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'First turn' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => firstDeltas.push(text),
+      onWebSocketSession: (event) => {
+        sessionEvents.push(event);
+      }
+    });
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      previousResponseId: 'resp_ws_reuse_1',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Second turn delta' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => secondDeltas.push(text),
+      onWebSocketSession: (event) => {
+        sessionEvents.push(event);
+      }
+    });
+
+    assertEqual(upgradeCount, 1, 'sequential reuse upgrade count');
+    assertEqual(connectionCount, 1, 'sequential reuse connection count');
+    assertEqual(receivedEvents.length, 2, 'sequential reuse message count');
+    assertEqual(receivedEvents[1].previous_response_id, 'resp_ws_reuse_1', 'sequential reuse previous response id');
+    assertEqual(firstDeltas.join(''), 'first', 'sequential reuse first output');
+    assertEqual(secondDeltas.join(''), ' second', 'sequential reuse second output');
+    assertEqual(sessionEvents.length, 2, 'sequential reuse session event count');
+    assertEqual(sessionEvents[0].reused, false, 'sequential reuse first session state');
+    assertEqual(sessionEvents[1].reused, true, 'sequential reuse second session state');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+function createHeaders() {
+  return {
+    'User-Agent': 'local.codex-for-copilot/1.0.1 Codex-Extension',
+    'ChatGPT-Account-ID': 'acct-test'
+  };
+}
+
+function createCancellationToken() {
+  return {
+    isCancellationRequested: false,
+    onCancellationRequested: () => ({ dispose() {} })
+  };
+}
+
+function assertHttpRequest(capturedRequest, expectedUrl) {
   assertEqual(capturedRequest.method, 'POST', 'method');
-  assertEqual(capturedRequest.url, '/backend-api/codex/responses', 'request path');
+  assertEqual(capturedRequest.url, expectedUrl, 'request path');
   assertEqual(capturedRequest.authorization, 'Bearer test-api-key', 'authorization header');
-  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot Codex for Copilot', 'user agent');
+  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot/1.0.1 Codex-Extension', 'user agent');
   assertEqual(capturedRequest.accountId, 'acct-test', 'ChatGPT account id header');
   assertEqual(capturedRequest.body.model, 'gpt-5.5', 'model');
   assertEqual(capturedRequest.body.instructions, 'Smoke test instructions', 'top-level instructions');
@@ -99,13 +397,22 @@ try {
   assertEqual(capturedRequest.body.stream, true, 'stream flag');
   assertEqual('max_output_tokens' in capturedRequest.body, false, 'max output tokens omitted for Codex account auth');
   assertEqual(JSON.stringify(capturedRequest.body.input), JSON.stringify([{ role: 'user', content: 'Ping' }]), 'input');
-  assertEqual(deltas.join(''), 'hello world', 'streamed text');
+}
 
-  console.log('Smoke test passed: request shape and streaming deltas are correct.');
-} finally {
-  Module._load = moduleLoad;
-  server.close();
-  await rm(tempDir, { recursive: true, force: true });
+function writeSseResponse(response, deltas) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive'
+  });
+
+  for (const delta of deltas) {
+    response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta })}\n\n`);
+  }
+
+  response.write('data: {"type":"response.completed","response":{"id":"resp_mock","object":"response","status":"completed"}}\n\n');
+  response.write('data: [DONE]\n\n');
+  response.end();
 }
 
 function assertEqual(actual, expected, label) {

@@ -70,6 +70,7 @@ interface UpstreamModel {
   comp_hash?: unknown;
   supported_in_api?: unknown;
   visibility?: unknown;
+  multi_agent_version?: unknown;
   default_reasoning_level?: unknown;
   supported_reasoning_levels?: unknown;
 }
@@ -137,7 +138,7 @@ export async function fetchAvailableModels(
       ? payload.data
       : [];
 
-  return discovered.filter(isUpstreamModel).filter((model) => isModelVisible(model));
+  return discovered.filter(isUpstreamModel).filter(isModelVisible);
 }
 
 export function buildProviderModels(config: ProviderConfig, upstreamModels: UpstreamModel[]): ResolvedProviderModel[] {

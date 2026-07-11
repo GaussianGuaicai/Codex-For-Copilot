@@ -9,6 +9,12 @@ import { ProxyAgent, fetch as undiciFetch } from 'undici';
 
 const requestedModel = process.env.CODEX_TEST_MODEL || 'gpt-5.5';
 const requestedServiceTier = process.env.CODEX_TEST_SERVICE_TIER;
+const requestedTransport = process.env.CODEX_TEST_TRANSPORT === 'websocket'
+  ? 'websocket'
+  : process.env.CODEX_TEST_TRANSPORT === 'auto'
+    ? 'auto'
+    : 'http';
+const runContinuationProbe = process.env.CODEX_TEST_CONTINUATION === '1';
 const requestServiceTier = requestedServiceTier === 'fast'
   ? 'priority'
   : requestedServiceTier === 'auto' || requestedServiceTier === undefined
@@ -61,7 +67,7 @@ try {
   };
 
   const { getApiCredentials, DEFAULT_USER_AGENT } = require(secretsBundlePath);
-  const { streamResponseText } = require(responsesBundlePath);
+  const { disposeReusableResponsesWebSockets, streamResponseText } = require(responsesBundlePath);
   const auth = JSON.parse(await readFile(join(process.env.USERPROFILE, '.codex', 'auth.json'), 'utf8'));
   const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 
@@ -91,12 +97,16 @@ try {
   assertEqual(credentials.omitMaxOutputTokens, true, 'omit max_output_tokens');
 
   const deltas = [];
+  const sessionEvents = [];
   let createdServiceTier = null;
   let completedServiceTier = null;
+  let transportFallback = null;
+  let previousResponseId = null;
   await streamResponseText({
     baseURL: 'https://chatgpt.com/backend-api/codex/responses',
     apiKey: credentials.apiKey,
     headers: credentials.headers,
+    transport: requestedTransport,
     omitMaxOutputTokens: credentials.omitMaxOutputTokens,
     model: requestedModel,
     instructions: 'You are a test assistant.',
@@ -110,21 +120,73 @@ try {
     onTextDelta: (text) => deltas.push(text),
     onResponseCreated: (response) => {
       createdServiceTier = response.service_tier ?? null;
+      previousResponseId = response.id ?? previousResponseId;
     },
     onResponseCompleted: (response) => {
       completedServiceTier = response.service_tier ?? null;
+      previousResponseId = response.id ?? previousResponseId;
+    },
+    onTransportFallback: (event) => {
+      transportFallback = event;
+    },
+    onWebSocketSession: (event) => {
+      sessionEvents.push(event);
     }
   });
 
   assertEqual(deltas.join('').trim(), 'OK', 'real backend output');
+  let continuationOutput = null;
+
+  if (runContinuationProbe) {
+    if (!previousResponseId) {
+      throw new Error('Continuation probe requires the initial response id.');
+    }
+
+    const continuationDeltas = [];
+    await streamResponseText({
+      baseURL: 'https://chatgpt.com/backend-api/codex/responses',
+      apiKey: credentials.apiKey,
+      headers: credentials.headers,
+      transport: requestedTransport,
+      previousResponseId,
+      omitMaxOutputTokens: credentials.omitMaxOutputTokens,
+      model: requestedModel,
+      instructions: 'You are a test assistant.',
+      ...(requestServiceTier ? { serviceTier: requestServiceTier } : {}),
+      input: [{ role: 'user', content: 'Reply with PONG only.' }],
+      maxOutputTokens: 32,
+      token: {
+        isCancellationRequested: false,
+        onCancellationRequested: () => ({ dispose() {} })
+      },
+      onTextDelta: (text) => continuationDeltas.push(text),
+      onTransportFallback: (event) => {
+        transportFallback = event;
+      },
+      onWebSocketSession: (event) => {
+        sessionEvents.push(event);
+      }
+    });
+
+    continuationOutput = continuationDeltas.join('').trim();
+    assertEqual(continuationOutput, 'PONG', 'continuation output');
+  }
+
   console.log(JSON.stringify({
     model: requestedModel,
+    transport: requestedTransport,
+    continuationProbe: runContinuationProbe,
     requestedServiceTier: requestedServiceTier ?? null,
     requestServiceTier: requestServiceTier ?? null,
     createdServiceTier,
     completedServiceTier,
-    output: deltas.join('').trim()
+    transportFallback,
+    webSocketSessionReuse: sessionEvents.map((event) => event.reused),
+    output: deltas.join('').trim(),
+    continuationOutput
   }));
+
+  disposeReusableResponsesWebSockets();
 } finally {
   Module._load = moduleLoad;
   delete globalThis.fetch;
