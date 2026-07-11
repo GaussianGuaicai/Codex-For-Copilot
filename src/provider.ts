@@ -39,7 +39,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
   private readonly responseBranchStore = new ResponseBranchStore();
-  private readonly unavailableModels = new Map<string, number>();
+  private readonly runtimeAvailability = new RuntimeModelAvailability();
   private cachedModels?: {
     key: string;
     expiresAt: number;
@@ -294,7 +294,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             });
           }
 
-            void this.accountUsageRefreshSink?.refresh();
+          void this.accountUsageRefreshSink?.refresh();
         },
         onResponseFailed: (message) => {
           this.outputChannel.error(`response failed model=${selectedModel.requestModel} previousResponseId=${previousResponseId ?? 'none'} message=${message}`);
@@ -429,20 +429,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>,
     token: vscode.CancellationToken
   ): Promise<ResolvedProviderModel[]> {
-    const cacheKey = [
-      config.baseURL,
-      config.clientVersion,
-      config.credentialsSource,
-      config.transport,
-      config.model,
-      config.disabledModels.join(','),
-      stableSerialize(config.modelAliases),
-      config.defaultServiceTier ?? 'auto',
-      config.defaultReasoningEffort ?? 'auto',
-      config.maxOutputTokens,
-      credentials.source,
-      getCredentialIdentity(credentials)
-    ].join('|');
+    const authIdentity = getCredentialIdentity(credentials);
+    const cacheKey = buildModelCacheKey(config, credentials.source, authIdentity);
 
     if (this.cachedModels && this.cachedModels.key === cacheKey && this.cachedModels.expiresAt > Date.now()) {
       this.outputChannel.debug('getAvailableModels cache hit', {
@@ -457,7 +445,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     try {
       const upstreamModels = await fetchAvailableModels(config, credentials, token);
       models = buildProviderModels(config, upstreamModels);
-      models = this.applyModelDiscoveryPolicy(models, config, getCredentialIdentity(credentials));
+      models = this.applyModelDiscoveryPolicy(models, config, authIdentity);
       this.outputChannel.info('getAvailableModels discovery success', {
         discoveredCount: upstreamModels.length,
         returnedCount: models.length,
@@ -465,7 +453,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
     } catch {
       models = [buildFallbackModel(config)];
-      models = this.applyModelDiscoveryPolicy(models, config, getCredentialIdentity(credentials));
+      models = this.applyModelDiscoveryPolicy(models, config, authIdentity);
       this.outputChannel.warn('getAvailableModels discovery failed, using fallback model', {
         fallbackModel: config.model
       });
@@ -481,8 +469,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   }
 
   private markModelUnavailable(model: string, config: ProviderConfig, authIdentity: string): void {
-    this.evictExpiredUnavailableModels();
-    this.unavailableModels.set(this.getUnavailableModelScopeKey(model, config, authIdentity), Date.now() + 10 * 60 * 1000);
+    this.runtimeAvailability.markTemporarilyUnavailable(model, config, authIdentity);
     this.cachedModels = undefined;
     this.modelInfoChangedEmitter.fire();
     this.outputChannel.warn('model marked unavailable after responses rejection', {
@@ -491,15 +478,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       authIdentity,
       baseURL: normalizeBaseURL(config.baseURL)
     });
-  }
-
-  private evictExpiredUnavailableModels(): void {
-    const now = Date.now();
-    for (const [modelKey, expiresAt] of this.unavailableModels.entries()) {
-      if (expiresAt <= now) {
-        this.unavailableModels.delete(modelKey);
-      }
-    }
   }
 
   private resolveRequestModel(
@@ -569,10 +547,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   }
 
   private applyModelDiscoveryPolicy(models: ResolvedProviderModel[], config: ProviderConfig, authIdentity: string): ResolvedProviderModel[] {
-    this.evictExpiredUnavailableModels();
     const disabledModels = new Set([
       ...config.disabledModels,
-      ...this.getUnavailableModelsForScope(config, authIdentity)
+      ...this.runtimeAvailability.getTemporarilyUnavailableModels(config, authIdentity)
     ]);
     const availableModelNames = new Set(models.map((model) => model.requestModel));
     const aliasedSources = new Set(
@@ -602,21 +579,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     return filteredModels;
   }
 
-  private getUnavailableModelsForScope(config: ProviderConfig, authIdentity: string): string[] {
-    const scopePrefix = this.getUnavailableModelScopePrefix(config, authIdentity);
-    return [...this.unavailableModels.keys()]
-      .filter((entry) => entry.startsWith(scopePrefix))
-      .map((entry) => entry.slice(scopePrefix.length));
-  }
-
-  private getUnavailableModelScopeKey(model: string, config: ProviderConfig, authIdentity: string): string {
-    return `${this.getUnavailableModelScopePrefix(config, authIdentity)}${model}`;
-  }
-
-  private getUnavailableModelScopePrefix(config: ProviderConfig, authIdentity: string): string {
-    return `${normalizeBaseURL(config.baseURL)}|${authIdentity}|${config.transport}|`;
-  }
-
   private resolveModelAlias(
     model: string,
     modelAliases: Record<string, string>,
@@ -628,6 +590,40 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     return availableModels.find((candidate) => candidate.requestModel === targetModel);
+  }
+}
+
+class RuntimeModelAvailability {
+  private readonly temporarilyUnavailableModels = new Map<string, number>();
+
+  markTemporarilyUnavailable(model: string, config: ProviderConfig, authIdentity: string): void {
+    this.evictExpiredEntries();
+    this.temporarilyUnavailableModels.set(this.getScopeKey(model, config, authIdentity), Date.now() + 10 * 60 * 1000);
+  }
+
+  getTemporarilyUnavailableModels(config: ProviderConfig, authIdentity: string): string[] {
+    this.evictExpiredEntries();
+    const scopePrefix = this.getScopePrefix(config, authIdentity);
+    return [...this.temporarilyUnavailableModels.keys()]
+      .filter((entry) => entry.startsWith(scopePrefix))
+      .map((entry) => entry.slice(scopePrefix.length));
+  }
+
+  private evictExpiredEntries(): void {
+    const now = Date.now();
+    for (const [modelKey, expiresAt] of this.temporarilyUnavailableModels.entries()) {
+      if (expiresAt <= now) {
+        this.temporarilyUnavailableModels.delete(modelKey);
+      }
+    }
+  }
+
+  private getScopeKey(model: string, config: ProviderConfig, authIdentity: string): string {
+    return `${this.getScopePrefix(config, authIdentity)}${model}`;
+  }
+
+  private getScopePrefix(config: ProviderConfig, authIdentity: string): string {
+    return `${normalizeBaseURL(config.baseURL)}|${authIdentity}|${config.transport}|`;
   }
 }
 
@@ -682,6 +678,27 @@ function collectErrorMessages(error: unknown): string[] {
 
   visit(error);
   return messages;
+}
+
+function buildModelCacheKey(
+  config: ProviderConfig,
+  credentialSource: string,
+  authIdentity: string
+): string {
+  return [
+    config.baseURL,
+    config.clientVersion,
+    config.credentialsSource,
+    config.transport,
+    config.model,
+    config.disabledModels.join(','),
+    stableSerialize(config.modelAliases),
+    config.defaultServiceTier ?? 'auto',
+    config.defaultReasoningEffort ?? 'auto',
+    config.maxOutputTokens,
+    credentialSource,
+    authIdentity
+  ].join('|');
 }
 
 function getRequestServiceTier(serviceTier: ProviderConfig['defaultServiceTier']): 'default' | 'priority' | undefined {
