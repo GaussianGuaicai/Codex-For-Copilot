@@ -4,12 +4,14 @@
 
 The extension source lives in [`src/`](src/). Key modules are:
 - `config.ts`: reads and normalizes extension settings
-- `convertMessages.ts`: adapts VS Code chat messages into Responses input
+- `convertMessages.ts`: adapts VS Code chat messages into Responses input and compares conversation history
 - `extension.ts`: VS Code activation and command registration
 - `models.ts`: model discovery and provider metadata
-- `provider.ts`: language model provider surface
+- `provider.ts`: language model provider surface and runtime model availability
+- `responseBranchStore.ts`: compatible `previous_response_id` branch reuse
 - `responsesClient.ts`: shared Responses request builder plus HTTP/WebSocket streaming transport facade
-- `secrets.ts`: credential loading from `~/.codex/auth.json` or SecretStorage
+- `secrets.ts`: credential selection across the Codex auth manager, `~/.codex/auth.json`, and SecretStorage
+- `auth/`: imported Codex credential storage, refresh, locking, JWT parsing, and request authentication
 
 Compiled output is written to `out/` and should be treated as build artifacts. Tests live in `test/`. Workspace debug helpers are in `.vscode/`.
 
@@ -18,6 +20,9 @@ Transport-related constraints that must not break:
 - HTTP and WebSocket transports must emit the same provider-facing callbacks for text, reasoning, tool calls, completion, and failure.
 - ChatGPT/Codex custom headers for WebSocket requests are passed via the WebSocket constructor options, not via OpenAI client `defaultHeaders`.
 - The runtime now depends on the `ws` package because `openai/resources/responses/ws` requires it outside the SDK bundle.
+- `auto` fallback is limited to transport availability failures. Structured WebSocket API errors must be surfaced without an HTTP retry.
+- WebSocket sessions may be reused, but concurrent requests must never share an in-use socket.
+- Responses branch reuse requires append-only history and an identical request envelope. Model, instructions, tool definitions, or tool schema changes must bust reuse.
 
 ## Build, Test, and Development Commands
 
@@ -26,6 +31,7 @@ Transport-related constraints that must not break:
 - `npm run compile`: type-check and bundle `src/extension.ts` into `out/extension.js`
 - `npm run test:smoke`: verify request shape and streaming against a local mock server
 - `npm run test:real-backend`: verify the extension request path against the ChatGPT Codex backend using local auth. Set `CODEX_TEST_MODEL` and `CODEX_TEST_SERVICE_TIER` to probe a single model or service tier.
+- For transport probes, set `CODEX_TEST_TRANSPORT` to `http`, `websocket`, or `auto`; set `CODEX_TEST_CONTINUATION=1` to exercise `previous_response_id` continuation.
 
 For interactive extension debugging, press `F5` in VS Code and launch the Extension Development Host using `.vscode/launch.json`.
 
@@ -65,6 +71,8 @@ PRs should include:
 - a brief summary of user-visible behavior changes
 - the commands you ran (`npm run check`, `npm run test:smoke`, etc.)
 - screenshots only when UI or model-picker behavior changes
+
+Releases are built by `.github/workflows/release.yml`. Keep `package.json` and `package-lock.json` versions aligned, merge the version bump to `master`, then push a matching `v<version>` tag. The workflow checks, compiles, runs smoke tests, packages the VSIX, creates the GitHub Release, and publishes to the VS Code Marketplace.
 
 ## Security & Configuration Tips
 

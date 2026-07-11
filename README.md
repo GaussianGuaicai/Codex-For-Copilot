@@ -10,7 +10,8 @@ It makes Codex appear in the VS Code model picker, discovers upstream models whe
 
 - Registers a `Codex` language model provider in VS Code.
 - Discovers available models from the backend and falls back to the configured model when discovery is unavailable.
-- Streams text, reasoning, and tool-call output back to VS Code.
+- Streams text, reasoning, and tool-call output over WebSocket or HTTP with matching behavior.
+- Reuses WebSocket sessions and compatible Responses branches for efficient follow-up turns.
 - Reads Codex credentials from the built-in Codex auth manager, with a legacy fallback to `~/.codex/auth.json`, or VS Code SecretStorage.
 - Shows last-response usage in the status bar and supports account-limit refresh.
 
@@ -50,6 +51,7 @@ Common settings:
 
 - `codexModelProvider.baseURL`: Codex backend URL, defaulting to `https://chatgpt.com/backend-api/codex/responses`
 - `codexModelProvider.credentialsSource`: `auto`, `codexAuth`, or `secretStorage`. `auto` prefers the Codex auth manager, then the legacy `~/.codex/auth.json` fallback, then SecretStorage.
+- `codexModelProvider.transport`: `auto`, `http`, or `websocket`. `auto` prefers WebSocket and falls back to HTTP only when the WebSocket transport is unavailable; API errors are returned directly.
 - `codexModelProvider.model`: fallback model when discovery fails
 - `codexModelProvider.disabledModels`: model IDs to hide when the backend advertises a model that should not appear in the picker
 - `codexModelProvider.modelAliases`: map stale or rejected model IDs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`
@@ -81,7 +83,7 @@ npm run test:real-backend
 npm run package:vsix
 ```
 
-`npm run test:smoke` runs the local mock-based client checks. `npm run test:real-backend` talks to the live Codex backend and expects valid Codex credentials.
+`npm run test:smoke` runs self-contained checks for HTTP/WebSocket parity, transport fallback, provider model availability, conversation reuse, account usage, and authentication. `npm run test:real-backend` talks to the live Codex backend and expects valid Codex credentials. Set `CODEX_TEST_TRANSPORT=websocket` or `auto` to probe that transport, and set `CODEX_TEST_CONTINUATION=1` to include a follow-up request using `previous_response_id`.
 
 ## Troubleshooting
 

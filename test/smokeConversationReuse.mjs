@@ -298,10 +298,12 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
   assertEqual(left.identityKey, right.identityKey, 'tool catalog does not bust reuse identity key');
 
   const store = new ResponseBranchStore();
-  const branchId = store.recordSuccess(left, previousInput, 'resp_tool_catalog_base');
+  store.recordSuccess(left, previousInput, 'resp_tool_catalog_base');
   const additiveMatch = store.findReusableBranch(right, currentInput);
-  assertEqual(additiveMatch?.branchId, branchId, 'additive tool catalog keeps reusable branch');
-  assertEqual(additiveMatch?.responseId, 'resp_tool_catalog_base', 'additive tool catalog reuses previous response id');
+  assertEqual(additiveMatch, undefined, 'added tool busts reuse');
+  const additiveDiagnostic = store.explainReuseMiss(right, currentInput);
+  assertEqual(additiveDiagnostic?.toolCompatibility?.addedToolNames.length, 1, 'added tool diagnostic count');
+  assertEqual(additiveDiagnostic?.toolCompatibility?.addedToolNames[0], 'run_in_terminal', 'added tool diagnostic name');
 
   const changedMatch = store.findReusableBranch(reuseEnvelope(left.identityKey, buildResponseBranchToolSignatures(currentToolsWithChange)), currentInput);
   assertEqual(changedMatch, undefined, 'changed existing tool busts reuse');
