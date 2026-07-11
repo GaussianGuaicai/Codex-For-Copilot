@@ -128,6 +128,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       throw new Error('Codex credentials are missing. Run "Codex for Copilot: Import Codex auth.json".');
     }
 
+    const authIdentity = getCredentialIdentity(credentials);
     const availableModels = await this.getAvailableModels(config, credentials, token);
     let selectedModel = this.resolveRequestModel(model.id, config, availableModels);
     this.selectedModelSink?.setSelectedModel(selectedModel.requestModel);
@@ -140,7 +141,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const input = convertMessagesToResponsesInput(messages);
     const createReuseEnvelope = (requestModel: string) => buildResponseBranchReuseEnvelope({
       baseURL: normalizeBaseURL(config.baseURL),
-      authIdentity: getCredentialIdentity(credentials),
+      authIdentity,
       model: requestModel,
       instructions: config.instructions,
       reasoningEffort,
@@ -328,7 +329,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           throw error;
         }
 
-        this.markModelUnavailable(unavailableModel);
+        this.markModelUnavailable(unavailableModel, config, authIdentity);
 
         this.outputChannel.warn('response model unavailable', {
           rejectedModel: unavailableModel,
@@ -432,13 +433,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       config.baseURL,
       config.clientVersion,
       config.credentialsSource,
+      config.transport,
       config.model,
       config.disabledModels.join(','),
       stableSerialize(config.modelAliases),
       config.defaultServiceTier ?? 'auto',
       config.defaultReasoningEffort ?? 'auto',
       config.maxOutputTokens,
-      credentials.source
+      credentials.source,
+      getCredentialIdentity(credentials)
     ].join('|');
 
     if (this.cachedModels && this.cachedModels.key === cacheKey && this.cachedModels.expiresAt > Date.now()) {
@@ -454,7 +457,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     try {
       const upstreamModels = await fetchAvailableModels(config, credentials, token);
       models = buildProviderModels(config, upstreamModels);
-      models = this.applyModelDiscoveryPolicy(models, config);
+      models = this.applyModelDiscoveryPolicy(models, config, getCredentialIdentity(credentials));
       this.outputChannel.info('getAvailableModels discovery success', {
         discoveredCount: upstreamModels.length,
         returnedCount: models.length,
@@ -462,7 +465,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
     } catch {
       models = [buildFallbackModel(config)];
-      models = this.applyModelDiscoveryPolicy(models, config);
+      models = this.applyModelDiscoveryPolicy(models, config, getCredentialIdentity(credentials));
       this.outputChannel.warn('getAvailableModels discovery failed, using fallback model', {
         fallbackModel: config.model
       });
@@ -477,21 +480,24 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     return models;
   }
 
-  private markModelUnavailable(model: string): void {
+  private markModelUnavailable(model: string, config: ProviderConfig, authIdentity: string): void {
     this.evictExpiredUnavailableModels();
-    this.unavailableModels.set(model, Date.now() + 10 * 60 * 1000);
+    this.unavailableModels.set(this.getUnavailableModelScopeKey(model, config, authIdentity), Date.now() + 10 * 60 * 1000);
     this.cachedModels = undefined;
     this.modelInfoChangedEmitter.fire();
     this.outputChannel.warn('model marked unavailable after responses rejection', {
-      model
+      model,
+      transport: config.transport,
+      authIdentity,
+      baseURL: normalizeBaseURL(config.baseURL)
     });
   }
 
   private evictExpiredUnavailableModels(): void {
     const now = Date.now();
-    for (const [model, expiresAt] of this.unavailableModels.entries()) {
+    for (const [modelKey, expiresAt] of this.unavailableModels.entries()) {
       if (expiresAt <= now) {
-        this.unavailableModels.delete(model);
+        this.unavailableModels.delete(modelKey);
       }
     }
   }
@@ -562,9 +568,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     };
   }
 
-  private applyModelDiscoveryPolicy(models: ResolvedProviderModel[], config: ProviderConfig): ResolvedProviderModel[] {
+  private applyModelDiscoveryPolicy(models: ResolvedProviderModel[], config: ProviderConfig, authIdentity: string): ResolvedProviderModel[] {
     this.evictExpiredUnavailableModels();
-    const disabledModels = new Set([...config.disabledModels, ...this.unavailableModels.keys()]);
+    const disabledModels = new Set([
+      ...config.disabledModels,
+      ...this.getUnavailableModelsForScope(config, authIdentity)
+    ]);
     const availableModelNames = new Set(models.map((model) => model.requestModel));
     const aliasedSources = new Set(
       Object.entries(config.modelAliases)
@@ -591,6 +600,21 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     return filteredModels;
+  }
+
+  private getUnavailableModelsForScope(config: ProviderConfig, authIdentity: string): string[] {
+    const scopePrefix = this.getUnavailableModelScopePrefix(config, authIdentity);
+    return [...this.unavailableModels.keys()]
+      .filter((entry) => entry.startsWith(scopePrefix))
+      .map((entry) => entry.slice(scopePrefix.length));
+  }
+
+  private getUnavailableModelScopeKey(model: string, config: ProviderConfig, authIdentity: string): string {
+    return `${this.getUnavailableModelScopePrefix(config, authIdentity)}${model}`;
+  }
+
+  private getUnavailableModelScopePrefix(config: ProviderConfig, authIdentity: string): string {
+    return `${normalizeBaseURL(config.baseURL)}|${authIdentity}|${config.transport}|`;
   }
 
   private resolveModelAlias(

@@ -146,9 +146,10 @@ const { CodexModelProvider } = require(bundlePath);
 
 try {
   await runProviderFallbackSmokeTest();
-  await runProviderLegacyCatalogFilterSmokeTest();
+  await runProviderCatalogVersionNeutralSmokeTest();
+  await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
-  console.log('Smoke test passed: provider hides legacy catalog models and temporarily disables rejected models without retrying.');
+  console.log('Smoke test passed: provider keeps catalog discovery separate from runtime availability and temporarily disables rejected models without retrying.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
@@ -266,7 +267,7 @@ async function runProviderFallbackSmokeTest() {
   }
 }
 
-async function runProviderLegacyCatalogFilterSmokeTest() {
+async function runProviderCatalogVersionNeutralSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -320,9 +321,101 @@ async function runProviderLegacyCatalogFilterSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    assertEqual(models.map((model) => model.id).join(','), 'codex::gpt-5.6-sol', 'legacy multi-agent models hidden during discovery');
+    assertEqual(models.map((model) => model.id).join(','), 'codex::gpt-5.6-sol,codex::gpt-5.6-luna', 'multi-agent version does not affect discovery visibility');
   } finally {
     globalThis.fetch = originalFetch;
+    server.close();
+  }
+}
+
+async function runProviderUnavailableScopeSmokeTest() {
+  const requestedModels = [];
+
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [
+          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol'),
+          createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna')
+        ]
+      }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    requestedModels.push(`${configValues.transport}:${body.model}`);
+
+    if (body.model === 'gpt-5.6-luna') {
+      response.writeHead(404, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          message: 'Model not found gpt-5.6-luna',
+          type: 'invalid_request_error',
+          param: 'model',
+          code: null
+        }
+      }));
+      return;
+    }
+
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'unexpected request' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const initialModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const lunaModel = initialModels.find((item) => item.id === 'codex::gpt-5.6-luna');
+    if (!lunaModel) {
+      throw new Error('Expected luna model to be discoverable before scoped unavailability check.');
+    }
+
+    try {
+      await provider.provideLanguageModelChatResponse(
+        lunaModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch {}
+
+    const httpModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(httpModels.some((item) => item.id === 'codex::gpt-5.6-luna'), false, 'same transport hides temporarily unavailable model');
+
+    configValues.transport = 'websocket';
+    const websocketModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(websocketModels.some((item) => item.id === 'codex::gpt-5.6-luna'), true, 'temporarily unavailable cache is scoped by transport');
+    assertEqual(requestedModels.join(','), 'http:gpt-5.6-luna', 'scoped unavailability test issues only one failing request');
+  } finally {
+    configValues.transport = 'http';
     server.close();
   }
 }

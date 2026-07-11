@@ -138,7 +138,7 @@ export async function fetchAvailableModels(
       ? payload.data
       : [];
 
-  return discovered.filter(isUpstreamModel).filter((model) => isModelVisible(model, config));
+  return discovered.filter(isUpstreamModel).filter(isModelVisible);
 }
 
 export function buildProviderModels(config: ProviderConfig, upstreamModels: UpstreamModel[]): ResolvedProviderModel[] {
@@ -375,7 +375,7 @@ function isUpstreamModel(value: unknown): value is UpstreamModel {
   return typeof value === 'object' && value !== null;
 }
 
-function isModelVisible(model: UpstreamModel, config: ProviderConfig): boolean {
+function isModelVisible(model: UpstreamModel): boolean {
   if (model.supported_in_api === false) {
     return false;
   }
@@ -392,24 +392,7 @@ function isModelVisible(model: UpstreamModel, config: ProviderConfig): boolean {
     }
   }
 
-  if (isLegacyCodexCatalogModel(model, config)) {
-    return false;
-  }
-
   return true;
-}
-
-function isLegacyCodexCatalogModel(model: UpstreamModel, config: ProviderConfig): boolean {
-  const normalizedBaseURL = normalizeBaseURL(config.baseURL).toLowerCase();
-  if (!normalizedBaseURL.includes('chatgpt.com/backend-api/codex')) {
-    return false;
-  }
-
-  const multiAgentVersion = typeof model.multi_agent_version === 'string'
-    ? model.multi_agent_version.trim().toLowerCase()
-    : '';
-
-  return multiAgentVersion !== '' && multiAgentVersion !== 'v2';
 }
 
 function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
