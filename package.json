@@ -27,7 +27,7 @@
     "compile": "npm run check && node esbuild.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
-    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
+    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
@@ -142,6 +142,28 @@
           "type": "string",
           "default": "gpt-5.5",
           "description": "Fallback model ID used only when upstream model discovery is unavailable.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.disabledModels": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Model IDs to hide from discovered upstream models. Use this to suppress backend-advertised models that are not callable for your account.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.modelAliases": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map stale or rejected model IDs to replacement model IDs. Aliased source models are hidden when the replacement is available, and stale selections resolve to the replacement.",
           "tags": [
             "advanced"
           ]

@@ -124,6 +124,8 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
           throw error;
         }
 
+        disposeReusableResponsesWebSockets();
+
         options.onTransportFallback?.({
           from: 'websocket',
           to: 'http',
@@ -230,6 +232,16 @@ async function streamResponseTextOverWebSocket(
       }
 
       if (streamEvent.type === 'error') {
+        const mismatchedModel = getMismatchedModelNotFoundName(streamEvent.error, options.model);
+        if (mismatchedModel) {
+          releaseReusableWebSocketSession(session, undefined, false);
+          disposeReusableResponsesWebSockets();
+          throw new WebSocketTransportUnavailableError(
+            `Responses WebSocket resolved stale model ${mismatchedModel} while requesting ${options.model}.`,
+            { cause: streamEvent.error }
+          );
+        }
+
         if (options.previousResponseId && isPreviousResponseNotFoundError(streamEvent.error.error?.code, streamEvent.error.error?.message)) {
           releaseReusableWebSocketSession(session, undefined, false);
           throw new ResponsesContinuationMissError(
@@ -463,6 +475,13 @@ function handleResponsesServerEvent(event: ResponsesServerEvent, options: Stream
   if (event.type === 'response.failed') {
     const error = event.response.error;
 
+    const mismatchedModel = getMismatchedModelNotFoundName(error?.message, options.model);
+    if (mismatchedModel && options.transport !== 'http') {
+      throw new WebSocketTransportUnavailableError(
+        `Responses WebSocket resolved stale model ${mismatchedModel} while requesting ${options.model}.`
+      );
+    }
+
     if (options.previousResponseId && isPreviousResponseNotFoundError(error?.code, error?.message)) {
       throw new ResponsesContinuationMissError(
         error?.message ?? 'Responses API previous_response_id was not found.',
@@ -484,7 +503,68 @@ function shouldFallbackToHttp(
     return false;
   }
 
-  return error instanceof WebSocketTransportUnavailableError;
+  return error instanceof WebSocketTransportUnavailableError || Boolean(getModelNotFoundName(error));
+}
+
+function getMismatchedModelNotFoundName(error: { error?: { message?: string | null } | undefined; message: string } | string | undefined, requestedModel: string): string | undefined {
+  const missingModel = getModelNotFoundName(error);
+  if (!missingModel || missingModel === requestedModel) {
+    return undefined;
+  }
+
+  return missingModel;
+}
+
+function getModelNotFoundName(error: unknown): string | undefined {
+  const candidates = collectErrorMessages(error);
+
+  for (const message of candidates) {
+    const match = /Model not found\s+([^"\s}]+)/i.exec(message);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return undefined;
+}
+
+function collectErrorMessages(error: unknown): string[] {
+  const messages: string[] = [];
+
+  const visit = (value: unknown) => {
+    if (!value) {
+      return;
+    }
+
+    if (typeof value === 'string') {
+      messages.push(value);
+      return;
+    }
+
+    if (value instanceof Error) {
+      messages.push(value.message);
+      visit((value as Error & { cause?: unknown }).cause);
+      return;
+    }
+
+    if (typeof value === 'object') {
+      const record = value as {
+        message?: unknown;
+        error?: unknown;
+        cause?: unknown;
+      };
+
+      if (typeof record.message === 'string') {
+        messages.push(record.message);
+      }
+
+      visit(record.error);
+      visit(record.cause);
+    }
+  };
+
+  visit(error);
+  return messages;
 }
 
 class WebSocketTransportUnavailableError extends Error {

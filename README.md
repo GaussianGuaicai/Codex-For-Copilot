@@ -51,6 +51,8 @@ Common settings:
 - `codexModelProvider.baseURL`: Codex backend URL, defaulting to `https://chatgpt.com/backend-api/codex/responses`
 - `codexModelProvider.credentialsSource`: `auto`, `codexAuth`, or `secretStorage`. `auto` prefers the Codex auth manager, then the legacy `~/.codex/auth.json` fallback, then SecretStorage.
 - `codexModelProvider.model`: fallback model when discovery fails
+- `codexModelProvider.disabledModels`: model IDs to hide when the backend advertises a model that should not appear in the picker
+- `codexModelProvider.modelAliases`: map stale or rejected model IDs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`
 - `codexModelProvider.instructions`: top-level Responses API instructions sent with every request
 - `codexModelProvider.defaultServiceTier`: default `service_tier` behavior
 - `codexModelProvider.defaultReasoningEffort`: fallback Thinking Effort setting

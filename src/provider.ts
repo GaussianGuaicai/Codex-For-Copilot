@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import type { ResponseUsage } from 'openai/resources/responses/responses';
 import { compareResponsesInputHistory, convertMessagesToResponsesInput, estimateTokenCount, stableSerialize, type ResponsesInputMessage } from './convertMessages';
 import { getProviderConfig, type ProviderConfig } from './config';
-import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
+import { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier, type ParsedModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
 import { countInputTokens, disposeReusableResponsesWebSockets, isResponsesContinuationMissError, normalizeBaseURL, streamResponseText } from './responsesClient';
 import { ResponseBranchStore, type ResponseBranchReuseEnvelope, type ResponseBranchToolSignatures } from './responseBranchStore';
 import { getApiCredentials } from './secrets';
@@ -39,6 +39,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
   private readonly responseBranchStore = new ResponseBranchStore();
+  private readonly unavailableModels = new Map<string, number>();
   private cachedModels?: {
     key: string;
     expiresAt: number;
@@ -127,7 +128,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       throw new Error('Codex credentials are missing. Run "Codex for Copilot: Import Codex auth.json".');
     }
 
-    const selectedModel = parseModelIdentifier(model.id || config.model);
+    const availableModels = await this.getAvailableModels(config, credentials, token);
+    let selectedModel = this.resolveRequestModel(model.id, config, availableModels);
     this.selectedModelSink?.setSelectedModel(selectedModel.requestModel);
     const reasoningEffort = getReasoningEffort(
       selectedModel.reasoningEffort,
@@ -136,15 +138,16 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     );
     const requestStartedAt = Date.now();
     const input = convertMessagesToResponsesInput(messages);
-    const reuseEnvelope = buildResponseBranchReuseEnvelope({
+    const createReuseEnvelope = (requestModel: string) => buildResponseBranchReuseEnvelope({
       baseURL: normalizeBaseURL(config.baseURL),
       authIdentity: getCredentialIdentity(credentials),
-      model: selectedModel.requestModel,
+      model: requestModel,
       instructions: config.instructions,
       reasoningEffort,
       toolMode: options.toolMode,
       tools: options.tools
     });
+    let reuseEnvelope = createReuseEnvelope(selectedModel.requestModel);
     const reusableBranch = this.responseBranchStore.findReusableBranch(reuseEnvelope, input);
     const reuseMissDiagnostic = reusableBranch
       ? undefined
@@ -320,7 +323,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       await streamRequest(initialRequestInput, initialPreviousResponseId);
     } catch (error) {
       if (!initialPreviousResponseId || !isResponsesContinuationMissError(error)) {
-        throw error;
+        const unavailableModel = getExactModelNotFoundName(error, selectedModel.requestModel);
+        if (!unavailableModel) {
+          throw error;
+        }
+
+        this.markModelUnavailable(unavailableModel);
+
+        this.outputChannel.warn('response model unavailable', {
+          rejectedModel: unavailableModel,
+          previousResponseId: initialPreviousResponseId ?? null
+        });
+
+        throw createTemporarilyUnavailableModelError(unavailableModel, error);
       }
 
       this.outputChannel.warn('response continuation reset', {
@@ -374,7 +389,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       return estimated;
     }
 
-    const selectedModel = parseModelIdentifier(model.id || config.model);
+    const availableModels = await this.getAvailableModels(config, credentials, token);
+    const selectedModel = this.resolveRequestModel(model.id, config, availableModels);
     const input = typeof text === 'string' ? text : convertMessagesToResponsesInput([text]);
     const startedAt = Date.now();
 
@@ -417,6 +433,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       config.clientVersion,
       config.credentialsSource,
       config.model,
+      config.disabledModels.join(','),
+      stableSerialize(config.modelAliases),
       config.defaultServiceTier ?? 'auto',
       config.defaultReasoningEffort ?? 'auto',
       config.maxOutputTokens,
@@ -436,6 +454,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     try {
       const upstreamModels = await fetchAvailableModels(config, credentials, token);
       models = buildProviderModels(config, upstreamModels);
+      models = this.applyModelDiscoveryPolicy(models, config);
       this.outputChannel.info('getAvailableModels discovery success', {
         discoveredCount: upstreamModels.length,
         returnedCount: models.length,
@@ -443,6 +462,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
     } catch {
       models = [buildFallbackModel(config)];
+      models = this.applyModelDiscoveryPolicy(models, config);
       this.outputChannel.warn('getAvailableModels discovery failed, using fallback model', {
         fallbackModel: config.model
       });
@@ -456,6 +476,188 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     return models;
   }
+
+  private markModelUnavailable(model: string): void {
+    this.evictExpiredUnavailableModels();
+    this.unavailableModels.set(model, Date.now() + 10 * 60 * 1000);
+    this.cachedModels = undefined;
+    this.modelInfoChangedEmitter.fire();
+    this.outputChannel.warn('model marked unavailable after responses rejection', {
+      model
+    });
+  }
+
+  private evictExpiredUnavailableModels(): void {
+    const now = Date.now();
+    for (const [model, expiresAt] of this.unavailableModels.entries()) {
+      if (expiresAt <= now) {
+        this.unavailableModels.delete(model);
+      }
+    }
+  }
+
+  private resolveRequestModel(
+    modelId: string | undefined,
+    config: ProviderConfig,
+    availableModels: readonly ResolvedProviderModel[]
+  ): ParsedModelIdentifier {
+    const requestedModel = parseModelIdentifier(modelId || config.model);
+    const availableModelNames = new Set(availableModels.map((candidate) => candidate.requestModel));
+
+    const aliasedModel = this.resolveModelAlias(requestedModel.requestModel, config.modelAliases, availableModels);
+    if (aliasedModel) {
+      this.outputChannel.warn('request model remapped from configured model alias', {
+        requestedModelId: modelId ?? null,
+        requestedModel: requestedModel.requestModel,
+        resolvedModel: aliasedModel.requestModel
+      });
+      return {
+        requestModel: aliasedModel.requestModel,
+        reasoningEffort: requestedModel.reasoningEffort
+      };
+    }
+
+    if (availableModelNames.has(requestedModel.requestModel)) {
+      return requestedModel;
+    }
+
+    const prefixMatch = availableModels
+      .map((candidate) => candidate.requestModel)
+      .filter((candidate) => requestedModel.requestModel.startsWith(`${candidate}-`))
+      .sort((left, right) => right.length - left.length)[0];
+
+    if (prefixMatch) {
+      this.outputChannel.warn('request model remapped from stale model identifier', {
+        requestedModelId: modelId ?? null,
+        requestedModel: requestedModel.requestModel,
+        resolvedModel: prefixMatch
+      });
+      return {
+        requestModel: prefixMatch,
+        reasoningEffort: requestedModel.reasoningEffort
+      };
+    }
+
+    if (availableModelNames.has(config.model)) {
+      this.outputChannel.warn('request model fell back to configured model', {
+        requestedModelId: modelId ?? null,
+        requestedModel: requestedModel.requestModel,
+        resolvedModel: config.model
+      });
+      return {
+        requestModel: config.model,
+        reasoningEffort: requestedModel.reasoningEffort
+      };
+    }
+
+    const fallbackModel = availableModels[0]?.requestModel ?? config.model;
+    this.outputChannel.warn('request model fell back to first available model', {
+      requestedModelId: modelId ?? null,
+      requestedModel: requestedModel.requestModel,
+      resolvedModel: fallbackModel
+    });
+    return {
+      requestModel: fallbackModel,
+      reasoningEffort: requestedModel.reasoningEffort
+    };
+  }
+
+  private applyModelDiscoveryPolicy(models: ResolvedProviderModel[], config: ProviderConfig): ResolvedProviderModel[] {
+    this.evictExpiredUnavailableModels();
+    const disabledModels = new Set([...config.disabledModels, ...this.unavailableModels.keys()]);
+    const availableModelNames = new Set(models.map((model) => model.requestModel));
+    const aliasedSources = new Set(
+      Object.entries(config.modelAliases)
+        .filter(([, target]) => availableModelNames.has(target))
+        .map(([source]) => source)
+    );
+    const filteredModels = models.filter((model) => !disabledModels.has(model.requestModel) && !aliasedSources.has(model.requestModel));
+
+    if (filteredModels.length === 0) {
+      this.outputChannel.warn('model discovery policy kept original models because every discovered model was filtered', {
+        disabledModels: [...disabledModels],
+        modelAliases: config.modelAliases
+      });
+      return models;
+    }
+
+    if (filteredModels.length !== models.length) {
+      this.outputChannel.info('model discovery policy filtered models', {
+        before: models.map((model) => model.requestModel),
+        after: filteredModels.map((model) => model.requestModel),
+        disabledModels: [...disabledModels],
+        modelAliases: config.modelAliases
+      });
+    }
+
+    return filteredModels;
+  }
+
+  private resolveModelAlias(
+    model: string,
+    modelAliases: Record<string, string>,
+    availableModels: readonly ResolvedProviderModel[]
+  ): ResolvedProviderModel | undefined {
+    const targetModel = modelAliases[model];
+    if (!targetModel) {
+      return undefined;
+    }
+
+    return availableModels.find((candidate) => candidate.requestModel === targetModel);
+  }
+}
+
+function getExactModelNotFoundName(error: unknown, expectedModel: string): string | undefined {
+  const message = getModelNotFoundMessage(error);
+  if (message !== expectedModel) {
+    return undefined;
+  }
+
+  return message;
+}
+
+function getModelNotFoundMessage(error: unknown): string | undefined {
+  for (const message of collectErrorMessages(error)) {
+    const match = /Model not found\s+([^"\s:}]+)/i.exec(message);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return undefined;
+}
+
+function collectErrorMessages(error: unknown): string[] {
+  const messages: string[] = [];
+
+  const visit = (value: unknown) => {
+    if (!value) {
+      return;
+    }
+
+    if (typeof value === 'string') {
+      messages.push(value);
+      return;
+    }
+
+    if (value instanceof Error) {
+      messages.push(value.message);
+      visit((value as Error & { cause?: unknown }).cause);
+      return;
+    }
+
+    if (typeof value === 'object') {
+      const record = value as { message?: unknown; cause?: unknown; error?: unknown };
+      if (typeof record.message === 'string') {
+        messages.push(record.message);
+      }
+      visit(record.cause);
+      visit(record.error);
+    }
+  };
+
+  visit(error);
+  return messages;
 }
 
 function getRequestServiceTier(serviceTier: ProviderConfig['defaultServiceTier']): 'default' | 'priority' | undefined {
@@ -536,6 +738,12 @@ function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.La
     },
     USAGE_DATA_PART_MIME
   ) as vscode.LanguageModelResponsePart;
+}
+
+function createTemporarilyUnavailableModelError(model: string, cause: unknown): Error {
+  const error = new Error(`Model ${model} is listed by discovery but is not currently callable through the configured Codex Responses backend. It has been hidden temporarily from the model picker. Choose another model and retry.`);
+  (error as Error & { cause?: unknown }).cause = cause;
+  return error;
 }
 
 export function buildResponseBranchReuseEnvelope(options: {

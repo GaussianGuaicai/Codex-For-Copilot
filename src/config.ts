@@ -12,6 +12,8 @@ export interface ProviderConfig {
   credentialsSource: 'auto' | 'codexAuth' | 'secretStorage';
   transport: 'auto' | 'http' | 'websocket';
   model: string;
+  disabledModels: string[];
+  modelAliases: Record<string, string>;
   instructions: string;
   defaultServiceTier?: 'default' | 'fast';
   defaultReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -28,6 +30,8 @@ export function getProviderConfig(): ProviderConfig {
     credentialsSource: config.get('credentialsSource', 'auto'),
     transport: normalizeTransport(config.get('transport', 'auto')),
     model: config.get('model', 'gpt-5.5'),
+    disabledModels: normalizeStringList(config.get('disabledModels', [])),
+    modelAliases: normalizeModelAliases(config.get('modelAliases', {})),
     instructions: config.get('instructions', 'You are a helpful coding assistant integrated with VS Code.'),
     defaultServiceTier: normalizeDefaultServiceTier(config.get('defaultServiceTier', 'auto')),
     defaultReasoningEffort: normalizeDefaultReasoningEffort(config.get('defaultReasoningEffort', 'auto')),
@@ -98,6 +102,34 @@ function normalizeModelPricing(value: unknown): Record<string, ModelPricing> {
   }
 
   return normalized;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0))];
+}
+
+function normalizeModelAliases(value: unknown): Record<string, string> {
+  if (!isObjectRecord(value)) {
+    return {};
+  }
+
+  const aliases: Record<string, string> = {};
+  for (const [source, target] of Object.entries(value)) {
+    const normalizedSource = source.trim();
+    const normalizedTarget = typeof target === 'string' ? target.trim() : '';
+    if (normalizedSource && normalizedTarget && normalizedSource !== normalizedTarget) {
+      aliases[normalizedSource] = normalizedTarget;
+    }
+  }
+
+  return aliases;
 }
 
 function normalizePricingNumber(value: unknown): number | undefined {
