@@ -27,6 +27,8 @@ const MAX_REUSABLE_WEBSOCKETS = 32;
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
+const PREVIOUS_RESPONSE_NOT_FOUND_CODE = 'previous_response_not_found';
+const PREVIOUS_RESPONSE_NOT_FOUND_DEFAULT_MESSAGE = 'Responses API previous_response_id was not found.';
 
 interface ReusableResponsesWebSocketSession {
   socket: ResponsesWS;
@@ -140,6 +142,21 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       return;
     }
 
+    if (isResponsesContinuationMissError(error)) {
+      throw error;
+    }
+
+    if (options.previousResponseId) {
+      const continuationMissMessage = getPreviousResponseNotFoundMessage(error);
+      if (continuationMissMessage) {
+        throw new ResponsesContinuationMissError(
+          continuationMissMessage,
+          options.previousResponseId,
+          { cause: error }
+        );
+      }
+    }
+
     throw normalizeResponsesError(error, options.baseURL);
   } finally {
     cancellation.dispose();
@@ -242,10 +259,13 @@ async function streamResponseTextOverWebSocket(
           );
         }
 
-        if (options.previousResponseId && isPreviousResponseNotFoundError(streamEvent.error.error?.code, streamEvent.error.error?.message)) {
+        const continuationMissMessage = options.previousResponseId
+          ? getPreviousResponseNotFoundMessage(streamEvent.error)
+          : undefined;
+        if (options.previousResponseId && continuationMissMessage) {
           releaseReusableWebSocketSession(session, undefined, false);
           throw new ResponsesContinuationMissError(
-            streamEvent.error.error?.message ?? streamEvent.error.message,
+            continuationMissMessage,
             options.previousResponseId,
             { cause: streamEvent.error }
           );
@@ -482,9 +502,12 @@ function handleResponsesServerEvent(event: ResponsesServerEvent, options: Stream
       );
     }
 
-    if (options.previousResponseId && isPreviousResponseNotFoundError(error?.code, error?.message)) {
+    const continuationMissMessage = options.previousResponseId
+      ? getPreviousResponseNotFoundMessage(error)
+      : undefined;
+    if (options.previousResponseId && continuationMissMessage) {
       throw new ResponsesContinuationMissError(
-        error?.message ?? 'Responses API previous_response_id was not found.',
+        continuationMissMessage,
         options.previousResponseId
       );
     }
@@ -657,12 +680,58 @@ function parseToolCallInput(argumentsJson: string): object {
   }
 }
 
-function isPreviousResponseNotFoundError(code: unknown, message: unknown): boolean {
-  if (code === 'previous_response_not_found') {
-    return true;
+function getPreviousResponseNotFoundMessage(error: unknown): string | undefined {
+  const visited = new Set<object>();
+
+  const visit = (value: unknown): { matched: boolean; message?: string } => {
+    if (typeof value === 'string') {
+      const message = value.trim();
+      return message.includes(PREVIOUS_RESPONSE_NOT_FOUND_CODE)
+        ? { matched: true, message }
+        : { matched: false };
+    }
+
+    if (!value || typeof value !== 'object' || visited.has(value)) {
+      return { matched: false };
+    }
+
+    visited.add(value);
+    const record = value as Partial<Record<'code' | 'message' | 'error' | 'cause', unknown>>;
+    const message = typeof record.message === 'string' && record.message.trim()
+      ? record.message.trim()
+      : undefined;
+    const nestedError = visit(record.error);
+
+    if (nestedError.matched) {
+      return {
+        matched: true,
+        message: nestedError.message ?? message
+      };
+    }
+
+    if (record.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE) {
+      return { matched: true, message };
+    }
+
+    const nestedCause = visit(record.cause);
+    if (nestedCause.matched) {
+      return {
+        matched: true,
+        message: nestedCause.message ?? message
+      };
+    }
+
+    return message?.includes(PREVIOUS_RESPONSE_NOT_FOUND_CODE)
+      ? { matched: true, message }
+      : { matched: false };
+  };
+
+  const match = visit(error);
+  if (!match.matched) {
+    return undefined;
   }
 
-  return typeof message === 'string' && message.includes('previous_response_not_found');
+  return match.message ?? PREVIOUS_RESPONSE_NOT_FOUND_DEFAULT_MESSAGE;
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {
