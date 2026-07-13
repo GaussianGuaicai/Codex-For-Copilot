@@ -145,6 +145,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 const { CodexModelProvider } = require(bundlePath);
 
 try {
+  await runProviderContinuationMissRecoverySmokeTest();
   await runProviderFallbackSmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
@@ -153,6 +154,144 @@ try {
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+async function runProviderContinuationMissRecoverySmokeTest() {
+  const responseRequests = [];
+  const warnings = [];
+  const recoveredOutput = [];
+  const staleResponseId = 'resp_stale_continuation';
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { multi_agent_version: 'v2' })]
+      }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (responseRequests.length === 1) {
+      writeSseResponse(response, staleResponseId, 'seeded');
+      return;
+    }
+
+    if (responseRequests.length === 2) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          code: 'previous_response_not_found',
+          message: `Previous response ${staleResponseId} was not found.`,
+          param: 'previous_response_id'
+        }
+      }));
+      return;
+    }
+
+    if (responseRequests.length === 3) {
+      writeSseResponse(response, 'resp_recovered', 'recovered');
+      return;
+    }
+
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'unexpected extra response request' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    {
+      debug() {},
+      info() {},
+      warn(message, payload) {
+        warnings.push({ message, payload });
+      },
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for continuation recovery test.');
+    }
+
+    const firstMessage = {
+      role: vscodeMock.LanguageModelChatMessageRole.User,
+      content: [new vscodeMock.LanguageModelTextPart('First turn')]
+    };
+    const secondMessage = {
+      role: vscodeMock.LanguageModelChatMessageRole.User,
+      content: [new vscodeMock.LanguageModelTextPart('Second turn')]
+    };
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [firstMessage],
+      {},
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [firstMessage, secondMessage],
+      {},
+      {
+        report(part) {
+          if (part instanceof vscodeMock.LanguageModelTextPart) {
+            recoveredOutput.push(part.value);
+          }
+        }
+      },
+      token
+    );
+
+    const fullInput = [
+      { role: 'user', content: 'First turn', type: 'message' },
+      { role: 'user', content: 'Second turn', type: 'message' }
+    ];
+    const continuationInput = [{ role: 'user', content: 'Second turn', type: 'message' }];
+    const resetWarnings = warnings.filter((entry) => entry.message === 'response continuation reset');
+
+    assertEqual(responseRequests.length, 3, 'continuation recovery response request count');
+    assertEqual(JSON.stringify(responseRequests[0].input), JSON.stringify(fullInput.slice(0, 1)), 'seed request full input');
+    assertEqual('previous_response_id' in responseRequests[0], false, 'seed request omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify(continuationInput), 'continuation request delta input');
+    assertEqual(responseRequests[1].previous_response_id, staleResponseId, 'continuation request stale response id');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify(fullInput), 'recovery request full input');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'recovery request omits stale response id');
+    assertEqual(resetWarnings.length, 1, 'continuation reset warning count');
+    assertEqual(resetWarnings[0].payload.previousResponseId, staleResponseId, 'continuation reset warning response id');
+    assertEqual(recoveredOutput.join(''), 'recovered', 'continuation recovered output');
+  } finally {
+    server.close();
+  }
 }
 
 async function runProviderFallbackSmokeTest() {
@@ -545,4 +684,16 @@ function createOutputChannel() {
     warn() {},
     error() {}
   };
+}
+
+function writeSseResponse(response, responseId, delta) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive'
+  });
+  response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta })}\n\n`);
+  response.write(`data: ${JSON.stringify({ type: 'response.completed', response: { id: responseId, object: 'response', status: 'completed' } })}\n\n`);
+  response.write('data: [DONE]\n\n');
+  response.end();
 }
