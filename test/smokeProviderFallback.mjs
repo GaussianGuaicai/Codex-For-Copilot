@@ -146,6 +146,7 @@ const { CodexModelProvider } = require(bundlePath);
 
 try {
   await runProviderFallbackSmokeTest();
+  await runHttpContinuationRecoverySmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
@@ -262,6 +263,127 @@ async function runProviderFallbackSmokeTest() {
     assertEqual(refreshedModels.some((item) => item.id === 'codex::gpt-5.6-nova'), false, 'rejected model hidden after temporary disable');
     assertEqual(warnings.some((entry) => entry.message === 'response model unavailable'), true, 'unavailable warning emitted');
     assertEqual(thrownMessage.includes('hidden temporarily from the model picker'), true, 'clear unavailable-model error');
+  } finally {
+    server.close();
+  }
+}
+
+async function runHttpContinuationRecoverySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (body.previous_response_id) {
+      response.writeHead(400);
+      response.end();
+      return;
+    }
+
+    writeSseResponse(response, responseRequests.length === 1 ? 'first reply' : 'recovered reply', responseRequests.length === 1 ? 'resp_initial' : 'resp_recovered');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for HTTP continuation recovery test.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 3, 'continuation recovery request count');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_initial', 'continuation request response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([{ role: 'user', content: 'Follow up', type: 'message' }]), 'continuation delta input');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'recovery request omits previous response id');
+    assertEqual(
+      JSON.stringify(responseRequests[2].input),
+      JSON.stringify([
+        { role: 'user', content: 'First request', type: 'message' },
+        { role: 'assistant', content: 'first reply', type: 'message' },
+        { role: 'user', content: 'Follow up', type: 'message' }
+      ]),
+      'recovery request full input'
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('recovered reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('One more request')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 4, 'disabled continuation avoids another rejected request');
+    assertEqual('previous_response_id' in responseRequests[3], false, 'disabled continuation omits previous response id');
+    assertEqual(
+      JSON.stringify(responseRequests[3].input),
+      JSON.stringify([
+        { role: 'user', content: 'First request', type: 'message' },
+        { role: 'assistant', content: 'first reply', type: 'message' },
+        { role: 'user', content: 'Follow up', type: 'message' },
+        { role: 'assistant', content: 'recovered reply', type: 'message' },
+        { role: 'user', content: 'One more request', type: 'message' }
+      ]),
+      'disabled continuation full input'
+    );
   } finally {
     server.close();
   }
@@ -427,6 +549,18 @@ function createCancellationToken() {
       return { dispose() {} };
     }
   };
+}
+
+function writeSseResponse(response, text, responseId) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive'
+  });
+  response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: text })}\n\n`);
+  response.write(`data: ${JSON.stringify({ type: 'response.completed', response: { id: responseId, object: 'response', status: 'completed' } })}\n\n`);
+  response.write('data: [DONE]\n\n');
+  response.end();
 }
 
 function assertEqual(actual, expected, label) {
