@@ -343,16 +343,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         requestModel: selectedModel.requestModel,
         branchId: reusableBranch?.branchId ?? null,
         previousResponseId: initialPreviousResponseId,
-        reason: error.message
+        reason: error.message,
+        reuseDisabledUntilExpiry: error.disableReuseUntilExpiry
       });
 
-      this.outputChannel.warn('response reuse temporarily disabled until next full-input success', {
+      this.outputChannel.warn(error.disableReuseUntilExpiry
+        ? 'response reuse disabled until branch cache expiry after HTTP continuation rejection'
+        : 'response reuse temporarily disabled until next full-input success', {
         requestModel: selectedModel.requestModel,
         previousResponseId: initialPreviousResponseId,
         branchId: reusableBranch?.branchId ?? null
       });
 
-      this.responseBranchStore.disableReuse(reuseEnvelope);
+      this.responseBranchStore.disableReuse(reuseEnvelope, !error.disableReuseUntilExpiry);
       this.responseBranchStore.invalidateResponseId(initialPreviousResponseId);
 
       if (reusableBranch) {

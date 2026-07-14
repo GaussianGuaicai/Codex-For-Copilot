@@ -53,6 +53,7 @@ export interface StreamResponseTextOptions {
   headers?: Record<string, string>;
   transport?: 'auto' | 'http' | 'websocket';
   previousResponseId?: string;
+  store?: boolean;
   omitMaxOutputTokens?: boolean;
   model: string;
   instructions: string;
@@ -138,6 +139,15 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
   } catch (error) {
     if (options.token.isCancellationRequested || abortController.signal.aborted) {
       return;
+    }
+
+    if (options.previousResponseId && isOpaqueHttpContinuationRejection(error)) {
+      throw new ResponsesContinuationMissError(
+        'Responses API rejected previous_response_id with an opaque HTTP 400 response.',
+        options.previousResponseId,
+        { cause: error instanceof Error ? error : undefined },
+        true
+      );
     }
 
     throw normalizeResponsesError(error, options.baseURL);
@@ -423,7 +433,7 @@ function buildResponsesCreateRequest(options: StreamResponseTextOptions) {
     instructions: options.instructions,
     input: options.input,
     stream: true,
-    store: false,
+    store: options.store ?? false,
     ...(options.previousResponseId ? { previous_response_id: options.previousResponseId } : {}),
     ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
     ...(options.reasoning ? { reasoning: options.reasoning } : {}),
@@ -578,7 +588,8 @@ class ResponsesContinuationMissError extends Error {
   constructor(
     message: string,
     readonly previousResponseId: string,
-    options?: ErrorOptions
+    options?: ErrorOptions,
+    readonly disableReuseUntilExpiry = false
   ) {
     super(message, options);
     this.name = 'ResponsesContinuationMissError';
@@ -663,6 +674,12 @@ function isPreviousResponseNotFoundError(code: unknown, message: unknown): boole
   }
 
   return typeof message === 'string' && message.includes('previous_response_not_found');
+}
+
+function isOpaqueHttpContinuationRejection(error: unknown): boolean {
+  return error instanceof APIError
+    && error.status === 400
+    && /\b400 status code \(no body\)/i.test(error.message);
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {

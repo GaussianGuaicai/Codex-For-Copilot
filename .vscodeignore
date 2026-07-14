@@ -1,3 +1,6 @@
+failed.md
+*.log
+*.vsix
 .git/**
 .github/**
 .gitignore
