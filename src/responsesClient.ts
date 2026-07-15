@@ -262,9 +262,12 @@ async function streamResponseTextOverWebSocket(
   let sawTerminalEvent = false;
 
   try {
+    // Register the SDK error listener before sending on a reused open socket.
+    // The backend can reject a bad previous_response_id immediately.
+    const stream = socket.stream();
     socket.send(buildResponsesCreateEvent(options));
 
-    for await (const streamEvent of socket.stream()) {
+    for await (const streamEvent of stream) {
       if (options.token.isCancellationRequested) {
         abortController.abort();
         return;
@@ -302,10 +305,11 @@ async function streamResponseTextOverWebSocket(
           );
         }
 
-        if (options.previousResponseId && isPreviousResponseNotFoundError(streamEvent.error.error?.code, streamEvent.error.error?.message)) {
+        const responseError = getResponseErrorDetails(streamEvent.error);
+        if (options.previousResponseId && isPreviousResponseNotFoundError(responseError.code, responseError.message)) {
           releaseReusableWebSocketSession(session, undefined, false);
           throw new ResponsesContinuationMissError(
-            streamEvent.error.error?.message ?? streamEvent.error.message,
+            typeof responseError.message === 'string' ? responseError.message : streamEvent.error.message,
             options.previousResponseId,
             { cause: streamEvent.error }
           );
@@ -948,6 +952,39 @@ function isPreviousResponseNotFoundError(code: unknown, message: unknown): boole
   }
 
   return typeof message === 'string' && message.includes('previous_response_not_found');
+}
+
+function getResponseErrorDetails(error: unknown): {
+  code: unknown;
+  message: unknown;
+} {
+  if (typeof error !== 'object' || error === null) {
+    return {
+      code: undefined,
+      message: undefined
+    };
+  }
+
+  const record = error as {
+    code?: unknown;
+    message?: unknown;
+    error?: unknown;
+  };
+  if (record.error && typeof record.error === 'object') {
+    const nested = record.error as {
+      code?: unknown;
+      message?: unknown;
+    };
+    return {
+      code: nested.code,
+      message: nested.message ?? record.message
+    };
+  }
+
+  return {
+    code: record.code,
+    message: record.message
+  };
 }
 
 function isOpaqueHttpContinuationRejection(error: unknown): boolean {

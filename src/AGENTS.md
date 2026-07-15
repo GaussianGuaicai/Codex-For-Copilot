@@ -20,3 +20,4 @@
 - WebSocket requests must send `response.create` payloads without the HTTP-only `stream` field.
 - When `transport` is `auto`, only fall back to HTTP for transport availability failures, not for successful in-band model responses.
 - Conversation reuse is allowed only for append-only transcript growth with an identical request envelope; tool or schema changes must bust reuse.
+- Both transports must convert a rejected `previous_response_id` into a continuation miss so the provider can retry once with the full input history.

@@ -32,7 +32,7 @@ const HISTORY_IMAGE_URI_ANNOTATION_PATTERN = /^\s*\[Image URI: ([^\]]+)\]\s*$/;
 const IGNORED_HISTORY_CONTENT = Symbol('ignored-history-content');
 
 export function convertMessagesToResponsesInput(messages: readonly vscode.LanguageModelChatRequestMessage[]): ResponsesInputMessage[] {
-  return messages.flatMap((message) => convertMessageToResponsesInput(message));
+  return normalizeDanglingFunctionCallsForReplay(messages.flatMap((message) => convertMessageToResponsesInput(message)));
 }
 
 export function estimateTokenCount(value: string | vscode.LanguageModelChatRequestMessage): number {
@@ -221,6 +221,26 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
 
   flushMessage();
   return items;
+}
+
+function normalizeDanglingFunctionCallsForReplay(input: ResponsesInputMessage[]): ResponsesInputMessage[] {
+  const outputCallIds = new Set(
+    input
+      .filter((item) => item.type === 'function_call_output')
+      .map((item) => item.call_id)
+  );
+
+  return input.map((item) => {
+    if (item.type !== 'function_call' || outputCallIds.has(item.call_id)) {
+      return item;
+    }
+
+    return {
+      role: 'assistant',
+      content: `The previous assistant turn was interrupted before tool execution. It had prepared a call to ${item.name} with arguments ${item.arguments}, but no tool output was produced.`,
+      type: 'message'
+    };
+  });
 }
 
 function serializeToolResultContent(content: readonly unknown[]): string | ResponseFunctionCallOutputItemList {

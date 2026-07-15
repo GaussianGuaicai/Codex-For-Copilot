@@ -111,6 +111,7 @@ try {
   runBranchStoreToolContinuationSmokeTest(ResponseBranchStore);
   runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, ResponseBranchStore);
   runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore);
+  runDanglingToolCallSteerSmokeTest(convertMessagesToResponsesInput);
   runImageToolResultSmokeTest(convertMessagesToResponsesInput);
   runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
   runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
@@ -355,6 +356,38 @@ function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, Res
   const reusableMatch = store.findReusableBranch(envelope, currentInput);
   assertEqual(reusableMatch?.responseId, 'resp_cache_control', 'cache_control reuse previous response id');
   assertEqual(reusableMatch?.comparison.kind, 'append', 'cache_control reuse comparison kind');
+}
+
+function runDanglingToolCallSteerSmokeTest(convertMessagesToResponsesInput) {
+  const steeredMessages = [
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscodeStub.LanguageModelTextPart('I will inspect the file.'),
+        new vscodeStub.LanguageModelToolCallPart('call_interrupted', 'read_file', { filePath: 'src/provider.ts' })
+      ]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelTextPart('Actually, ignore that and explain the config first.')]
+    }
+  ];
+
+  const converted = convertMessagesToResponsesInput(steeredMessages);
+  assertEqual(converted.some((item) => item.type === 'function_call'), false, 'dangling tool call is not replayed as a protocol function_call');
+  assertEqual(
+    JSON.stringify(converted),
+    JSON.stringify([
+      { role: 'assistant', content: 'I will inspect the file.', type: 'message' },
+      {
+        role: 'assistant',
+        content: 'The previous assistant turn was interrupted before tool execution. It had prepared a call to read_file with arguments {"filePath":"src/provider.ts"}, but no tool output was produced.',
+        type: 'message'
+      },
+      { role: 'user', content: 'Actually, ignore that and explain the config first.', type: 'message' }
+    ]),
+    'steered transcript preserves interrupted tool intent as assistant context'
+  );
 }
 
 function runImageToolResultSmokeTest(convertMessagesToResponsesInput) {
