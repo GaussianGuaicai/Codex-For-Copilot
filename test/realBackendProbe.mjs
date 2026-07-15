@@ -15,6 +15,7 @@ const requestedTransport = process.env.CODEX_TEST_TRANSPORT === 'websocket'
     ? 'auto'
     : 'http';
 const runContinuationProbe = process.env.CODEX_TEST_CONTINUATION === '1';
+const requestStore = process.env.CODEX_TEST_STORE === '1';
 const requestServiceTier = requestedServiceTier === 'fast'
   ? 'priority'
   : requestedServiceTier === 'auto' || requestedServiceTier === undefined
@@ -107,6 +108,7 @@ try {
     apiKey: credentials.apiKey,
     headers: credentials.headers,
     transport: requestedTransport,
+    store: requestStore,
     omitMaxOutputTokens: credentials.omitMaxOutputTokens,
     model: requestedModel,
     instructions: 'You are a test assistant.',
@@ -149,6 +151,7 @@ try {
       headers: credentials.headers,
       transport: requestedTransport,
       previousResponseId,
+      store: requestStore,
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
       model: requestedModel,
       instructions: 'You are a test assistant.',
@@ -176,6 +179,7 @@ try {
     model: requestedModel,
     transport: requestedTransport,
     continuationProbe: runContinuationProbe,
+    requestStore,
     requestedServiceTier: requestedServiceTier ?? null,
     requestServiceTier: requestServiceTier ?? null,
     createdServiceTier,

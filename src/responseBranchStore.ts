@@ -37,6 +37,11 @@ export interface ResponseBranchToolCompatibility {
   changedToolNames: string[];
 }
 
+interface DisabledResponseBranchReuse {
+  disabledAt: number;
+  enableAfterFullInputSuccess: boolean;
+}
+
 interface ResponseBranchEntry {
   id: string;
   envelope: ResponseBranchReuseEnvelope;
@@ -48,7 +53,7 @@ interface ResponseBranchEntry {
 
 export class ResponseBranchStore {
   private readonly branches = new Map<string, ResponseBranchEntry>();
-  private readonly disabledReuseKeys = new Map<string, number>();
+  private readonly disabledReuseKeys = new Map<string, DisabledResponseBranchReuse>();
   private nextBranchId = 1;
 
   constructor(
@@ -141,7 +146,9 @@ export class ResponseBranchStore {
     branchId?: string
   ): string {
     this.evictExpiredEntries();
-    this.disabledReuseKeys.delete(envelope.identityKey);
+    if (this.disabledReuseKeys.get(envelope.identityKey)?.enableAfterFullInputSuccess) {
+      this.disabledReuseKeys.delete(envelope.identityKey);
+    }
     const continuationInput = projectResponsesInputForContinuation(currentInput);
 
     if (branchId) {
@@ -197,9 +204,12 @@ export class ResponseBranchStore {
     }
   }
 
-  disableReuse(envelope: ResponseBranchReuseEnvelope): void {
+  disableReuse(envelope: ResponseBranchReuseEnvelope, enableAfterFullInputSuccess = true): void {
     this.evictExpiredEntries();
-    this.disabledReuseKeys.set(envelope.identityKey, Date.now());
+    this.disabledReuseKeys.set(envelope.identityKey, {
+      disabledAt: Date.now(),
+      enableAfterFullInputSuccess
+    });
   }
 
   private evictExpiredEntries(): void {
@@ -211,8 +221,8 @@ export class ResponseBranchStore {
       }
     }
 
-    for (const [reuseKey, disabledAt] of this.disabledReuseKeys.entries()) {
-      if (now - disabledAt > this.ttlMs) {
+    for (const [reuseKey, disabled] of this.disabledReuseKeys.entries()) {
+      if (now - disabled.disabledAt > this.ttlMs) {
         this.disabledReuseKeys.delete(reuseKey);
       }
     }
