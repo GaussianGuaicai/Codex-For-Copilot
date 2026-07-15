@@ -9,6 +9,10 @@ const { streamResponseText, disposeReusableResponsesWebSockets } = loaded.export
 const server = createServer();
 const webSocketServer = new WebSocketServer({ noServer: true });
 let requestCount = 0;
+let markFirstRequestReceived;
+const firstRequestReceived = new Promise((resolve) => {
+  markFirstRequestReceived = resolve;
+});
 
 server.on('upgrade', (request, socket, head) => {
   webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
@@ -20,6 +24,7 @@ webSocketServer.on('connection', (webSocket) => {
     requestCount += 1;
     if (requestCount === 1) {
       webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'cancelled', status: 'in_progress' } }));
+      markFirstRequestReceived();
       return;
     }
     webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'next', status: 'in_progress' } }));
@@ -33,11 +38,17 @@ try {
   const port = server.address().port;
   const cancellation = createCancellationToken();
   const first = requestOptions(port, 'session-cancelled', cancellation.token, () => undefined);
-  setTimeout(() => cancellation.cancel(), 20);
-  await streamResponseText(first);
+  const firstResponse = streamResponseText(first);
+  await firstRequestReceived;
+  cancellation.cancel();
+  await completeWithin(firstResponse, 1_000, 'cancelled request returns promptly');
 
   const output = [];
-  await streamResponseText(requestOptions(port, 'session-next', createCancellationToken().token, (delta) => output.push(delta)));
+  await completeWithin(
+    streamResponseText(requestOptions(port, 'session-next', createCancellationToken().token, (delta) => output.push(delta))),
+    1_000,
+    'request after cancellation completes promptly'
+  );
   assertEqual(output.join(''), 'next-ok', 'request after cancellation succeeds');
   assertEqual(requestCount, 2, 'cancelled request is not replayed');
   console.log('Smoke test passed: cancellation closes its socket without poisoning or duplicating the next request.');
@@ -91,4 +102,18 @@ function createCancellationToken() {
       for (const listener of listeners) listener();
     }
   };
+}
+
+async function completeWithin(promise, timeoutMs, label) {
+  let timer;
+  try {
+    await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

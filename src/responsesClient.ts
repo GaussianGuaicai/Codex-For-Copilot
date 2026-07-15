@@ -706,14 +706,16 @@ function createResponsesWsOptions(headers?: Record<string, string>, baseURL?: st
   } as unknown as ResponsesWSClientOptions;
 }
 
-function shouldBypassProxy(baseURL: string): boolean {
+export function shouldBypassProxy(baseURL: string, environment: NodeJS.ProcessEnv = process.env): boolean {
   let url: URL;
   try {
     url = new URL(baseURL);
   } catch {
     return false;
   }
-  const noProxy = process.env.NO_PROXY || process.env.no_proxy;
+  const noProxy = [environment.NO_PROXY, environment.no_proxy]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(',');
   if (!noProxy) {
     return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
   }

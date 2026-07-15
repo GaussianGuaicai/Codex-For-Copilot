@@ -134,7 +134,7 @@ export class CodexWebSocketSession {
       this.socket.send(event as Parameters<ResponsesWS['send']>[0]);
       const iterator = this.socket.stream()[Symbol.asyncIterator]();
       while (true) {
-        const next = await nextWithTimeout(iterator, WEBSOCKET_IDLE_TIMEOUT_MS);
+        const next = await nextWithTimeout(iterator, WEBSOCKET_IDLE_TIMEOUT_MS, options.signal);
         if (next.done) {
           break;
         }
@@ -273,19 +273,38 @@ export class CodexWebSocketSession {
   }
 }
 
-async function nextWithTimeout<T>(iterator: AsyncIterator<T>, timeoutMs: number): Promise<IteratorResult<T>> {
+async function nextWithTimeout<T>(
+  iterator: AsyncIterator<T>,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<IteratorResult<T>> {
   let timer: NodeJS.Timeout | undefined;
+  let abort: (() => void) | undefined;
   try {
     return await Promise.race([
       iterator.next(),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error('Responses WebSocket idle timeout.')), timeoutMs);
         timer.unref?.();
+      }),
+      new Promise<never>((_resolve, reject) => {
+        if (!signal) {
+          return;
+        }
+        abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        signal.addEventListener('abort', abort, { once: true });
       })
     ]);
   } finally {
     if (timer) {
       clearTimeout(timer);
+    }
+    if (abort && signal) {
+      signal.removeEventListener('abort', abort);
     }
   }
 }

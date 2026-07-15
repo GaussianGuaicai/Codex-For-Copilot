@@ -34,12 +34,13 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { disposeReusableResponsesWebSockets, isResponsesContinuationMissError, streamResponseText } = require(bundlePath);
+const { disposeReusableResponsesWebSockets, isResponsesContinuationMissError, shouldBypassProxy, streamResponseText } = require(bundlePath);
 
 try {
   await runHttpTransportSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
   await runWebSocketTransportSmokeTest(streamResponseText);
+  await runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldBypassProxy);
   await runWebSocketContinuationSmokeTest(streamResponseText);
   await runWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketToolOutputContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
@@ -225,6 +226,61 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
     assertEqual(deltas.join(''), 'hello websocket', 'WebSocket streamed text');
     assertEqual(sessionEvent?.reused, false, 'WebSocket initial session reuse state');
   } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldBypassProxy) {
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+  const environment = captureEnvironment(['NO_PROXY', 'no_proxy', 'HTTPS_PROXY']);
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', () => {
+      webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_no_proxy', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_no_proxy', status: 'completed' } }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    process.env.NO_PROXY = 'example.invalid';
+    process.env.no_proxy = '127.0.0.1';
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:1';
+    const address = server.address();
+
+    assertEqual(
+      shouldBypassProxy(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, {
+        NO_PROXY: 'example.invalid',
+        no_proxy: '127.0.0.1'
+      }),
+      true,
+      'lowercase no_proxy bypasses proxy when NO_PROXY is also set'
+    );
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Ping' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta() {}
+    });
+  } finally {
+    restoreEnvironment(environment);
     webSocketServer.close();
     server.close();
   }
@@ -500,6 +556,20 @@ function createCancellationToken() {
     isCancellationRequested: false,
     onCancellationRequested: () => ({ dispose() {} })
   };
+}
+
+function captureEnvironment(names) {
+  return Object.fromEntries(names.map((name) => [name, process.env[name]]));
+}
+
+function restoreEnvironment(values) {
+  for (const [name, value] of Object.entries(values)) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
 }
 
 function assertHttpRequest(capturedRequest, expectedUrl) {
