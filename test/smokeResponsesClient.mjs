@@ -42,6 +42,7 @@ try {
   await runWebSocketTransportSmokeTest(streamResponseText);
   await runWebSocketContinuationSmokeTest(streamResponseText);
   await runWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
+  await runWebSocketToolOutputContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketSequentialReuseSmokeTest(streamResponseText);
 
   console.log('Smoke tests passed: HTTP, auto fallback, and WebSocket transports are correct.');
@@ -332,6 +333,63 @@ async function runWebSocketContinuationMissSmokeTest(streamResponseText, isRespo
 
     assertEqual(isResponsesContinuationMissError(capturedError), true, 'continuation miss classification');
     assertEqual(capturedError.previousResponseId, 'resp_missing', 'continuation miss response id');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runWebSocketToolOutputContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError) {
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', () => {
+      webSocket.send(JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'No tool call found for function call output with call_id call_missing.',
+          param: 'input'
+        },
+        status: 400
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    let capturedError;
+
+    try {
+      await streamResponseText({
+        baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+        apiKey: 'test-api-key',
+        headers: createHeaders(),
+        transport: 'websocket',
+        previousResponseId: 'resp_missing_tool_call',
+        omitMaxOutputTokens: true,
+        model: 'gpt-5.5',
+        instructions: 'Smoke test instructions',
+        input: [{ type: 'function_call_output', call_id: 'call_missing', output: 'result' }],
+        maxOutputTokens: 32,
+        token: createCancellationToken(),
+        onTextDelta() {}
+      });
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(isResponsesContinuationMissError(capturedError), true, 'tool output continuation miss classification');
+    assertEqual(capturedError.previousResponseId, 'resp_missing_tool_call', 'tool output continuation miss response id');
   } finally {
     webSocketServer.close();
     server.close();

@@ -172,13 +172,27 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       return;
     }
 
-    if (options.previousResponseId && isOpaqueHttpContinuationRejection(error)) {
-      throw new ResponsesContinuationMissError(
-        'Responses API rejected previous_response_id with an opaque HTTP 400 response.',
-        options.previousResponseId,
-        { cause: error instanceof Error ? error : undefined },
-        true
-      );
+    if (options.previousResponseId) {
+      if (error instanceof ResponsesContinuationMissError) {
+        throw error;
+      }
+
+      if (isOpaqueHttpContinuationRejection(error)) {
+        throw new ResponsesContinuationMissError(
+          'Responses API rejected previous_response_id with an opaque HTTP 400 response.',
+          options.previousResponseId,
+          { cause: error instanceof Error ? error : undefined },
+          true
+        );
+      }
+
+      if (isMissingFunctionCallForToolOutputError(error)) {
+        throw new ResponsesContinuationMissError(
+          'Responses API rejected function_call_output because its previous_response_id lacks the matching function_call.',
+          options.previousResponseId,
+          { cause: error instanceof Error ? error : undefined }
+        );
+      }
     }
 
     throw normalizeResponsesError(error, options.baseURL);
@@ -991,6 +1005,11 @@ function isOpaqueHttpContinuationRejection(error: unknown): boolean {
   return error instanceof APIError
     && error.status === 400
     && /\b400 status code \(no body\)/i.test(error.message);
+}
+
+function isMissingFunctionCallForToolOutputError(error: unknown): boolean {
+  return collectErrorMessages(error)
+    .some((message) => /no tool call found for function call output with call_id/i.test(message));
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {

@@ -147,6 +147,7 @@ const { CodexModelProvider } = require(bundlePath);
 try {
   await runProviderFallbackSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
+  await runToolOutputContinuationRecoverySmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
@@ -384,6 +385,109 @@ async function runHttpContinuationRecoverySmokeTest() {
       ]),
       'disabled continuation full input'
     );
+  } finally {
+    server.close();
+  }
+}
+
+async function runToolOutputContinuationRecoverySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (body.previous_response_id) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          message: 'No tool call found for function call output with call_id call_missing.',
+          param: 'input'
+        }
+      }));
+      return;
+    }
+
+    writeSseResponse(response, responseRequests.length === 1 ? 'first reply' : 'recovered reply', responseRequests.length === 1 ? 'resp_initial' : 'resp_recovered');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for tool output continuation recovery test.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_missing', 'read_file', { filePath: 'src/provider.ts' })]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolResultPart('call_missing', [new vscodeMock.LanguageModelTextPart('file contents')])]
+        }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 3, 'tool output continuation recovery request count');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_initial', 'tool output continuation request response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { type: 'function_call_output', call_id: 'call_missing', output: 'file contents' }
+    ]), 'tool output continuation delta input');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'tool output recovery omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
+      { role: 'user', content: 'First request', type: 'message' },
+      { type: 'function_call', call_id: 'call_missing', name: 'read_file', arguments: '{"filePath":"src/provider.ts"}' },
+      { type: 'function_call_output', call_id: 'call_missing', output: 'file contents' }
+    ]), 'tool output recovery full input');
   } finally {
     server.close();
   }
