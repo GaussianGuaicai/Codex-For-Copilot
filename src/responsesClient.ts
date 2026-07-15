@@ -88,7 +88,12 @@ export interface StreamResponseTextOptions {
   maxOutputTokens: number;
   token: vscode.CancellationToken;
   onTextDelta: (text: string) => void;
-  onReasoningTextDelta?: (text: string) => void;
+  onReasoningTextDelta?: (delta: {
+    text: string;
+    itemId: string;
+    contentIndex: number;
+    outputIndex: number;
+  }) => void;
   onToolCall?: (callId: string, name: string, input: object) => void;
   onRawResponseItem?: (item: unknown) => void;
   onTurnState?: (turnState: string) => void;
@@ -230,6 +235,7 @@ async function streamResponseTextOverHttp(
     serverModel: response.headers.get('openai-model') ?? undefined,
     modelsEtagPresent: Boolean(response.headers.get('x-models-etag'))
   });
+  const handleEvent = createResponsesServerEventHandler(options);
 
   for await (const event of stream) {
     if (options.token.isCancellationRequested) {
@@ -237,7 +243,7 @@ async function streamResponseTextOverHttp(
       return;
     }
 
-    handleResponsesServerEvent(event, options);
+    handleEvent(event);
   }
 }
 
@@ -257,6 +263,7 @@ async function streamResponseTextOverWebSocket(
   const socket = session.socket;
   let reusableResponseId: string | undefined;
   let keepSession = false;
+  const handleEvent = createResponsesServerEventHandler(options);
 
   options.onWebSocketSession?.({ reused: Boolean(reusedSession) });
 
@@ -290,7 +297,7 @@ async function streamResponseTextOverWebSocket(
       if (streamEvent.type === 'message') {
         sawResponseActivity = true;
         const message = streamEvent.message;
-        handleResponsesServerEvent(message, options);
+        handleEvent(message);
 
         if (message.type === 'response.completed') {
           sawTerminalEvent = true;
@@ -386,6 +393,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
   options.onWebSocketSession?.({ reused: managed.reused });
   const request = buildResponsesCreateRequest(options);
   const builderOptions = createRequestBuilderOptions(options);
+  const handleEvent = createResponsesServerEventHandler(options);
 
   if (!managed.reused
     && options.websocketPrewarm !== 'disabled'
@@ -430,7 +438,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
             || event.type === 'response.output_item.done') {
             visibleActivity = true;
           }
-          handleResponsesServerEvent(event, options);
+          handleEvent(event);
         }
       });
       if (result.handshake?.serverModel && result.handshake.serverModel !== options.model) {
@@ -746,7 +754,60 @@ function getManagedConnectionScope(options: StreamResponseTextOptions): CodexCon
   };
 }
 
-function handleResponsesServerEvent(event: ResponsesServerEvent, options: StreamResponseTextOptions): void {
+function createResponsesServerEventHandler(
+  options: StreamResponseTextOptions
+): (event: ResponsesServerEvent) => void {
+  const functionCallsByItemId = new Map<string, { callId: string; name: string }>();
+  const reportedFunctionCallItemIds = new Set<string>();
+
+  const reportFunctionCall = (itemId: string, callId: string, name: string, argumentsJson: string) => {
+    const normalizedCallId = callId.trim();
+    const normalizedName = name.trim();
+    if (!normalizedCallId || !normalizedName || reportedFunctionCallItemIds.has(itemId)) {
+      return;
+    }
+
+    reportedFunctionCallItemIds.add(itemId);
+    options.onToolCall?.(normalizedCallId, normalizedName, parseToolCallInput(argumentsJson));
+  };
+
+  return (event) => {
+    if (event.type === 'response.output_item.added' && event.item.type === 'function_call') {
+      if (event.item.id) {
+        functionCallsByItemId.set(event.item.id, {
+          callId: event.item.call_id,
+          name: event.item.name
+        });
+      }
+      return;
+    }
+
+    if (event.type === 'response.function_call_arguments.done') {
+      const functionCall = functionCallsByItemId.get(event.item_id);
+      if (functionCall) {
+        reportFunctionCall(
+          event.item_id,
+          functionCall.callId,
+          firstNonEmptyString(functionCall.name, event.name),
+          event.arguments
+        );
+      }
+      return;
+    }
+
+    handleResponsesServerEvent(event, options, reportFunctionCall);
+  };
+}
+
+function firstNonEmptyString(...values: string[]): string {
+  return values.find((value) => value.trim().length > 0)?.trim() ?? '';
+}
+
+function handleResponsesServerEvent(
+  event: ResponsesServerEvent,
+  options: StreamResponseTextOptions,
+  reportFunctionCall: (itemId: string, callId: string, name: string, argumentsJson: string) => void
+): void {
   if (event.type === 'response.output_item.done') {
     options.onRawResponseItem?.(event.item);
   }
@@ -757,12 +818,17 @@ function handleResponsesServerEvent(event: ResponsesServerEvent, options: Stream
   }
 
   if (event.type === 'response.reasoning_text.delta') {
-    options.onReasoningTextDelta?.(event.delta);
+    options.onReasoningTextDelta?.({
+      text: event.delta,
+      itemId: event.item_id,
+      contentIndex: event.content_index,
+      outputIndex: event.output_index
+    });
     return;
   }
 
   if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
-    options.onToolCall?.(event.item.call_id, event.item.name, parseToolCallInput(event.item.arguments));
+    reportFunctionCall(event.item.id ?? event.item.call_id, event.item.call_id, event.item.name, event.item.arguments);
     return;
   }
 

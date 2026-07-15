@@ -112,6 +112,7 @@ try {
   runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, ResponseBranchStore);
   runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore);
   runDanglingToolCallSteerSmokeTest(convertMessagesToResponsesInput);
+  runNamelessToolCallReplaySmokeTest(convertMessagesToResponsesInput);
   runImageToolResultSmokeTest(convertMessagesToResponsesInput);
   runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
   runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
@@ -388,6 +389,34 @@ function runDanglingToolCallSteerSmokeTest(convertMessagesToResponsesInput) {
     ]),
     'steered transcript preserves interrupted tool intent as assistant context'
   );
+}
+
+function runNamelessToolCallReplaySmokeTest(convertMessagesToResponsesInput) {
+  const corruptedMessages = [
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+      content: [new vscodeStub.LanguageModelToolCallPart('call_nameless', '', { number: 10 })]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelToolResultPart('call_nameless', [
+        new vscodeStub.LanguageModelTextPart('Pull request details.')
+      ])]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelTextPart('Continue from the available conversation context.')]
+    }
+  ];
+
+  const converted = convertMessagesToResponsesInput(corruptedMessages);
+  assertEqual(JSON.stringify(converted), JSON.stringify([
+    {
+      role: 'user',
+      content: 'Continue from the available conversation context.',
+      type: 'message'
+    }
+  ]), 'nameless tool calls and their outputs are not replayed as invalid protocol items');
 }
 
 function runImageToolResultSmokeTest(convertMessagesToResponsesInput) {

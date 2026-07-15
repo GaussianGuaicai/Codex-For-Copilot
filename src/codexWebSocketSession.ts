@@ -219,10 +219,18 @@ export class CodexWebSocketSession {
         return undefined;
       }
     }
+    const incrementalInput = currentInput.slice(previousInput.length);
+    if (incrementalInput.some((item) => (
+      typeof item === 'object'
+      && item !== null
+      && (item as { type?: unknown }).type === 'function_call_output'
+    ))) {
+      return undefined;
+    }
     return {
       request: {
         ...request,
-        input: currentInput.slice(previousInput.length) as CodexResponsesRequest['input'],
+        input: incrementalInput as CodexResponsesRequest['input'],
         previous_response_id: this.lastResponseId
       },
       previousResponseId: this.lastResponseId

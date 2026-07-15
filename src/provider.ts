@@ -169,9 +169,18 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const reuseMissDiagnostic = reusableBranch
       ? undefined
       : this.responseBranchStore.explainReuseMiss(reuseEnvelope, input);
-    const initialRequestInput = reusableBranch?.comparison.appendedInput.length ? reusableBranch.comparison.appendedInput : input;
-    const initialPreviousResponseId = reusableBranch?.comparison.appendedInput.length ? reusableBranch.responseId : undefined;
-    let activeBranchId = initialPreviousResponseId ? reusableBranch?.branchId : undefined;
+    const requiresFullInputForToolOutput = Boolean(
+      reusableBranch?.comparison.appendedInput.some((item) => item.type === 'function_call_output')
+    );
+    const initialRequestInput = reusableBranch?.comparison.appendedInput.length && !requiresFullInputForToolOutput
+      ? reusableBranch.comparison.appendedInput
+      : input;
+    const initialPreviousResponseId = reusableBranch?.comparison.appendedInput.length && !requiresFullInputForToolOutput
+      ? reusableBranch.responseId
+      : undefined;
+    let activeBranchId = initialPreviousResponseId || requiresFullInputForToolOutput
+      ? reusableBranch?.branchId
+      : undefined;
     let createdResponseId: string | undefined;
     let completedResponseId: string | undefined;
     const rawResponseItems: unknown[] = [];
@@ -254,6 +263,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             latencyMs: number;
           }
         | undefined;
+      let hasReportedText = false;
 
       const recordFirstVisibleOutput = (kind: 'text' | 'reasoning' | 'tool_call') => {
         if (firstVisibleOutput) {
@@ -292,16 +302,23 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         token,
         onTextDelta: (text) => {
           reportedVisibleOutput = true;
+          hasReportedText ||= text.length > 0;
           recordFirstVisibleOutput('text');
           progress.report(new vscode.LanguageModelTextPart(text));
         },
-        onReasoningTextDelta: (text) => {
+        onReasoningTextDelta: ({ text, itemId, contentIndex }) => {
+          if (hasReportedText) {
+            return;
+          }
+
+          const thinkingPart = createThinkingPart(text, `${itemId}:${contentIndex}`);
+          if (!thinkingPart) {
+            return;
+          }
+
           reportedVisibleOutput = true;
           recordFirstVisibleOutput('reasoning');
-          const thinkingPart = createThinkingPart(text);
-          if (thinkingPart) {
-            progress.report(thinkingPart);
-          }
+          progress.report(thinkingPart);
         },
         onToolCall: (callId, name, toolInput) => {
           reportedVisibleOutput = true;
@@ -924,13 +941,13 @@ function supportsOfficialTokenCounting(baseURL: string): boolean {
   return !normalizedBaseURL.includes('chatgpt.com/backend-api/codex');
 }
 
-function createThinkingPart(text: string): vscode.LanguageModelResponsePart | undefined {
+function createThinkingPart(text: string, id?: string): vscode.LanguageModelResponsePart | undefined {
   const ThinkingPart = (vscode as VSCodeWithThinkingPart).LanguageModelThinkingPart;
   if (typeof ThinkingPart !== 'function') {
     return undefined;
   }
 
-  return new ThinkingPart(text) as vscode.LanguageModelResponsePart;
+  return new ThinkingPart(text, id) as vscode.LanguageModelResponsePart;
 }
 
 function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.LanguageModelResponsePart | undefined {

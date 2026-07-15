@@ -30,6 +30,7 @@ try {
   assertEqual(request.prompt_cache_key, identity.threadId, 'stable prompt cache key');
   assertEqual(request.client_metadata.turn_id, identity.turnId, 'turn metadata');
   assertEqual(request.parallel_tool_calls, true, 'parallel tools');
+  assertEqual(request.instructions, base.instructions, 'configured instructions preserved with tools');
   assertEqual(request.include[0], 'reasoning.encrypted_content', 'encrypted reasoning include');
   assertEqual(event.generate, false, 'prewarm generate flag');
   assertEqual('stream' in event, false, 'WebSocket stream omitted');

@@ -38,6 +38,7 @@ const { disposeReusableResponsesWebSockets, isResponsesContinuationMissError, sh
 
 try {
   await runHttpTransportSmokeTest(streamResponseText);
+  await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
   await runWebSocketTransportSmokeTest(streamResponseText);
   await runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldBypassProxy);
@@ -95,6 +96,88 @@ async function runHttpTransportSmokeTest(streamResponseText) {
 
     assertHttpRequest(capturedRequest, '/backend-api/codex/responses');
     assertEqual(deltas.join(''), 'hello world', 'HTTP streamed text');
+  } finally {
+    server.close();
+  }
+}
+
+async function runFunctionCallArgumentsDoneSmokeTest(streamResponseText) {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // Consume the request before sending the deterministic event sequence.
+    }
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    send({ type: 'response.output_text.delta', delta: 'Before tool.' });
+    send({
+      type: 'response.output_item.added',
+      output_index: 1,
+      sequence_number: 2,
+      item: {
+        id: 'fc_1',
+        type: 'function_call',
+        call_id: 'call_1',
+        name: 'read_pull_request',
+        arguments: ''
+      }
+    });
+    send({
+      type: 'response.function_call_arguments.done',
+      item_id: 'fc_1',
+      output_index: 1,
+      sequence_number: 3,
+      name: '',
+      arguments: '{"number":10}'
+    });
+    send({ type: 'response.output_text.delta', delta: 'After tool.' });
+    send({
+      type: 'response.output_item.done',
+      output_index: 1,
+      sequence_number: 5,
+      item: {
+        id: 'fc_1',
+        type: 'function_call',
+        call_id: 'call_1',
+        name: 'read_pull_request',
+        arguments: '{"number":10}'
+      }
+    });
+    send({ type: 'response.completed', response: { id: 'resp_function_call', status: 'completed' } });
+    response.write('data: [DONE]\n\n');
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const progress = [];
+
+    await streamResponseText({
+      baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'http',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Read the current pull request.' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => progress.push({ type: 'text', text }),
+      onToolCall: (callId, name, input) => progress.push({ type: 'tool', callId, name, input })
+    });
+
+    assertEqual(JSON.stringify(progress), JSON.stringify([
+      { type: 'text', text: 'Before tool.' },
+      { type: 'tool', callId: 'call_1', name: 'read_pull_request', input: { number: 10 } },
+      { type: 'text', text: 'After tool.' }
+    ]), 'complete function call is reported before later stream content without duplication');
   } finally {
     server.close();
   }
@@ -183,6 +266,14 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
     webSocket.once('message', (data) => {
       capturedClientEvent = JSON.parse(data.toString('utf8'));
       webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({
+        type: 'response.reasoning_text.delta',
+        item_id: 'rs_ws',
+        output_index: 0,
+        content_index: 0,
+        delta: 'Planning',
+        sequence_number: 1
+      }));
       webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'hello' }));
       webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: ' websocket' }));
       webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws', status: 'completed' } }));
@@ -194,6 +285,7 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
   try {
     const address = server.address();
     const deltas = [];
+    const reasoningDeltas = [];
 
     await streamResponseText({
       baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
@@ -207,6 +299,7 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
       maxOutputTokens: 32,
       token: createCancellationToken(),
       onTextDelta: (text) => deltas.push(text),
+      onReasoningTextDelta: (delta) => reasoningDeltas.push(delta),
       onWebSocketSession: (event) => {
         sessionEvent = event;
       }
@@ -224,6 +317,12 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
     assertEqual('max_output_tokens' in capturedClientEvent, false, 'WebSocket max output tokens omitted for Codex account auth');
     assertEqual(JSON.stringify(capturedClientEvent.input), JSON.stringify([{ role: 'user', content: 'Ping' }]), 'WebSocket input');
     assertEqual(deltas.join(''), 'hello websocket', 'WebSocket streamed text');
+    assertEqual(JSON.stringify(reasoningDeltas), JSON.stringify([{
+      text: 'Planning',
+      itemId: 'rs_ws',
+      contentIndex: 0,
+      outputIndex: 0
+    }]), 'WebSocket reasoning item identity');
     assertEqual(sessionEvent?.reused, false, 'WebSocket initial session reuse state');
   } finally {
     webSocketServer.close();

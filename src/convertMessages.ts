@@ -200,10 +200,12 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
 
     if (part instanceof vscode.LanguageModelToolCallPart) {
       flushMessage();
+      const callId = firstNonEmptyString(part.callId);
+      const name = firstNonEmptyString(part.name);
       items.push({
         type: 'function_call',
-        call_id: part.callId,
-        name: part.name,
+        call_id: callId,
+        name,
         arguments: stableJsonStringify(part.input ?? {})
       });
       continue;
@@ -211,9 +213,10 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
 
     if (part instanceof vscode.LanguageModelToolResultPart) {
       flushMessage();
+      const callId = firstNonEmptyString(part.callId);
       items.push({
         type: 'function_call_output',
-        call_id: part.callId,
+        call_id: callId,
         output: serializeToolResultContent(part.content)
       });
     }
@@ -224,23 +227,72 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
 }
 
 function normalizeDanglingFunctionCallsForReplay(input: ResponsesInputMessage[]): ResponsesInputMessage[] {
+  const replayableFunctionCallIds = new Set<string>();
+  const malformedFunctionCallIds = new Set<string>();
+  for (const item of input) {
+    if (item.type !== 'function_call') {
+      continue;
+    }
+
+    if (isReplayableFunctionCall(item)) {
+      replayableFunctionCallIds.add(item.call_id);
+    } else {
+      malformedFunctionCallIds.add(item.call_id);
+    }
+  }
   const outputCallIds = new Set(
     input
       .filter((item) => item.type === 'function_call_output')
+      .filter((item) => replayableFunctionCallIds.has(item.call_id))
       .map((item) => item.call_id)
   );
+  const normalized: ResponsesInputMessage[] = [];
 
-  return input.map((item) => {
-    if (item.type !== 'function_call' || outputCallIds.has(item.call_id)) {
-      return item;
+  for (const item of input) {
+    if (item.type === 'function_call') {
+      if (!isReplayableFunctionCall(item)) {
+        continue;
+      }
+
+      if (outputCallIds.has(item.call_id)) {
+        normalized.push(item);
+        continue;
+      }
+
+      normalized.push({
+        role: 'assistant',
+        content: `The previous assistant turn was interrupted before tool execution. It had prepared a call to ${item.name} with arguments ${item.arguments}, but no tool output was produced.`,
+        type: 'message'
+      });
+      continue;
     }
 
-    return {
-      role: 'assistant',
-      content: `The previous assistant turn was interrupted before tool execution. It had prepared a call to ${item.name} with arguments ${item.arguments}, but no tool output was produced.`,
-      type: 'message'
-    };
-  });
+    if (item.type === 'function_call_output') {
+      if (firstNonEmptyString(item.call_id) && !malformedFunctionCallIds.has(item.call_id)) {
+        normalized.push(item);
+      }
+      continue;
+    }
+
+    normalized.push(item);
+  }
+
+  return normalized;
+}
+
+function isReplayableFunctionCall(item: ResponsesInputMessage): boolean {
+  return item.type === 'function_call'
+    && firstNonEmptyString(item.call_id).length > 0
+    && firstNonEmptyString(item.name).length > 0;
+}
+
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return '';
 }
 
 function serializeToolResultContent(content: readonly unknown[]): string | ResponseFunctionCallOutputItemList {
