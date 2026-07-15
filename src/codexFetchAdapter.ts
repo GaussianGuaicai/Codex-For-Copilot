@@ -21,9 +21,13 @@ export interface CodexFetchAdapterOptions {
   onObservation?: (observation: CodexFetchObservation) => void;
 }
 
-const compressionDisabledEndpoints = new Set<string>();
+const COMPRESSION_CAPABILITY_TTL_MS = 10 * 60 * 1000;
+const MAX_COMPRESSION_CAPABILITIES = 128;
+const compressionDisabledEndpoints = new Map<string, number>();
 
 export function createCodexFetchAdapter(options: CodexFetchAdapterOptions): typeof fetch {
+  const endpointKey = normalizeCodexEndpoint(options.endpointKey);
+
   return async (input, init) => {
     const startedAt = Date.now();
     const request = input instanceof Request ? input : undefined;
@@ -42,7 +46,7 @@ export function createCodexFetchAdapter(options: CodexFetchAdapterOptions): type
       && bodyBuffer !== undefined
       && requestBytes >= threshold
       && options.compression !== 'disabled'
-      && !compressionDisabledEndpoints.has(options.endpointKey);
+      && !isCompressionDisabled(endpointKey);
     const compressedBody = eligible ? tryZstdCompress(bodyBuffer) : undefined;
     const shouldCompress = eligible && compressedBody !== undefined;
     const compressedHeaders = new Headers(headers);
@@ -57,8 +61,8 @@ export function createCodexFetchAdapter(options: CodexFetchAdapterOptions): type
       body: shouldCompress ? compressedBody : body
     });
 
-    if (shouldCompress && isCompressionRejection(response)) {
-      compressionDisabledEndpoints.add(options.endpointKey);
+    if (shouldCompress && await isExplicitCompressionRejection(response)) {
+      disableCompression(endpointKey);
       await response.body?.cancel().catch(() => undefined);
       const retryHeaders = new Headers(headers);
       retryHeaders.delete('Content-Encoding');
@@ -103,6 +107,48 @@ function tryZstdCompress(body: Buffer): Buffer | undefined {
   }
 }
 
-function isCompressionRejection(response: Response): boolean {
-  return response.status === 400 || response.status === 415 || response.status === 422;
+function isCompressionDisabled(endpointKey: string): boolean {
+  evictCompressionCapabilities();
+  return compressionDisabledEndpoints.has(endpointKey);
+}
+
+function disableCompression(endpointKey: string): void {
+  compressionDisabledEndpoints.set(endpointKey, Date.now());
+  evictCompressionCapabilities();
+}
+
+function evictCompressionCapabilities(): void {
+  const cutoff = Date.now() - COMPRESSION_CAPABILITY_TTL_MS;
+  for (const [endpointKey, disabledAt] of compressionDisabledEndpoints) {
+    if (disabledAt < cutoff) {
+      compressionDisabledEndpoints.delete(endpointKey);
+    }
+  }
+
+  if (compressionDisabledEndpoints.size <= MAX_COMPRESSION_CAPABILITIES) {
+    return;
+  }
+
+  const oldest = [...compressionDisabledEndpoints.entries()]
+    .sort((left, right) => left[1] - right[1])
+    .slice(0, compressionDisabledEndpoints.size - MAX_COMPRESSION_CAPABILITIES);
+  for (const [endpointKey] of oldest) {
+    compressionDisabledEndpoints.delete(endpointKey);
+  }
+}
+
+async function isExplicitCompressionRejection(response: Response): Promise<boolean> {
+  if (response.status === 415) {
+    return true;
+  }
+  if (response.status !== 400 && response.status !== 422) {
+    return false;
+  }
+
+  try {
+    const body = await response.clone().text();
+    return /\b(?:content[- ]encoding|zstd|compression)\b/i.test(body);
+  } catch {
+    return false;
+  }
 }

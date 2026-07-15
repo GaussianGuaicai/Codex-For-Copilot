@@ -17,9 +17,12 @@
 
 - Keep provider-visible callback semantics transport-agnostic: HTTP and WebSocket must report the same deltas and terminal events.
 - Keep ChatGPT Codex compatibility logic centralized in `responsesClient.ts`, `config.ts`, and `secrets.ts`; do not duplicate header or base URL normalization across call sites.
+- Keep Responses tool conversion and request-field shaping in `codexRequestBuilder.ts`; transport code consumes its shared request output rather than maintaining a second conversion path.
 - WebSocket requests must send `response.create` payloads without the HTTP-only `stream` field.
 - When `transport` is `auto`, only fall back to HTTP for transport availability failures, not for successful in-band model responses.
-- Conversation reuse is allowed only for append-only transcript growth with an identical request envelope; tool or schema changes must bust reuse.
+- A `Model not found` response for the requested model is an in-band model error, not a transport failure; surface it without an HTTP retry.
+- Conversation reuse is allowed only for append-only transcript growth with an identical shared-builder request fingerprint; input, prior-response IDs, cache routing, and turn metadata are excluded, while model settings, tools, and schema changes must bust reuse.
+- Request-compression capability is endpoint-normalized, TTL-bounded, and reset for connection configuration or credential changes; only an explicit Content-Encoding rejection may disable it.
 - Both transports must convert a rejected `previous_response_id` into a continuation miss so the provider can retry once with the full input history.
 - Tool-result continuations must replay the matching `function_call` and `function_call_output` as full input; neither the provider nor a managed WebSocket session may compress that replay back into a standalone tool-output continuation.
 - Preserve configured `instructions` verbatim when tools are provided; tool definitions and the model determine tool-call ordering.

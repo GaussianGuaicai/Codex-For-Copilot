@@ -57,6 +57,9 @@ const vscodeStub = {
   LanguageModelChatMessageRole: {
     User: 1,
     Assistant: 2
+  },
+  LanguageModelChatToolMode: {
+    Required: 2
   }
 };
 
@@ -258,10 +261,17 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
   const baseOptions = {
     baseURL: 'https://chatgpt.com/backend-api/codex/responses',
     authIdentity: 'codexAuth:acct-test',
+    compatibilityEnabled: true,
     model: 'gpt-5.4-mini',
     instructions: 'You are a helpful coding assistant integrated with VS Code.',
-    reasoningEffort: 'high',
-    toolMode: 1
+    reasoning: { effort: 'high' },
+    toolMode: 1,
+    serviceTier: 'default',
+    store: false,
+    omitMaxOutputTokens: false,
+    maxOutputTokens: 1024,
+    textVerbosity: 'medium',
+    includeEncryptedReasoning: true
   };
   const previousInput = [
     { type: 'message', role: 'user', content: 'Inspect the repo.' }
@@ -297,7 +307,7 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
     tools: currentToolsWithAddition
   });
 
-  assertEqual(left.identityKey, right.identityKey, 'tool catalog does not bust reuse identity key');
+  assertEqual(left.identityKey === right.identityKey, false, 'tool catalog busts the semantic request fingerprint');
 
   const store = new ResponseBranchStore();
   store.recordSuccess(left, previousInput, 'resp_tool_catalog_base');
@@ -312,6 +322,21 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
 
   const removedMatch = store.findReusableBranch(reuseEnvelope(left.identityKey, buildResponseBranchToolSignatures(currentToolsWithRemoval)), currentInput);
   assertEqual(removedMatch, undefined, 'removed existing tool busts reuse');
+
+  const changedServiceTier = buildResponseBranchReuseEnvelope({
+    ...baseOptions,
+    tools: previousTools,
+    serviceTier: 'priority'
+  });
+  const changedOutputCap = buildResponseBranchReuseEnvelope({
+    ...baseOptions,
+    tools: previousTools,
+    maxOutputTokens: 2048
+  });
+  assertEqual(left.identityKey === changedServiceTier.identityKey, false, 'service tier changes the semantic request fingerprint');
+  assertEqual(left.identityKey === changedOutputCap.identityKey, false, 'output cap changes the semantic request fingerprint');
+  assertEqual(store.findReusableBranch(changedServiceTier, currentInput), undefined, 'service tier change busts reuse');
+  assertEqual(store.findReusableBranch(changedOutputCap, currentInput), undefined, 'output cap change busts reuse');
 }
 
 function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore) {

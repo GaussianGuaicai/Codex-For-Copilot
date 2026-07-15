@@ -40,6 +40,7 @@ try {
   await runHttpTransportSmokeTest(streamResponseText);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
+  await runAutoModelNotFoundDoesNotFallbackSmokeTest(streamResponseText);
   await runWebSocketTransportSmokeTest(streamResponseText);
   await runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldBypassProxy);
   await runWebSocketContinuationSmokeTest(streamResponseText);
@@ -238,6 +239,77 @@ async function runAutoFallbackSmokeTest(streamResponseText) {
     assertEqual(fallbackEvent?.from, 'websocket', 'fallback from transport');
     assertEqual(fallbackEvent?.to, 'http', 'fallback to transport');
   } finally {
+    server.close();
+  }
+}
+
+async function runAutoModelNotFoundDoesNotFallbackSmokeTest(streamResponseText) {
+  let httpRequestCount = 0;
+  let upgradeCount = 0;
+  let fallbackEvent;
+  const server = createServer((request, response) => {
+    httpRequestCount += 1;
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'HTTP fallback must not run.' } }));
+  });
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    upgradeCount += 1;
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', () => {
+      webSocket.send(JSON.stringify({
+        type: 'response.failed',
+        response: {
+          id: 'resp_missing_model',
+          status: 'failed',
+          error: {
+            code: 'model_not_found',
+            message: 'Model not found gpt-5.5'
+          }
+        }
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    let capturedError;
+
+    try {
+      await streamResponseText({
+        baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+        apiKey: 'test-api-key',
+        headers: createHeaders(),
+        transport: 'auto',
+        omitMaxOutputTokens: true,
+        model: 'gpt-5.5',
+        instructions: 'Smoke test instructions',
+        input: [{ role: 'user', content: 'Ping' }],
+        maxOutputTokens: 32,
+        token: createCancellationToken(),
+        onTextDelta() {},
+        onTransportFallback: (event) => {
+          fallbackEvent = event;
+        }
+      });
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(capturedError?.message, 'Model not found gpt-5.5', 'requested model rejection surfaces directly');
+    assertEqual(upgradeCount, 1, 'requested model rejection uses one WebSocket attempt');
+    assertEqual(httpRequestCount, 0, 'requested model rejection does not fall back to HTTP');
+    assertEqual(fallbackEvent, undefined, 'requested model rejection does not report transport fallback');
+  } finally {
+    webSocketServer.close();
     server.close();
   }
 }

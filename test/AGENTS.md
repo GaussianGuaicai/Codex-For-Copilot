@@ -18,7 +18,10 @@
 
 - Prefer narrow transport semantics checks over broad suites.
 - Keep HTTP and WebSocket assertions aligned so transport parity regressions are caught in one place.
+- An in-band `Model not found` error for the requested model must not make `auto` issue an HTTP fallback request.
 - Keep branch reuse semantics deterministic: append-only reuse, fork reset, and tool-change busting should be covered by local smoke tests.
+- Settings that alter the Responses request envelope, including service tier and output limits, must force full-input replay without `previous_response_id`.
+- Compression tests must distinguish explicit encoding rejection from ordinary Responses `400`/`422` errors, which must not disable future compressed requests.
 - A full replay containing `function_call_output` must retain its matching `function_call` and omit `previous_response_id`, including after managed WebSocket incremental processing.
 - Repeated reasoning deltas for one Responses item must retain one thinking-part ID, and reasoning that arrives after visible text must not interrupt the text sequence.
 - Complete function calls must be reported from `response.function_call_arguments.done` before later text, using the non-empty `output_item.added` name when the early event omits it; `response.output_item.done` must not duplicate the tool call.

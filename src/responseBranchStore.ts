@@ -36,6 +36,8 @@ export interface ReusableResponseBranchMatch {
 
 export interface ResponseBranchReuseEnvelope {
   identityKey: string;
+  scopeKey: string;
+  requestFingerprint: string;
   toolSignatures?: ResponseBranchToolSignatures;
 }
 
@@ -47,6 +49,7 @@ export interface ResponseBranchReuseMissDiagnostic {
   currentInputCount: number;
   previousNextItemSummary: string | null;
   currentNextItemSummary: string | null;
+  requestFingerprintMatches: boolean;
   toolCompatibility?: ResponseBranchToolCompatibility;
   state?: CodexBranchState;
 }
@@ -100,7 +103,8 @@ export class ResponseBranchStore {
     let bestMatch: ReusableResponseBranchMatch | undefined;
 
     for (const branch of this.branches.values()) {
-      if (branch.envelope.identityKey !== envelope.identityKey) {
+      if (branch.envelope.identityKey !== envelope.identityKey
+        || !hasMatchingRequestFingerprint(branch, envelope)) {
         continue;
       }
 
@@ -141,7 +145,7 @@ export class ResponseBranchStore {
     let bestDiagnostic: ResponseBranchReuseMissDiagnostic | undefined;
 
     for (const branch of this.branches.values()) {
-      if (branch.envelope.identityKey !== envelope.identityKey) {
+      if (branch.envelope.scopeKey !== envelope.scopeKey) {
         continue;
       }
 
@@ -156,6 +160,7 @@ export class ResponseBranchStore {
           currentInputCount: currentContinuationInput.length,
           previousNextItemSummary: summarizeResponsesInputMessageForLog(branch.continuationInput[comparison.matchedPrefixCount]),
           currentNextItemSummary: summarizeResponsesInputMessageForLog(currentContinuationInput[comparison.matchedPrefixCount]),
+          requestFingerprintMatches: hasMatchingRequestFingerprint(branch, envelope),
           toolCompatibility,
           state: branch.state ? cloneBranchState(branch.state) : undefined
         };
@@ -292,6 +297,15 @@ function cloneBranchState(state: CodexBranchState): CodexBranchState {
     lastResponseItems: [...state.lastResponseItems],
     lastRequest: state.lastRequest ? structuredClone(state.lastRequest) : undefined
   };
+}
+
+function hasMatchingRequestFingerprint(
+  branch: ResponseBranchEntry,
+  envelope: ResponseBranchReuseEnvelope
+): boolean {
+  return branch.envelope.requestFingerprint === envelope.requestFingerprint
+    && (branch.state?.requestFingerprint === undefined
+      || branch.state.requestFingerprint === envelope.requestFingerprint);
 }
 
 function compareToolSignatures(

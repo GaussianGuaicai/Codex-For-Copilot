@@ -10,7 +10,13 @@ import { getApiCredentials } from './secrets';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexIdentityManager, inputStartsNewTurn } from './codexIdentity';
 import { getCodexCompatibilityProfile, type CodexRequestIdentity } from './codexProtocol';
-import { buildCodexResponsesRequest, fingerprintCodexRequest } from './codexRequestBuilder';
+import { resetCodexFetchCapabilities } from './codexFetchAdapter';
+import {
+  buildCodexResponsesRequest,
+  fingerprintCodexRequest,
+  fingerprintCodexRequestEnvelope,
+  type CodexRequestEnvelopeOptions
+} from './codexRequestBuilder';
 import type { CodexBranchState } from './responseBranchStore';
 import { shortHash } from './codexTelemetry';
 
@@ -73,6 +79,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('codexModelProvider')) {
           disposeReusableResponsesWebSockets();
+          resetCodexFetchCapabilities();
           this.lastConnectionConfigurationKey = undefined;
           this.cachedModels = undefined;
           this.modelInfoChangedEmitter.fire();
@@ -155,16 +162,25 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     );
     const requestStartedAt = Date.now();
     const input = convertMessagesToResponsesInput(messages);
-    const createReuseEnvelope = (requestModel: string) => buildResponseBranchReuseEnvelope({
+    const requestOptions: CodexRequestEnvelopeOptions = {
+      compatibilityEnabled: compatibilityProfile.enabled,
+      model: selectedModel.requestModel,
+      instructions: config.instructions,
+      tools: options.tools,
+      toolMode: options.toolMode,
+      reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
+      serviceTier: getRequestServiceTier(config.defaultServiceTier),
+      store: false,
+      omitMaxOutputTokens: credentials.omitMaxOutputTokens,
+      maxOutputTokens: config.maxOutputTokens,
+      textVerbosity: 'medium',
+      includeEncryptedReasoning: true
+    };
+    const reuseEnvelope = buildResponseBranchReuseEnvelope({
       baseURL: normalizeBaseURL(config.baseURL),
       authIdentity,
-      model: requestModel,
-      instructions: config.instructions,
-      reasoningEffort,
-      toolMode: options.toolMode,
-      tools: options.tools
+      ...requestOptions
     });
-    let reuseEnvelope = createReuseEnvelope(selectedModel.requestModel);
     const reusableBranch = this.responseBranchStore.findReusableBranch(reuseEnvelope, input);
     const reuseMissDiagnostic = reusableBranch
       ? undefined
@@ -248,6 +264,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         mismatchIndex: reuseMissDiagnostic.comparison.mismatch?.index ?? null,
         mismatchPreviousItem: reuseMissDiagnostic.comparison.mismatch?.previousItemSummary ?? reuseMissDiagnostic.previousNextItemSummary,
         mismatchCurrentItem: reuseMissDiagnostic.comparison.mismatch?.currentItemSummary ?? reuseMissDiagnostic.currentNextItemSummary,
+        requestFingerprintMatches: reuseMissDiagnostic.requestFingerprintMatches,
         toolCompatibility: reuseMissDiagnostic.toolCompatibility ?? null
       });
     }
@@ -290,15 +307,16 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         websocketPrewarm: config.websocketPrewarm,
         requestCompression: config.requestCompression,
         previousResponseId,
-        omitMaxOutputTokens: credentials.omitMaxOutputTokens,
-        model: selectedModel.requestModel,
-        instructions: config.instructions,
-        serviceTier: getRequestServiceTier(config.defaultServiceTier),
+        store: requestOptions.store,
+        omitMaxOutputTokens: requestOptions.omitMaxOutputTokens,
+        model: requestOptions.model,
+        instructions: requestOptions.instructions,
+        serviceTier: requestOptions.serviceTier,
         input: requestInput,
-        tools: options.tools,
-        toolMode: options.toolMode,
-        reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
-        maxOutputTokens: config.maxOutputTokens,
+        tools: requestOptions.tools,
+        toolMode: requestOptions.toolMode,
+        reasoning: requestOptions.reasoning,
+        maxOutputTokens: requestOptions.maxOutputTokens,
         token,
         onTextDelta: (text) => {
           reportedVisibleOutput = true;
@@ -479,20 +497,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const finalResponseId = completedResponseId ?? createdResponseId;
     if (finalResponseId) {
       const fullRequest = buildCodexResponsesRequest({
-        compatibilityEnabled: compatibilityProfile.enabled,
+        ...requestOptions,
         identity: requestIdentity,
-        model: selectedModel.requestModel,
-        instructions: config.instructions,
         input,
-        tools: options.tools,
-        toolMode: options.toolMode,
-        reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
-        serviceTier: getRequestServiceTier(config.defaultServiceTier),
-        store: false,
-        omitMaxOutputTokens: credentials.omitMaxOutputTokens,
-        maxOutputTokens: config.maxOutputTokens,
-        textVerbosity: 'medium',
-        includeEncryptedReasoning: true
       });
       branchState = {
         ...branchState,
@@ -535,6 +542,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     });
     if (this.lastConnectionConfigurationKey && this.lastConnectionConfigurationKey !== key) {
       disposeReusableResponsesWebSockets();
+      resetCodexFetchCapabilities();
     }
     this.lastConnectionConfigurationKey = key;
   }
@@ -980,22 +988,18 @@ function createTemporarilyUnavailableModelError(model: string, cause: unknown): 
 export function buildResponseBranchReuseEnvelope(options: {
   baseURL: string;
   authIdentity: string;
-  model: string;
-  instructions: string;
-  reasoningEffort: ReasoningEffort | undefined;
-  toolMode: vscode.LanguageModelChatToolMode | undefined;
-  tools: readonly vscode.LanguageModelChatTool[] | undefined;
-}): ResponseBranchReuseEnvelope {
+} & CodexRequestEnvelopeOptions): ResponseBranchReuseEnvelope {
+  const { baseURL, authIdentity, ...requestOptions } = options;
+  const requestFingerprint = fingerprintCodexRequestEnvelope(requestOptions);
+  const scopeKey = stableSerialize({ baseURL, authIdentity });
   return {
     identityKey: stableSerialize({
-      baseURL: options.baseURL,
-      authIdentity: options.authIdentity,
-      model: options.model,
-      instructions: options.instructions,
-      reasoningEffort: options.reasoningEffort ?? null,
-      toolMode: options.toolMode ?? null
+      scopeKey,
+      requestFingerprint
     }),
-    toolSignatures: buildResponseBranchToolSignatures(options.tools)
+    scopeKey,
+    requestFingerprint,
+    toolSignatures: buildResponseBranchToolSignatures(requestOptions.tools)
   };
 }
 

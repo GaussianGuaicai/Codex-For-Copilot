@@ -9,10 +9,8 @@ import OpenAI, {
 import { ResponsesWS, type ResponsesWSClientOptions } from 'openai/resources/responses/ws';
 import type {
   ResponsesClientEvent,
-  FunctionTool,
   ResponsesServerEvent,
-  ResponseUsage,
-  ToolChoiceOptions
+  ResponseUsage
 } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
@@ -873,7 +871,7 @@ function shouldFallbackToHttp(
     return false;
   }
 
-  return error instanceof WebSocketTransportUnavailableError || Boolean(getModelNotFoundName(error));
+  return error instanceof WebSocketTransportUnavailableError;
 }
 
 function getMismatchedModelNotFoundName(error: { error?: { message?: string | null } | undefined; message: string } | string | undefined, requestedModel: string): string | undefined {
@@ -990,24 +988,6 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
   }
 
   return Math.floor(payload.input_tokens);
-}
-
-function convertToolToResponseTool(tool: vscode.LanguageModelChatTool): FunctionTool {
-  return {
-    type: 'function',
-    name: tool.name,
-    description: tool.description,
-    parameters: normalizeToolParameters(tool.inputSchema),
-    strict: false
-  };
-}
-
-function normalizeToolParameters(inputSchema: object | undefined): { [key: string]: unknown } | null {
-  return inputSchema ? (inputSchema as { [key: string]: unknown }) : null;
-}
-
-function mapToolChoice(toolMode: vscode.LanguageModelChatToolMode | undefined): ToolChoiceOptions {
-  return toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
 }
 
 function parseToolCallInput(argumentsJson: string): object {

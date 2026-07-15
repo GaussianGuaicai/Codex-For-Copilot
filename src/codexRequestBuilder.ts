@@ -39,11 +39,28 @@ export interface CodexRequestBuilderOptions {
   websocketRequestStartedAt?: number;
 }
 
+export type CodexRequestEnvelopeOptions = Omit<
+  CodexRequestBuilderOptions,
+  'identity' | 'input' | 'previousResponseId' | 'requestKind' | 'websocketRequestStartedAt'
+>;
+
 export function buildCodexResponsesRequest(options: CodexRequestBuilderOptions): CodexResponsesRequest {
   const tools = options.tools?.map(convertToolToResponseTool) ?? [];
   const metadata = options.compatibilityEnabled && options.identity
     ? buildCodexClientMetadata(options.identity, options.requestKind ?? 'turn', options.websocketRequestStartedAt)
     : undefined;
+  const compatibilityFields = options.compatibilityEnabled
+    ? {
+        include: options.includeEncryptedReasoning === false ? [] : ['reasoning.encrypted_content'],
+        ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {})
+      }
+    : {};
+  const identityFields = options.compatibilityEnabled && options.identity
+    ? {
+        prompt_cache_key: options.identity.threadId,
+        client_metadata: metadata
+      }
+    : {};
 
   return {
     model: options.model,
@@ -61,14 +78,8 @@ export function buildCodexResponsesRequest(options: CodexRequestBuilderOptions):
           parallel_tool_calls: true
         }
       : {}),
-    ...(options.compatibilityEnabled && options.identity
-      ? {
-          prompt_cache_key: options.identity.threadId,
-          include: options.includeEncryptedReasoning === false ? [] : ['reasoning.encrypted_content'],
-          ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
-          client_metadata: metadata
-        }
-      : {}),
+    ...compatibilityFields,
+    ...identityFields,
     ...(options.omitMaxOutputTokens ? {} : { max_output_tokens: options.maxOutputTokens })
   } as CodexResponsesRequest;
 }
@@ -114,10 +125,18 @@ export function fingerprintCodexRequest(request: CodexResponsesRequest): string 
   const {
     input: _input,
     previous_response_id: _previousResponseId,
+    prompt_cache_key: _promptCacheKey,
     client_metadata: _clientMetadata,
     ...properties
   } = request;
   return stableSerialize(properties);
+}
+
+export function fingerprintCodexRequestEnvelope(options: CodexRequestEnvelopeOptions): string {
+  return fingerprintCodexRequest(buildCodexResponsesRequest({
+    ...options,
+    input: []
+  }));
 }
 
 export function areCodexRequestsIncrementallyCompatible(

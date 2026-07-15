@@ -157,6 +157,7 @@ try {
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
+  await runRequestEnvelopeReuseInvalidationSmokeTest();
   await runToolOutputFullInputReplaySmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
@@ -499,6 +500,100 @@ async function runHttpContinuationRecoverySmokeTest() {
       'disabled continuation full input'
     );
   } finally {
+    server.close();
+  }
+}
+
+async function runRequestEnvelopeReuseInvalidationSmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    writeSseResponse(
+      response,
+      responseRequests.length === 1 ? 'first reply' : 'second reply',
+      responseRequests.length === 1 ? 'resp_envelope_initial' : 'resp_envelope_changed'
+    );
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalDefaultServiceTier = configValues.defaultServiceTier;
+  const originalMaxOutputTokens = configValues.maxOutputTokens;
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.defaultServiceTier = 'auto';
+  configValues.maxOutputTokens = 32;
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for request envelope reuse test.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    configValues.defaultServiceTier = 'fast';
+    configValues.maxOutputTokens = 64;
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'request envelope invalidation request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'request envelope change omits previous response id');
+    assertEqual(responseRequests[1].service_tier, 'priority', 'request envelope change applies new service tier');
+    assertEqual(responseRequests[1].max_output_tokens, 64, 'request envelope change applies new output cap');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'First request', type: 'message' },
+      { role: 'assistant', content: 'first reply', type: 'message' },
+      { role: 'user', content: 'Follow up', type: 'message' }
+    ]), 'request envelope change replays full input');
+  } finally {
+    configValues.defaultServiceTier = originalDefaultServiceTier;
+    configValues.maxOutputTokens = originalMaxOutputTokens;
     server.close();
   }
 }
