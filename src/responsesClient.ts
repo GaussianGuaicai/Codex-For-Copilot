@@ -16,9 +16,24 @@ import type {
 } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { ResponsesInputMessage } from './convertMessages';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { codexFetch } from './auth/codexAuthRequest';
+import {
+  buildCodexRequestHeaders,
+  createCodexTurnMetadata,
+  stableSerializeCodexMetadata,
+  type CodexCompatibilityProfile,
+  type CodexRequestIdentity
+} from './codexProtocol';
+import {
+  buildCodexResponsesRequest,
+  type CodexRequestBuilderOptions
+} from './codexRequestBuilder';
+import { createCodexFetchAdapter, type RequestCompressionPolicy } from './codexFetchAdapter';
+import { codexConnectionManager, type CodexConnectionScope } from './codexConnectionManager';
+import type { CodexWebSocketHandshake } from './codexWebSocketSession';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 2;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -52,6 +67,14 @@ export interface StreamResponseTextOptions {
   apiKey: string;
   headers?: Record<string, string>;
   transport?: 'auto' | 'http' | 'websocket';
+  compatibilityProfile?: CodexCompatibilityProfile;
+  identity?: CodexRequestIdentity;
+  turnState?: string;
+  authIdentity?: string;
+  extensionVersion?: string;
+  userAgent?: string;
+  websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
+  requestCompression?: RequestCompressionPolicy;
   previousResponseId?: string;
   store?: boolean;
   omitMaxOutputTokens?: boolean;
@@ -67,6 +90,10 @@ export interface StreamResponseTextOptions {
   onTextDelta: (text: string) => void;
   onReasoningTextDelta?: (text: string) => void;
   onToolCall?: (callId: string, name: string, input: object) => void;
+  onRawResponseItem?: (item: unknown) => void;
+  onTurnState?: (turnState: string) => void;
+  onWebSocketHandshake?: (handshake: CodexWebSocketHandshake) => void;
+  onTransportMetrics?: (metrics: Record<string, unknown>) => void;
   onResponseCreated?: (response: {
     id?: string;
     status?: string;
@@ -92,6 +119,7 @@ export function isResponsesContinuationMissError(error: unknown): error is Respo
 }
 
 export function disposeReusableResponsesWebSockets(): void {
+  codexConnectionManager.dispose();
   const sessions = new Set(reusableWebSocketSessions.values());
   reusableWebSocketSessions.clear();
 
@@ -125,7 +153,10 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
           throw error;
         }
 
-        disposeReusableResponsesWebSockets();
+        const managedScope = getManagedConnectionScope(options);
+        if (managedScope) {
+          codexConnectionManager.markHttpFallback(managedScope);
+        }
 
         options.onTransportFallback?.({
           from: 'websocket',
@@ -160,17 +191,31 @@ async function streamResponseTextOverHttp(
   options: StreamResponseTextOptions,
   abortController: AbortController
 ): Promise<void> {
-  const client = createOpenAIClient(options);
   const request = buildResponsesCreateRequest(options);
+  const headers = buildDynamicHeaders(options, 'http');
+  const client = createOpenAIClient(options, headers);
 
-  const stream = await client.responses.create(
+  const responsePromise = client.responses.create(
     request,
     {
+      headers,
       signal: abortController.signal,
       maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
       timeout: OPENAI_DEFAULT_TIMEOUT_MS
     }
   );
+  const { data: stream, response, request_id: requestId } = await responsePromise.withResponse();
+  const turnState = response.headers.get('x-codex-turn-state')?.trim();
+  if (turnState) {
+    options.onTurnState?.(turnState);
+  }
+  options.onTransportMetrics?.({
+    transportActual: 'http',
+    requestIdPresent: Boolean(requestId),
+    turnStateReceived: Boolean(turnState),
+    serverModel: response.headers.get('openai-model') ?? undefined,
+    modelsEtagPresent: Boolean(response.headers.get('x-models-etag'))
+  });
 
   for await (const event of stream) {
     if (options.token.isCancellationRequested) {
@@ -186,6 +231,11 @@ async function streamResponseTextOverWebSocket(
   options: StreamResponseTextOptions,
   abortController: AbortController
 ): Promise<void> {
+  if (options.compatibilityProfile?.enabled && options.identity && options.authIdentity) {
+    await streamCodexResponseTextOverManagedWebSocket(options, abortController);
+    return;
+  }
+
   evictReusableWebSocketSessions();
 
   const reusedSession = takeReusableWebSocketSession(options);
@@ -302,11 +352,144 @@ async function streamResponseTextOverWebSocket(
   }
 }
 
+async function streamCodexResponseTextOverManagedWebSocket(
+  options: StreamResponseTextOptions,
+  abortController: AbortController
+): Promise<void> {
+  const identity = options.identity!;
+  const scope = getManagedConnectionScope(options)!;
+  if (codexConnectionManager.isHttpFallback(scope)) {
+    throw new WebSocketTransportUnavailableError('This Codex session is using its HTTP fallback.');
+  }
+
+  const headers = buildDynamicHeaders(options, 'websocket');
+  const client = createOpenAIClient(options, headers);
+  let managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+  options.onWebSocketSession?.({ reused: managed.reused });
+  const request = buildResponsesCreateRequest(options);
+  const builderOptions = createRequestBuilderOptions(options);
+
+  if (!managed.reused
+    && options.websocketPrewarm !== 'disabled'
+    && !codexConnectionManager.isPrewarmDisabled(scope)) {
+    const prewarmStartedAt = Date.now();
+    try {
+      const prewarm = await managed.session.prewarm({
+        request,
+        builderOptions,
+        identity,
+        signal: abortController.signal,
+        onEvent: () => undefined
+      });
+      reportManagedWebSocketResult(options, prewarm, 'prewarm', Date.now() - prewarmStartedAt);
+    } catch (error) {
+      if (options.token.isCancellationRequested || abortController.signal.aborted) {
+        return;
+      }
+      codexConnectionManager.disablePrewarm(scope);
+      codexConnectionManager.closeThread(scope);
+      managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+      options.onTransportMetrics?.({
+        prewarmEnabled: true,
+        prewarmResult: 'disabled-after-failure',
+        prewarmLatencyMs: Date.now() - prewarmStartedAt,
+        retryReason: error instanceof Error ? error.name : 'unknown'
+      });
+    }
+  }
+
+  let visibleActivity = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await managed.session.stream({
+        request,
+        builderOptions,
+        identity,
+        signal: abortController.signal,
+        onEvent: (event) => {
+          if (event.type === 'response.output_text.delta'
+            || event.type === 'response.reasoning_text.delta'
+            || event.type === 'response.output_item.done') {
+            visibleActivity = true;
+          }
+          handleResponsesServerEvent(event, options);
+        }
+      });
+      if (result.handshake?.serverModel && result.handshake.serverModel !== options.model) {
+        codexConnectionManager.closeThread(scope);
+        throw new WebSocketTransportUnavailableError(
+          `Responses WebSocket resolved server model ${result.handshake.serverModel} while requesting ${options.model}.`
+        );
+      }
+      reportManagedWebSocketResult(options, result, 'response');
+      return;
+    } catch (error) {
+      codexConnectionManager.closeThread(scope);
+      const classified = classifyManagedWebSocketError(error, options);
+      if (attempt === 0 && !visibleActivity && /connection limit/i.test(classified.message)) {
+        managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+        options.onTransportMetrics?.({ retryReason: 'websocket_connection_limit_reached' });
+        continue;
+      }
+      throw classified;
+    }
+  }
+}
+
+function reportManagedWebSocketResult(
+  options: StreamResponseTextOptions,
+  result: Awaited<ReturnType<import('./codexWebSocketSession').CodexWebSocketSession['stream']>>,
+  kind: 'prewarm' | 'response',
+  latencyMs?: number
+): void {
+  if (result.handshake) {
+    options.onWebSocketHandshake?.(result.handshake);
+  }
+  if (result.turnState) {
+    options.onTurnState?.(result.turnState);
+  }
+  options.onTransportMetrics?.({
+    transportActual: 'websocket',
+    connectionReused: result.connectionReused,
+    previousResponseIdUsed: Boolean(result.previousResponseIdUsed),
+    incrementalInputCount: result.incrementalInputCount,
+    requestBodyBytes: result.requestBytes,
+    turnStateReceived: Boolean(result.turnState ?? result.handshake?.turnState),
+    serverModel: result.handshake?.serverModel,
+    modelsEtagPresent: Boolean(result.handshake?.modelsEtag),
+    ...(kind === 'prewarm'
+      ? { prewarmEnabled: true, prewarmResult: 'success', prewarmLatencyMs: latencyMs }
+      : {})
+  });
+}
+
+function classifyManagedWebSocketError(error: unknown, options: StreamResponseTextOptions): Error {
+  const messages = collectErrorMessages(error);
+  if (options.previousResponseId && messages.some((message) => /previous_response_not_found/i.test(message))) {
+    return new ResponsesContinuationMissError(messages[0] ?? 'previous_response_not_found', options.previousResponseId, {
+      cause: error instanceof Error ? error : undefined
+    });
+  }
+  if (messages.some((message) => /connection limit|websocket_connection_limit_reached/i.test(message))) {
+    return new WebSocketTransportUnavailableError('Responses WebSocket connection limit reached.', {
+      cause: error instanceof Error ? error : undefined
+    });
+  }
+  if (error instanceof Error) {
+    const causeCode = (error as Error & { cause?: { code?: unknown } }).cause?.code;
+    if (/websocket/i.test(error.name)
+      || typeof causeCode === 'string'
+      || /websocket|socket|connection|handshake|closed|terminal event|before the response completed|getaddrinfo/i.test(error.message)) {
+      return new WebSocketTransportUnavailableError(error.message, { cause: error });
+    }
+    return error;
+  }
+  return new Error(String(error));
+}
+
 function createReusableWebSocketSession(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): ReusableResponsesWebSocketSession {
   const client = createOpenAIClient(options);
-  const socketOptions = (options.headers
-    ? { headers: options.headers }
-    : {}) as ResponsesWSClientOptions;
+  const socketOptions = createResponsesWsOptions(options.headers, options.baseURL);
 
   return {
     socket: new ResponsesWS(client, socketOptions),
@@ -415,48 +598,139 @@ function evictReusableWebSocketSessions(): void {
   }
 }
 
-function createOpenAIClient(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): OpenAI {
+function createOpenAIClient(
+  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
+  defaultHeaders = options.headers
+): OpenAI {
+  const customFetch = createCodexFetchAdapter({
+    endpointKey: options.compatibilityProfile?.endpointKey ?? normalizeBaseURL(options.baseURL),
+    compatibilityEnabled: options.compatibilityProfile?.enabled ?? false,
+    compression: options.requestCompression ?? 'disabled',
+    onObservation: (observation) => options.onTransportMetrics?.({
+      requestBodyBytes: observation.requestBytes,
+      compressedBodyBytes: observation.compressedBytes,
+      compressionAttempted: observation.compressionAttempted,
+      compressionUsed: observation.compressionUsed,
+      networkDurationMs: observation.durationMs,
+      responseStatus: observation.responseStatus
+    })
+  });
   return new OpenAI({
     apiKey: options.apiKey,
     baseURL: normalizeBaseURL(options.baseURL),
-    defaultHeaders: options.headers,
+    defaultHeaders,
+    fetch: customFetch,
     maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
     timeout: OPENAI_DEFAULT_TIMEOUT_MS
   });
 }
 
 function buildResponsesCreateRequest(options: StreamResponseTextOptions) {
-  const tools = options.tools?.map(convertToolToResponseTool) ?? [];
-
-  return {
-    model: options.model,
-    instructions: options.instructions,
-    input: options.input,
-    stream: true,
-    store: options.store ?? false,
-    ...(options.previousResponseId ? { previous_response_id: options.previousResponseId } : {}),
-    ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-    ...(options.reasoning ? { reasoning: options.reasoning } : {}),
-    ...(tools.length > 0
-      ? {
-          tools,
-          tool_choice: mapToolChoice(options.toolMode)
-        }
-      : {}),
-    ...(options.omitMaxOutputTokens ? {} : { max_output_tokens: options.maxOutputTokens })
-  } as const;
+  return buildCodexResponsesRequest(createRequestBuilderOptions(options));
 }
 
 function buildResponsesCreateEvent(options: StreamResponseTextOptions): ResponsesClientEvent {
-  const { stream: _stream, ...request } = buildResponsesCreateRequest(options);
+  const { stream: _stream, client_metadata: _metadata, ...request } = buildResponsesCreateRequest(options);
+  return { type: 'response.create', ...request } as ResponsesClientEvent;
+}
 
+function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexRequestBuilderOptions {
   return {
-    type: 'response.create',
-    ...request
+    compatibilityEnabled: options.compatibilityProfile?.enabled ?? false,
+    identity: options.identity,
+    model: options.model,
+    instructions: options.instructions,
+    input: options.input,
+    tools: options.tools,
+    toolMode: options.toolMode,
+    reasoning: options.reasoning,
+    serviceTier: options.serviceTier,
+    previousResponseId: options.previousResponseId,
+    store: options.store,
+    omitMaxOutputTokens: options.omitMaxOutputTokens,
+    maxOutputTokens: options.maxOutputTokens,
+    textVerbosity: 'medium',
+    includeEncryptedReasoning: true
+  };
+}
+
+function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'http' | 'websocket'): Record<string, string> {
+  if (!options.compatibilityProfile?.enabled || !options.identity) {
+    return { ...options.headers };
+  }
+  const metadata = stableSerializeCodexMetadata(createCodexTurnMetadata(options.identity));
+  return buildCodexRequestHeaders({
+    credentialsHeaders: options.headers,
+    identity: options.identity,
+    turnMetadata: metadata,
+    turnState: options.turnState,
+    extensionVersion: options.extensionVersion ?? '0.0.0',
+    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+  }, transport);
+}
+
+function getHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
+  const entry = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1];
+}
+
+function createResponsesWsOptions(headers?: Record<string, string>, baseURL?: string): ResponsesWSClientOptions {
+  const workspace = (vscode as typeof vscode & {
+    workspace?: { getConfiguration?(section?: string): { get?<T>(key: string): T | undefined } };
+  }).workspace;
+  const configuredProxy = workspace?.getConfiguration?.('http').get?.<string>('proxy')?.trim();
+  const candidateProxy = configuredProxy || process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.HTTP_PROXY || process.env.http_proxy;
+  const proxy = baseURL && shouldBypassProxy(baseURL) ? undefined : candidateProxy;
+  return {
+    ...(headers ? { headers } : {}),
+    ...(proxy ? { agent: new HttpsProxyAgent(proxy) } : {})
+  } as unknown as ResponsesWSClientOptions;
+}
+
+function shouldBypassProxy(baseURL: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(baseURL);
+  } catch {
+    return false;
+  }
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy;
+  if (!noProxy) {
+    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+  }
+  return noProxy.split(',').some((entry) => {
+    const pattern = entry.trim().toLowerCase();
+    if (!pattern) {
+      return false;
+    }
+    if (pattern === '*') {
+      return true;
+    }
+    const hostname = pattern.replace(/^https?:\/\//, '').split(':')[0].replace(/^\./, '');
+    return url.hostname.toLowerCase() === hostname || url.hostname.toLowerCase().endsWith(`.${hostname}`);
+  });
+}
+
+function getManagedConnectionScope(options: StreamResponseTextOptions): CodexConnectionScope | undefined {
+  if (!options.compatibilityProfile?.enabled || !options.identity || !options.authIdentity) {
+    return undefined;
+  }
+  return {
+    baseURL: normalizeBaseURL(options.baseURL),
+    authIdentity: options.authIdentity,
+    accountId: getHeader(options.headers, 'chatgpt-account-id'),
+    compatibilityProfile: options.compatibilityProfile.endpointKey,
+    sessionId: options.identity.sessionId,
+    threadId: options.identity.threadId
   };
 }
 
 function handleResponsesServerEvent(event: ResponsesServerEvent, options: StreamResponseTextOptions): void {
+  if (event.type === 'response.output_item.done') {
+    options.onRawResponseItem?.(event.item);
+  }
+
   if (event.type === 'response.output_text.delta') {
     options.onTextDelta(event.delta);
     return;

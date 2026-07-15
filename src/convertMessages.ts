@@ -7,6 +7,7 @@ import type {
   ResponseInputMessageContentList,
   ResponseInputTextContent
 } from 'openai/resources/responses/responses';
+import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 
 export type ResponsesInputMessage = ResponseInputItem;
@@ -105,7 +106,14 @@ export function summarizeResponsesInputMessageForLog(item: ResponsesInputMessage
     return null;
   }
 
-  return stableSerialize(normalizeHistoryItemForComparison(item, createHistoryComparisonNormalizationState())).slice(0, 400);
+  const serialized = stableSerialize(normalizeHistoryItemForComparison(item, createHistoryComparisonNormalizationState()));
+  const record = item as { type?: unknown; role?: unknown };
+  return stableSerialize({
+    type: typeof record.type === 'string' ? record.type : 'unknown',
+    role: typeof record.role === 'string' ? record.role : null,
+    bytes: Buffer.byteLength(serialized),
+    hash: createHash('sha256').update(serialized).digest('hex').slice(0, 12)
+  });
 }
 
 export function getTextFromMessage(message: vscode.LanguageModelChatRequestMessage): string {

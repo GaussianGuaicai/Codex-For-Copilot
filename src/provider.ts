@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { createHash } from 'node:crypto';
 import type { ResponseUsage } from 'openai/resources/responses/responses';
 import { compareResponsesInputHistory, convertMessagesToResponsesInput, estimateTokenCount, stableSerialize, type ResponsesInputMessage } from './convertMessages';
 import { getProviderConfig, type ProviderConfig } from './config';
@@ -7,6 +8,11 @@ import { countInputTokens, disposeReusableResponsesWebSockets, isResponsesContin
 import { ResponseBranchStore, type ResponseBranchReuseEnvelope, type ResponseBranchToolSignatures } from './responseBranchStore';
 import { getApiCredentials } from './secrets';
 import type { CodexAuthManager } from './auth/codexAuthManager';
+import { CodexIdentityManager, inputStartsNewTurn } from './codexIdentity';
+import { getCodexCompatibilityProfile, type CodexRequestIdentity } from './codexProtocol';
+import { buildCodexResponsesRequest, fingerprintCodexRequest } from './codexRequestBuilder';
+import type { CodexBranchState } from './responseBranchStore';
+import { shortHash } from './codexTelemetry';
 
 type RuntimeProvideLanguageModelChatResponseOptions = vscode.ProvideLanguageModelChatResponseOptions & {
   readonly modelConfiguration?: Record<string, unknown>;
@@ -40,6 +46,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
   private readonly responseBranchStore = new ResponseBranchStore();
   private readonly runtimeAvailability = new RuntimeModelAvailability();
+  private readonly identityManager: CodexIdentityManager;
+  private lastConnectionConfigurationKey?: string;
   private cachedModels?: {
     key: string;
     expiresAt: number;
@@ -54,12 +62,18 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     private readonly selectedModelSink?: SelectedModelSink,
     private readonly authManager?: CodexAuthManager
   ) {
+    const runtimeContext = context as vscode.ExtensionContext & {
+      globalState?: vscode.Memento;
+    };
+    this.identityManager = new CodexIdentityManager(runtimeContext.globalState ?? createMemoryMemento());
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     this.context.subscriptions.push(
       this.modelInfoChangedEmitter,
       new vscode.Disposable(() => disposeReusableResponsesWebSockets()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('codexModelProvider')) {
+          disposeReusableResponsesWebSockets();
+          this.lastConnectionConfigurationKey = undefined;
           this.cachedModels = undefined;
           this.modelInfoChangedEmitter.fire();
         }
@@ -129,6 +143,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     const authIdentity = getCredentialIdentity(credentials);
+    this.handleConnectionConfiguration(config, authIdentity);
+    const compatibilityProfile = getCodexCompatibilityProfile(config.baseURL, credentials);
     const availableModels = await this.getAvailableModels(config, credentials, token);
     let selectedModel = this.resolveRequestModel(model.id, config, availableModels);
     this.selectedModelSink?.setSelectedModel(selectedModel.requestModel);
@@ -158,6 +174,36 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     let activeBranchId = initialPreviousResponseId ? reusableBranch?.branchId : undefined;
     let createdResponseId: string | undefined;
     let completedResponseId: string | undefined;
+    const rawResponseItems: unknown[] = [];
+    const requestIdentity = await this.resolveRequestIdentity(
+      reusableBranch?.state,
+      reuseMissDiagnostic?.comparison.kind === 'fork' && reuseMissDiagnostic.comparison.matchedPrefixCount > 0
+        ? reuseMissDiagnostic.state
+        : undefined,
+      reusableBranch?.comparison.appendedInput ?? input
+    );
+    let branchState: CodexBranchState = {
+      identity: {
+        installationId: requestIdentity.installationId,
+        sessionId: requestIdentity.sessionId,
+        threadId: requestIdentity.threadId,
+        windowId: requestIdentity.windowId,
+        parentThreadId: requestIdentity.parentThreadId
+      },
+      turn: {
+        id: requestIdentity.turnId,
+        stickyState: reusableBranch?.state?.turn.id === requestIdentity.turnId
+          ? reusableBranch.state.turn.stickyState
+          : undefined,
+        startedAt: reusableBranch?.state?.turn.id === requestIdentity.turnId
+          ? reusableBranch.state.turn.startedAt
+          : Date.now(),
+        completed: false
+      },
+      lastResponseItems: [],
+      updatedAt: Date.now()
+    };
+    let reportedVisibleOutput = false;
 
     this.outputChannel.info('provideLanguageModelChatResponse start', {
       modelId: model.id,
@@ -225,6 +271,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         apiKey: credentials.apiKey,
         headers: credentials.headers,
         transport: config.transport,
+        compatibilityProfile,
+        identity: requestIdentity,
+        turnState: branchState.turn.stickyState,
+        authIdentity,
+        extensionVersion: getExtensionVersion(this.context),
+        userAgent: buildCodexUserAgent(getExtensionVersion(this.context)),
+        websocketPrewarm: config.websocketPrewarm,
+        requestCompression: config.requestCompression,
         previousResponseId,
         omitMaxOutputTokens: credentials.omitMaxOutputTokens,
         model: selectedModel.requestModel,
@@ -237,10 +291,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         maxOutputTokens: config.maxOutputTokens,
         token,
         onTextDelta: (text) => {
+          reportedVisibleOutput = true;
           recordFirstVisibleOutput('text');
           progress.report(new vscode.LanguageModelTextPart(text));
         },
         onReasoningTextDelta: (text) => {
+          reportedVisibleOutput = true;
           recordFirstVisibleOutput('reasoning');
           const thinkingPart = createThinkingPart(text);
           if (thinkingPart) {
@@ -248,14 +304,39 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           }
         },
         onToolCall: (callId, name, toolInput) => {
+          reportedVisibleOutput = true;
           recordFirstVisibleOutput('tool_call');
+          const serializedToolInput = JSON.stringify(toolInput);
           this.outputChannel.debug('response tool call', {
             requestModel: selectedModel.requestModel,
             callId,
             name,
-            input: toolInput
+            inputPresent: true,
+            inputBytes: Buffer.byteLength(serializedToolInput),
+            inputHash: shortHash(serializedToolInput)
           });
           progress.report(new vscode.LanguageModelToolCallPart(callId, name, toolInput));
+        },
+        onRawResponseItem: (item) => {
+          rawResponseItems.push(item);
+        },
+        onTurnState: (turnState) => {
+          branchState = {
+            ...branchState,
+            turn: { ...branchState.turn, stickyState: turnState },
+            updatedAt: Date.now()
+          };
+        },
+        onWebSocketHandshake: (handshake) => {
+          this.outputChannel.debug('response websocket handshake', {
+            turnStateReceived: Boolean(handshake.turnState),
+            modelsEtagPresent: Boolean(handshake.modelsEtag),
+            reasoningIncluded: handshake.reasoningIncluded,
+            serverModel: handshake.serverModel ?? null
+          });
+        },
+        onTransportMetrics: (metrics) => {
+          this.outputChannel.debug('response transport metrics', metrics);
         },
         onResponseCreated: (response) => {
           createdResponseId = response.id ?? createdResponseId;
@@ -268,6 +349,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onResponseCompleted: (response) => {
+          branchState = {
+            ...branchState,
+            turn: { ...branchState.turn, completed: true },
+            updatedAt: Date.now()
+          };
           completedResponseId = response.id ?? completedResponseId;
           this.outputChannel.info('response completed', {
             requestModel: selectedModel.requestModel,
@@ -339,6 +425,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         throw createTemporarilyUnavailableModelError(unavailableModel, error);
       }
 
+      if (reportedVisibleOutput) {
+        throw error;
+      }
+
       this.outputChannel.warn('response continuation reset', {
         requestModel: selectedModel.requestModel,
         branchId: reusableBranch?.branchId ?? null,
@@ -364,14 +454,72 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
       createdResponseId = undefined;
       completedResponseId = undefined;
+      rawResponseItems.length = 0;
       activeBranchId = undefined;
       await streamRequest(input);
     }
 
     const finalResponseId = completedResponseId ?? createdResponseId;
     if (finalResponseId) {
-      activeBranchId = this.responseBranchStore.recordSuccess(reuseEnvelope, input, finalResponseId, activeBranchId);
+      const fullRequest = buildCodexResponsesRequest({
+        compatibilityEnabled: compatibilityProfile.enabled,
+        identity: requestIdentity,
+        model: selectedModel.requestModel,
+        instructions: config.instructions,
+        input,
+        tools: options.tools,
+        toolMode: options.toolMode,
+        reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
+        serviceTier: getRequestServiceTier(config.defaultServiceTier),
+        store: false,
+        omitMaxOutputTokens: credentials.omitMaxOutputTokens,
+        maxOutputTokens: config.maxOutputTokens,
+        textVerbosity: 'medium',
+        includeEncryptedReasoning: true
+      });
+      branchState = {
+        ...branchState,
+        lastRequest: fullRequest,
+        lastResponseId: finalResponseId,
+        lastResponseItems: [...rawResponseItems],
+        requestFingerprint: fingerprintCodexRequest(fullRequest),
+        updatedAt: Date.now()
+      };
+      activeBranchId = this.responseBranchStore.recordSuccess(reuseEnvelope, input, finalResponseId, activeBranchId, branchState);
     }
+  }
+
+  private async resolveRequestIdentity(
+    reusableState: CodexBranchState | undefined,
+    forkState: CodexBranchState | undefined,
+    appendedInput: readonly ResponsesInputMessage[]
+  ): Promise<CodexRequestIdentity> {
+    if (reusableState) {
+      const current: CodexRequestIdentity = {
+        ...reusableState.identity,
+        turnId: reusableState.turn.id
+      };
+      const inCurrentWindow = this.identityManager.bindToCurrentWindow(current);
+      return inputStartsNewTurn(appendedInput)
+        ? this.identityManager.createNextTurn(inCurrentWindow)
+        : inCurrentWindow;
+    }
+    const parentThreadId = forkState?.identity.threadId;
+    return this.identityManager.createThread(parentThreadId);
+  }
+
+  private handleConnectionConfiguration(config: ProviderConfig, authIdentity: string): void {
+    const key = stableSerialize({
+      baseURL: normalizeBaseURL(config.baseURL),
+      authIdentity,
+      transport: config.transport,
+      websocketPrewarm: config.websocketPrewarm,
+      requestCompression: config.requestCompression
+    });
+    if (this.lastConnectionConfigurationKey && this.lastConnectionConfigurationKey !== key) {
+      disposeReusableResponsesWebSockets();
+    }
+    this.lastConnectionConfigurationKey = key;
   }
 
   async provideTokenCount(
@@ -715,6 +863,28 @@ function getRequestServiceTier(serviceTier: ProviderConfig['defaultServiceTier']
   }
 }
 
+function buildCodexUserAgent(extensionVersion: string): string {
+  return `codex-for-copilot/${extensionVersion} (${process.platform}; ${process.arch}; vscode/${vscode.version})`;
+}
+
+function getExtensionVersion(context: vscode.ExtensionContext): string {
+  const extension = (context as vscode.ExtensionContext & {
+    extension?: { packageJSON?: { version?: unknown } };
+  }).extension;
+  return typeof extension?.packageJSON?.version === 'string' ? extension.packageJSON.version : '0.0.0';
+}
+
+function createMemoryMemento(): vscode.Memento {
+  const values = new Map<string, unknown>();
+  return {
+    keys: () => [...values.keys()],
+    get: <T>(key: string, defaultValue?: T) => values.has(key) ? values.get(key) as T : defaultValue as T,
+    update: async (key: string, value: unknown) => {
+      values.set(key, value);
+    }
+  };
+}
+
 function getReasoningEffort(
   selectedReasoningEffort: ReasoningEffort | undefined,
   options: RuntimeProvideLanguageModelChatResponseOptions,
@@ -830,9 +1000,10 @@ export function buildResponseBranchToolSignatures(
 
 function getCredentialIdentity(credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>): string {
   const accountId = credentials.headers['ChatGPT-Account-ID'];
+  const credentialHash = createHash('sha256').update(credentials.apiKey).digest('hex').slice(0, 16);
   if (typeof accountId === 'string' && accountId.length > 0) {
-    return `${credentials.source}:${accountId}`;
+    return `${credentials.source}:${accountId}:${credentialHash}`;
   }
 
-  return `${credentials.source}:${credentials.apiKey.slice(0, 16)}`;
+  return `${credentials.source}:${credentialHash}`;
 }

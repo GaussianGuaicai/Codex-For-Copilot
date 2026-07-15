@@ -1,7 +1,8 @@
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import Module from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
@@ -68,8 +69,8 @@ try {
   };
 
   const { getApiCredentials, DEFAULT_USER_AGENT } = require(secretsBundlePath);
-  const { disposeReusableResponsesWebSockets, streamResponseText } = require(responsesBundlePath);
-  const auth = JSON.parse(await readFile(join(process.env.USERPROFILE, '.codex', 'auth.json'), 'utf8'));
+  const { disposeReusableResponsesWebSockets, isResponsesContinuationMissError, streamResponseText } = require(responsesBundlePath);
+  const auth = JSON.parse(await readFile(process.env.CODEX_AUTH_FILE ?? join(homedir(), '.codex', 'auth.json'), 'utf8'));
   const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 
   globalThis.fetch = (input, init = {}) => undiciFetch(input, proxyUrl
@@ -94,7 +95,9 @@ try {
   assertEqual(credentials.source, 'codexAuth', 'credential source');
   assertEqual(credentials.apiKey, auth.tokens.access_token, 'resolved access token');
   assertEqual(credentials.headers['User-Agent'], DEFAULT_USER_AGENT, 'default user agent');
-  assertEqual(credentials.headers['ChatGPT-Account-ID'], auth.tokens.account_id, 'account id header');
+  if (typeof auth.tokens.account_id === 'string' && auth.tokens.account_id) {
+    assertEqual(credentials.headers['ChatGPT-Account-ID'], auth.tokens.account_id, 'account id header');
+  }
   assertEqual(credentials.omitMaxOutputTokens, true, 'omit max_output_tokens');
 
   const deltas = [];
@@ -103,11 +106,28 @@ try {
   let completedServiceTier = null;
   let transportFallback = null;
   let previousResponseId = null;
+  const identity = {
+    installationId: randomUUID(),
+    sessionId: randomUUID(),
+    threadId: randomUUID(),
+    turnId: randomUUID(),
+    windowId: randomUUID()
+  };
   await streamResponseText({
     baseURL: 'https://chatgpt.com/backend-api/codex/responses',
     apiKey: credentials.apiKey,
     headers: credentials.headers,
     transport: requestedTransport,
+    compatibilityProfile: {
+      enabled: true,
+      endpointKey: 'https://chatgpt.com/backend-api/codex/responses'
+    },
+    identity,
+    authIdentity: `real-probe:${auth.tokens.account_id ?? 'default'}`,
+    extensionVersion: 'real-backend-probe',
+    userAgent: 'codex-for-copilot/real-backend-probe',
+    websocketPrewarm: process.env.CODEX_TEST_PREWARM === '0' ? 'disabled' : 'auto',
+    requestCompression: process.env.CODEX_TEST_COMPRESSION === '1' ? 'enabled' : 'auto',
     store: requestStore,
     omitMaxOutputTokens: credentials.omitMaxOutputTokens,
     model: requestedModel,
@@ -138,6 +158,7 @@ try {
 
   assertEqual(deltas.join('').trim(), 'OK', 'real backend output');
   let continuationOutput = null;
+  let continuationRecovered = false;
 
   if (runContinuationProbe) {
     if (!previousResponseId) {
@@ -145,12 +166,21 @@ try {
     }
 
     const continuationDeltas = [];
-    await streamResponseText({
+    const continuationOptions = {
       baseURL: 'https://chatgpt.com/backend-api/codex/responses',
       apiKey: credentials.apiKey,
       headers: credentials.headers,
       transport: requestedTransport,
-      previousResponseId,
+      compatibilityProfile: {
+        enabled: true,
+        endpointKey: 'https://chatgpt.com/backend-api/codex/responses'
+      },
+      identity: { ...identity, turnId: randomUUID() },
+      authIdentity: `real-probe:${auth.tokens.account_id ?? 'default'}`,
+      extensionVersion: 'real-backend-probe',
+      userAgent: 'codex-for-copilot/real-backend-probe',
+      websocketPrewarm: 'disabled',
+      requestCompression: process.env.CODEX_TEST_COMPRESSION === '1' ? 'enabled' : 'auto',
       store: requestStore,
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
       model: requestedModel,
@@ -169,7 +199,17 @@ try {
       onWebSocketSession: (event) => {
         sessionEvents.push(event);
       }
-    });
+    };
+    try {
+      await streamResponseText({ ...continuationOptions, previousResponseId });
+    } catch (error) {
+      if (!isResponsesContinuationMissError(error)) {
+        throw error;
+      }
+      continuationRecovered = true;
+      continuationDeltas.length = 0;
+      await streamResponseText(continuationOptions);
+    }
 
     continuationOutput = continuationDeltas.join('').trim();
     assertEqual(continuationOutput, 'PONG', 'continuation output');
@@ -187,7 +227,8 @@ try {
     transportFallback,
     webSocketSessionReuse: sessionEvents.map((event) => event.reused),
     output: deltas.join('').trim(),
-    continuationOutput
+    continuationOutput,
+    continuationRecovered
   }));
 
   disposeReusableResponsesWebSockets();

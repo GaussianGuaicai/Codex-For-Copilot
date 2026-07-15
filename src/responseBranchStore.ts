@@ -5,11 +5,33 @@ import {
   type ResponsesInputHistoryComparison,
   type ResponsesInputMessage
 } from './convertMessages';
+import type { CodexRequestIdentity } from './codexProtocol';
+import type { CodexResponsesRequest } from './codexRequestBuilder';
+
+export interface CodexTurnState {
+  id: string;
+  stickyState?: string;
+  startedAt: number;
+  completed: boolean;
+}
+
+export interface CodexBranchIdentity extends Omit<CodexRequestIdentity, 'turnId'> {}
+
+export interface CodexBranchState {
+  identity: CodexBranchIdentity;
+  turn: CodexTurnState;
+  lastRequest?: CodexResponsesRequest;
+  lastResponseId?: string;
+  lastResponseItems: unknown[];
+  requestFingerprint?: string;
+  updatedAt: number;
+}
 
 export interface ReusableResponseBranchMatch {
   branchId: string;
   responseId: string;
   comparison: ResponsesInputHistoryComparison;
+  state?: CodexBranchState;
 }
 
 export interface ResponseBranchReuseEnvelope {
@@ -26,6 +48,7 @@ export interface ResponseBranchReuseMissDiagnostic {
   previousNextItemSummary: string | null;
   currentNextItemSummary: string | null;
   toolCompatibility?: ResponseBranchToolCompatibility;
+  state?: CodexBranchState;
 }
 
 export type ResponseBranchToolSignatures = Readonly<Record<string, string>>;
@@ -48,6 +71,7 @@ interface ResponseBranchEntry {
   input: ResponsesInputMessage[];
   continuationInput: ResponsesInputMessage[];
   responseId: string;
+  state?: CodexBranchState;
   updatedAt: number;
 }
 
@@ -93,7 +117,8 @@ export class ResponseBranchStore {
         bestMatch = {
           branchId: branch.id,
           responseId: branch.responseId,
-          comparison
+          comparison,
+          state: branch.state ? cloneBranchState(branch.state) : undefined
         };
       }
     }
@@ -131,7 +156,8 @@ export class ResponseBranchStore {
           currentInputCount: currentContinuationInput.length,
           previousNextItemSummary: summarizeResponsesInputMessageForLog(branch.continuationInput[comparison.matchedPrefixCount]),
           currentNextItemSummary: summarizeResponsesInputMessageForLog(currentContinuationInput[comparison.matchedPrefixCount]),
-          toolCompatibility
+          toolCompatibility,
+          state: branch.state ? cloneBranchState(branch.state) : undefined
         };
       }
     }
@@ -143,7 +169,8 @@ export class ResponseBranchStore {
     envelope: ResponseBranchReuseEnvelope,
     currentInput: readonly ResponsesInputMessage[],
     responseId: string,
-    branchId?: string
+    branchId?: string,
+    state?: CodexBranchState
   ): string {
     this.evictExpiredEntries();
     if (this.disabledReuseKeys.get(envelope.identityKey)?.enableAfterFullInputSuccess) {
@@ -158,6 +185,7 @@ export class ResponseBranchStore {
         existing.input = [...currentInput];
         existing.continuationInput = continuationInput;
         existing.responseId = responseId;
+        existing.state = state ? cloneBranchState(state) : existing.state;
         existing.updatedAt = Date.now();
         return existing.id;
       }
@@ -174,6 +202,7 @@ export class ResponseBranchStore {
         branch.continuationInput = continuationInput;
         branch.responseId = responseId;
         branch.envelope = envelope;
+        branch.state = state ? cloneBranchState(state) : branch.state;
         branch.updatedAt = Date.now();
         return branch.id;
       }
@@ -186,6 +215,7 @@ export class ResponseBranchStore {
       input: [...currentInput],
       continuationInput,
       responseId,
+      state: state ? cloneBranchState(state) : undefined,
       updatedAt: Date.now()
     });
     this.evictOverflow();
@@ -202,6 +232,15 @@ export class ResponseBranchStore {
         this.branches.delete(branchId);
       }
     }
+  }
+
+  updateState(branchId: string, update: (state: CodexBranchState) => CodexBranchState): void {
+    const branch = this.branches.get(branchId);
+    if (!branch?.state) {
+      return;
+    }
+    branch.state = cloneBranchState(update(cloneBranchState(branch.state)));
+    branch.updatedAt = Date.now();
   }
 
   disableReuse(envelope: ResponseBranchReuseEnvelope, enableAfterFullInputSuccess = true): void {
@@ -243,6 +282,16 @@ export class ResponseBranchStore {
       }
     }
   }
+}
+
+function cloneBranchState(state: CodexBranchState): CodexBranchState {
+  return {
+    ...state,
+    identity: { ...state.identity },
+    turn: { ...state.turn },
+    lastResponseItems: [...state.lastResponseItems],
+    lastRequest: state.lastRequest ? structuredClone(state.lastRequest) : undefined
+  };
 }
 
 function compareToolSignatures(

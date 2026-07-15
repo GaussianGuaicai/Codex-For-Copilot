@@ -27,11 +27,14 @@
     "compile": "npm run check && node esbuild.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
-    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
+    "test:benchmark-backend": "node test/benchmarkBackend.mjs",
+    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs",
+    "test:smoke": "npm run test:codex-parity && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {
+    "https-proxy-agent": "^7.0.6",
     "openai": "^6.44.0",
     "ws": "^8.21.0"
   },
@@ -137,6 +140,26 @@
             "Always use the Responses WebSocket path and surface any transport error directly."
           ],
           "description": "Transport policy used for Responses streaming requests."
+        },
+        "codexModelProvider.websocketPrewarm": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "description": "Controls best-effort generate:false WebSocket prewarming for ChatGPT Codex sessions."
+        },
+        "codexModelProvider.requestCompression": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "description": "Controls Zstandard compression for large ChatGPT Codex Responses requests."
         },
         "codexModelProvider.model": {
           "type": "string",
