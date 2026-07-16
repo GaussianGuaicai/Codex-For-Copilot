@@ -40,6 +40,7 @@ try {
   await runHttpTransportSmokeTest(streamResponseText);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
+  await runManagedAutoFallbackVisibilitySmokeTest(streamResponseText);
   await runAutoModelNotFoundDoesNotFallbackSmokeTest(streamResponseText);
   await runWebSocketTransportSmokeTest(streamResponseText);
   await runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldBypassProxy);
@@ -239,6 +240,143 @@ async function runAutoFallbackSmokeTest(streamResponseText) {
     assertEqual(fallbackEvent?.from, 'websocket', 'fallback from transport');
     assertEqual(fallbackEvent?.to, 'http', 'fallback to transport');
   } finally {
+    server.close();
+  }
+}
+
+async function runManagedAutoFallbackVisibilitySmokeTest(streamResponseText) {
+  let httpRequestCount = 0;
+  const fallbackEvents = [];
+  const server = createServer(async (request, response) => {
+    httpRequestCount += 1;
+    for await (const _chunk of request) {
+      // Consume the request before sending the fallback response.
+    }
+    writeSseResponse(response, ['http fallback']);
+  });
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket, request) => {
+    const sessionId = request.headers['session-id'];
+    webSocket.once('message', () => {
+      if (sessionId === 'managed-pre-visible') {
+        webSocket.close(1011, 'WebSocket connection closed before output');
+        return;
+      }
+
+      const responseId = sessionId === 'managed-text-visible' ? 'resp_visible_text' : 'resp_visible_tool';
+      webSocket.send(JSON.stringify({
+        type: 'response.created',
+        response: { id: responseId, status: 'in_progress' }
+      }));
+
+      if (sessionId === 'managed-text-visible') {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'visible text' }));
+        webSocket.close(1011, 'WebSocket closed after visible text');
+        return;
+      }
+
+      webSocket.send(JSON.stringify({
+        type: 'response.output_item.added',
+        output_index: 0,
+        sequence_number: 1,
+        item: {
+          id: 'fc_visible',
+          type: 'function_call',
+          call_id: 'call_visible',
+          name: 'read_pull_request',
+          arguments: ''
+        }
+      }));
+      webSocket.send(JSON.stringify({
+        type: 'response.function_call_arguments.done',
+        item_id: 'fc_visible',
+        output_index: 0,
+        sequence_number: 2,
+        name: '',
+        arguments: '{"number":10}'
+      }));
+      webSocket.close(1011, 'WebSocket closed after visible tool call');
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+    const requestOptions = (sessionId, callbacks) => ({
+      baseURL,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'auto',
+      compatibilityProfile: { enabled: true, endpointKey: baseURL },
+      authIdentity: 'codexAuth:acct-test',
+      identity: {
+        installationId: '11111111-1111-4111-8111-111111111111',
+        sessionId,
+        threadId: `${sessionId}-thread`,
+        turnId: `${sessionId}-turn`,
+        windowId: '55555555-5555-4555-8555-555555555555'
+      },
+      extensionVersion: '1.2.3',
+      websocketPrewarm: 'disabled',
+      requestCompression: 'disabled',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Ping' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTransportFallback: (event) => fallbackEvents.push(event),
+      ...callbacks
+    });
+
+    const preVisibleDeltas = [];
+    await streamResponseText(requestOptions('managed-pre-visible', {
+      onTextDelta: (text) => preVisibleDeltas.push(text)
+    }));
+
+    const textDeltas = [];
+    let textError;
+    try {
+      await streamResponseText(requestOptions('managed-text-visible', {
+        onTextDelta: (text) => textDeltas.push(text)
+      }));
+    } catch (error) {
+      textError = error;
+    }
+
+    const toolCalls = [];
+    let toolError;
+    try {
+      await streamResponseText(requestOptions('managed-tool-visible', {
+        onTextDelta() {},
+        onToolCall: (callId, name, input) => toolCalls.push({ callId, name, input })
+      }));
+    } catch (error) {
+      toolError = error;
+    }
+
+    assertEqual(preVisibleDeltas.join(''), 'http fallback', 'managed pre-visible failure falls back to HTTP');
+    assertEqual(textDeltas.join(''), 'visible text', 'managed visible text is emitted once');
+    assertEqual(JSON.stringify(toolCalls), JSON.stringify([{
+      callId: 'call_visible',
+      name: 'read_pull_request',
+      input: { number: 10 }
+    }]), 'managed visible tool call is emitted once');
+    assertEqual(textError instanceof Error, true, 'managed failure after visible text surfaces');
+    assertEqual(toolError instanceof Error, true, 'managed failure after visible tool call surfaces');
+    assertEqual(httpRequestCount, 1, 'only pre-visible managed failure uses HTTP fallback');
+    assertEqual(fallbackEvents.length, 1, 'only pre-visible managed failure reports fallback');
+  } finally {
+    webSocketServer.close();
     server.close();
   }
 }
