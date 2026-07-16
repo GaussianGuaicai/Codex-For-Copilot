@@ -11,7 +11,7 @@ const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5.5': 272000,
   'gpt-5.4': 272000,
   'gpt-5.4-mini': 272000,
-  'gpt-5.3-codex-spark-preview': 128000,
+  'gpt-5.3-codex-spark': 128000,
   'codex-auto-review': 272000
 };
 
@@ -19,7 +19,7 @@ const MODEL_DESCRIPTION_FALLBACKS: Record<string, string> = {
   'gpt-5.5': 'Frontier model for complex coding, research, and real-world work.',
   'gpt-5.4': 'Strong model for everyday coding.',
   'gpt-5.4-mini': 'Small, fast, and cost-efficient model for simpler coding tasks.',
-  'gpt-5.3-codex-spark-preview': 'Ultra-fast coding model (preview).',
+  'gpt-5.3-codex-spark': 'Ultra-fast text-only coding model.',
   'codex-auto-review': 'Automatic approval review model for Codex.'
 };
 
@@ -27,7 +27,7 @@ const MODEL_DEFAULT_REASONING_FALLBACKS: Partial<Record<string, ReasoningEffort>
   'gpt-5.5': 'xhigh',
   'gpt-5.4': 'medium',
   'gpt-5.4-mini': 'medium',
-  'gpt-5.3-codex-spark-preview': 'high',
+  'gpt-5.3-codex-spark': 'high',
   'codex-auto-review': 'medium'
 };
 
@@ -66,6 +66,7 @@ interface UpstreamModel {
   display_name?: unknown;
   description?: unknown;
   context_window?: unknown;
+  max_context_window?: unknown;
   input_modalities?: unknown;
   comp_hash?: unknown;
   supported_in_api?: unknown;
@@ -138,7 +139,9 @@ export async function fetchAvailableModels(
       ? payload.data
       : [];
 
-  return discovered.filter(isUpstreamModel).filter(isModelVisible);
+  return discovered
+    .filter(isUpstreamModel)
+    .filter((model) => isModelVisible(model, credentials.kind));
 }
 
 export function buildProviderModels(config: ProviderConfig, upstreamModels: UpstreamModel[]): ResolvedProviderModel[] {
@@ -188,7 +191,8 @@ function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): Res
   const reasoningOptions = getReasoningOptions(model, slug);
   const reasoningEfforts = reasoningOptions.map((option) => option.effort);
   const defaultReasoningEffort = getDefaultReasoningEffort(model, slug);
-  const maxInputTokens = getModelContextWindow(slug, model.context_window, getFallbackContextWindow(slug));
+  const activeContextWindow = getModelContextWindow(slug, model.context_window);
+  const maximumContextWindow = getPositiveInteger(model.max_context_window);
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
   const tooltip = getModelDescription(model, slug);
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
@@ -198,10 +202,16 @@ function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): Res
     name: displayName,
     family: slug,
     version: versionBase,
-    maxInputTokens,
+    maxInputTokens: activeContextWindow,
     maxOutputTokens: config.maxOutputTokens,
     tooltip,
-    detail: buildModelDetail(maxInputTokens, reasoningOptions, defaultReasoningEffort),
+    detail: buildModelDetail(
+      activeContextWindow,
+      reasoningOptions,
+      defaultReasoningEffort,
+      undefined,
+      maximumContextWindow
+    ),
     capabilities: {
       imageInput,
       toolCalling: true
@@ -288,13 +298,8 @@ function formatDisplayName(model: string): string {
     .replace(/codex/gi, 'Codex');
 }
 
-function getModelContextWindow(model: string, discoveredContextWindow: unknown, fallbackContextWindow: number): number {
-  const fixedContextWindow = FIXED_MODEL_CONTEXT_WINDOWS[model];
-  if (fixedContextWindow) {
-    return fixedContextWindow;
-  }
-
-  return getPositiveInteger(discoveredContextWindow) ?? fallbackContextWindow;
+function getModelContextWindow(model: string, discoveredContextWindow: unknown): number {
+  return getPositiveInteger(discoveredContextWindow) ?? getFallbackContextWindow(model);
 }
 
 function getFallbackContextWindow(model: string): number {
@@ -315,9 +320,17 @@ function buildModelDetail(
   maxInputTokens: number,
   reasoningOptions?: readonly ReasoningOption[],
   defaultReasoningEffort?: ReasoningEffort,
-  sourceHint?: string
+  sourceHint?: string,
+  maximumContextWindow?: number
 ): string {
-  const parts = [`Context: ${formatTokenCount(maxInputTokens)}`];
+  const hasLargerMaximum = maximumContextWindow !== undefined && maximumContextWindow > maxInputTokens;
+  const parts = [hasLargerMaximum
+    ? `Context: ${formatTokenCount(maxInputTokens)} (active)`
+    : `Context: ${formatTokenCount(maxInputTokens)}`];
+
+  if (hasLargerMaximum) {
+    parts.push(`Maximum context: ${formatTokenCount(maximumContextWindow)} (opt-in)`);
+  }
 
   if (reasoningOptions && reasoningOptions.length > 0) {
     const labels = reasoningOptions.map((option) => formatReasoningEffort(option.effort));
@@ -375,8 +388,8 @@ function isUpstreamModel(value: unknown): value is UpstreamModel {
   return typeof value === 'object' && value !== null;
 }
 
-function isModelVisible(model: UpstreamModel): boolean {
-  if (model.supported_in_api === false) {
+function isModelVisible(model: UpstreamModel, credentialKind: ApiCredentials['kind']): boolean {
+  if (credentialKind === 'openaiApiKey' && model.supported_in_api === false) {
     return false;
   }
 
@@ -410,7 +423,12 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
 }
 
 function getPositiveInteger(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const normalized = Math.floor(value);
+  return Number.isSafeInteger(normalized) && normalized > 0 ? normalized : undefined;
 }
 
 function toAbortSignal(token: vscode.CancellationToken): AbortSignal | undefined {
