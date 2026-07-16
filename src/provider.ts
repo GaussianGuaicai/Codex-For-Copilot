@@ -433,7 +433,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<ResolvedProviderModel[]> {
     const authIdentity = getCredentialIdentity(credentials);
-    const cacheKey = buildModelCacheKey(config, credentials.source, authIdentity);
+    const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
 
     if (this.cachedModels && this.cachedModels.key === cacheKey && this.cachedModels.expiresAt > Date.now()) {
       this.outputChannel.debug('getAvailableModels cache hit', {
@@ -447,7 +447,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     try {
       const upstreamModels = await fetchAvailableModels(config, credentials, token);
-      models = buildProviderModels(config, upstreamModels);
+      models = buildProviderModels(config, upstreamModels, credentials.kind);
       models = this.applyModelDiscoveryPolicy(models, config, authIdentity);
       this.outputChannel.info('getAvailableModels discovery success', {
         discoveredCount: upstreamModels.length,
@@ -455,7 +455,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         requestModels: models.map((model) => model.requestModel)
       });
     } catch {
-      models = [buildFallbackModel(config)];
+      models = [buildFallbackModel(config, credentials.kind)];
       models = this.applyModelDiscoveryPolicy(models, config, authIdentity);
       this.outputChannel.warn('getAvailableModels discovery failed, using fallback model', {
         fallbackModel: config.model
@@ -686,6 +686,7 @@ function collectErrorMessages(error: unknown): string[] {
 function buildModelCacheKey(
   config: ProviderConfig,
   credentialSource: string,
+  credentialKind: string,
   authIdentity: string
 ): string {
   return [
@@ -700,6 +701,7 @@ function buildModelCacheKey(
     config.defaultReasoningEffort ?? 'auto',
     config.maxOutputTokens,
     credentialSource,
+    credentialKind,
     authIdentity
   ].join('|');
 }

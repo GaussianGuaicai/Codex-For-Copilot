@@ -14,6 +14,11 @@ const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5.3-codex-spark': 128000,
   'codex-auto-review': 272000
 };
+const KNOWN_CODEX_RAW_CONTEXT_CEILINGS: Readonly<Record<string, number>> = {
+  'gpt-5.6-sol': 372000,
+  'gpt-5.6-terra': 372000,
+  'gpt-5.6-luna': 372000
+};
 
 const MODEL_DESCRIPTION_FALLBACKS: Record<string, string> = {
   'gpt-5.5': 'Frontier model for complex coding, research, and real-world work.',
@@ -144,13 +149,18 @@ export async function fetchAvailableModels(
     .filter((model) => isModelVisible(model, credentials.kind));
 }
 
-export function buildProviderModels(config: ProviderConfig, upstreamModels: UpstreamModel[]): ResolvedProviderModel[] {
-  const models = upstreamModels.map((model) => buildDiscoveredModel(model, config));
-  return models.length > 0 ? models : [buildFallbackModel(config)];
+export function buildProviderModels(
+  config: ProviderConfig,
+  upstreamModels: UpstreamModel[],
+  credentialKind: ApiCredentials['kind']
+): ResolvedProviderModel[] {
+  const models = upstreamModels.map((model) => buildDiscoveredModel(model, config, credentialKind));
+  return models.length > 0 ? models : [buildFallbackModel(config, credentialKind)];
 }
 
-export function buildFallbackModel(config: ProviderConfig): ResolvedProviderModel {
+export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCredentials['kind']): ResolvedProviderModel {
   const fallbackMaxInputTokens = getFallbackContextWindow(config.model);
+  const knownRawContextCeiling = getKnownCodexRawContextCeiling(config.model, config.baseURL, credentialKind);
   const reasoningEffort = getDefaultReasoningEffort(undefined, config.model);
   const reasoningOptions = getReasoningOptions(undefined, config.model);
   return {
@@ -164,7 +174,14 @@ export function buildFallbackModel(config: ProviderConfig): ResolvedProviderMode
       maxInputTokens: fallbackMaxInputTokens,
       maxOutputTokens: config.maxOutputTokens,
       tooltip: getModelDescription(undefined, config.model),
-      detail: buildModelDetail(fallbackMaxInputTokens, reasoningOptions, reasoningEffort, config.baseURL),
+      detail: buildModelDetail(
+        fallbackMaxInputTokens,
+        reasoningOptions,
+        reasoningEffort,
+        config.baseURL,
+        undefined,
+        knownRawContextCeiling
+      ),
       capabilities: {
         imageInput: false,
         toolCalling: true
@@ -185,7 +202,11 @@ export function parseModelIdentifier(modelId: string): ParsedModelIdentifier {
   return { requestModel, reasoningEffort };
 }
 
-function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): ResolvedProviderModel {
+function buildDiscoveredModel(
+  model: UpstreamModel,
+  config: ProviderConfig,
+  credentialKind: ApiCredentials['kind']
+): ResolvedProviderModel {
   const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : config.model;
   const displayName = getDiscoveredDisplayName(model, config.model);
   const reasoningOptions = getReasoningOptions(model, slug);
@@ -193,6 +214,7 @@ function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): Res
   const defaultReasoningEffort = getDefaultReasoningEffort(model, slug);
   const activeContextWindow = getModelContextWindow(slug, model.context_window);
   const maximumContextWindow = getPositiveInteger(model.max_context_window);
+  const knownRawContextCeiling = getKnownCodexRawContextCeiling(slug, config.baseURL, credentialKind);
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
   const tooltip = getModelDescription(model, slug);
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
@@ -210,7 +232,8 @@ function buildDiscoveredModel(model: UpstreamModel, config: ProviderConfig): Res
       reasoningOptions,
       defaultReasoningEffort,
       undefined,
-      maximumContextWindow
+      maximumContextWindow,
+      knownRawContextCeiling
     ),
     capabilities: {
       imageInput,
@@ -306,6 +329,33 @@ function getFallbackContextWindow(model: string): number {
   return FIXED_MODEL_CONTEXT_WINDOWS[model] ?? DEFAULT_FALLBACK_CONTEXT_WINDOW;
 }
 
+function getKnownCodexRawContextCeiling(
+  model: string,
+  baseURL: string,
+  credentialKind: ApiCredentials['kind']
+): number | undefined {
+  if (credentialKind !== 'codexAccessToken' || !isChatGptCodexBackend(baseURL)) {
+    return undefined;
+  }
+
+  return KNOWN_CODEX_RAW_CONTEXT_CEILINGS[model];
+}
+
+function isChatGptCodexBackend(baseURL: string): boolean {
+  try {
+    const url = new URL(normalizeBaseURL(baseURL));
+    const path = url.pathname.replace(/\/+$/, '');
+    return url.origin === 'https://chatgpt.com'
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash
+      && path === '/backend-api/codex';
+  } catch {
+    return false;
+  }
+}
+
 function toProviderModelId(requestModel: string): string {
   return `${PROVIDER_MODEL_ID_PREFIX}${requestModel}`;
 }
@@ -321,15 +371,23 @@ function buildModelDetail(
   reasoningOptions?: readonly ReasoningOption[],
   defaultReasoningEffort?: ReasoningEffort,
   sourceHint?: string,
-  maximumContextWindow?: number
+  maximumContextWindow?: number,
+  knownRawContextCeiling?: number
 ): string {
   const hasLargerMaximum = maximumContextWindow !== undefined && maximumContextWindow > maxInputTokens;
+  const hasLargerKnownCeiling = knownRawContextCeiling !== undefined
+    && knownRawContextCeiling > maxInputTokens
+    && (maximumContextWindow === undefined || knownRawContextCeiling > maximumContextWindow);
   const parts = [hasLargerMaximum
     ? `Context: ${formatTokenCount(maxInputTokens)} (active)`
     : `Context: ${formatTokenCount(maxInputTokens)}`];
 
   if (hasLargerMaximum) {
     parts.push(`Maximum context: ${formatTokenCount(maximumContextWindow)} (opt-in)`);
+  }
+
+  if (hasLargerKnownCeiling) {
+    parts.push(`Known raw context ceiling: ${formatTokenCount(knownRawContextCeiling)}`);
   }
 
   if (reasoningOptions && reasoningOptions.length > 0) {
