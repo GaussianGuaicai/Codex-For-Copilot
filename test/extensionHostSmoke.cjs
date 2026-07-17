@@ -94,8 +94,12 @@ async function run() {
     assert.strictEqual(models[0].name, 'GPT-5.4 (Codex)');
     assert.strictEqual(models[0].id, 'codex-for-copilot::gpt-5.4');
     assert.strictEqual(models[0].family, 'gpt-5.4');
-    assert.strictEqual(models[0].maxInputTokens, 272000);
-    assert.strictEqual(models.length, 1);
+    assert.strictEqual(models[0].maxInputTokens, 258400);
+    assert.strictEqual(models[1].name, 'GPT-5.4 (Long context) (Codex)');
+    assert.strictEqual(models[1].id, 'codex-for-copilot::gpt-5.4::context=1000000');
+    assert.strictEqual(models[1].family, 'gpt-5.4');
+    assert.strictEqual(models[1].maxInputTokens, 950000);
+    assert.strictEqual(models.length, 2);
     assert.strictEqual(await models[0].countTokens('Ping'), 11);
 
     const response = await models[0].sendRequest([vscode.LanguageModelChatMessage.User('Ping')]);
