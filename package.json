@@ -21,6 +21,9 @@
     "onLanguageModelChatProvider:codex-for-copilot",
     "onStartupFinished"
   ],
+  "extensionKind": [
+    "ui"
+  ],
   "main": "./out/extension.js",
   "scripts": {
     "check": "tsc -p ./ --noEmit",

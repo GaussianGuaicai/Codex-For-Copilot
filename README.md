@@ -45,6 +45,8 @@ npm run compile
 
 Press F5 in VS Code to launch an Extension Development Host.
 
+The extension also works when the current workspace is opened over Remote-SSH. It is intentionally run in the local UI extension host, so it uses the credentials already stored on your local computer. Do not install a second remote copy of the extension on the SSH host; after updating, run `Developer: Show Running Extensions` and confirm that `Codex For Copilot` is running locally.
+
 ## Configuration
 
 Common settings:
