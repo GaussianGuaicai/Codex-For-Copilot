@@ -21,6 +21,12 @@ This repository uses Release Please for semantic versioning and Microsoft Entra 
 
 The release pull request remains the human approval point. A failed Marketplace publication leaves the GitHub Release as a draft.
 
+## Repository settings prerequisite
+
+In **Settings → Actions → General**, confirm that workflow permissions allow write access and enable **Allow GitHub Actions to create and approve pull requests**. Release Please needs this permission to create and update its release pull request.
+
+Release Please uses the repository `GITHUB_TOKEN`, so the release pull request it creates does not automatically trigger another `pull_request` workflow. The publishing job runs the complete check, compile, and smoke-test sequence after the release pull request is merged. To validate the generated release branch before merging, manually run **Pull Request CI** and select the Release Please branch in the workflow branch selector.
+
 ## Version selection
 
 Use Conventional Commit prefixes in the final pull request title used for squash merging:
