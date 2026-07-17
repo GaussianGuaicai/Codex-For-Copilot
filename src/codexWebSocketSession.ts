@@ -12,6 +12,7 @@ import {
   type CodexRequestBuilderOptions,
   type CodexResponsesRequest
 } from './codexRequestBuilder';
+import { createCodexContinuationSnapshot, type CodexContinuationSnapshot } from './codexContinuation';
 
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CONNECTING = 0;
@@ -22,6 +23,11 @@ export interface CodexWebSocketHandshake {
   modelsEtag?: string;
   reasoningIncluded: boolean;
   serverModel?: string;
+}
+
+export interface CodexWebSocketPreconnectionObserver {
+  onConnected?: (handshake: CodexWebSocketHandshake) => void;
+  onError?: (error: Error) => void;
 }
 
 export interface CodexWebSocketResponseResult {
@@ -41,6 +47,12 @@ export interface CodexWebSocketStreamOptions {
   identity: CodexRequestIdentity;
   signal: AbortSignal;
   onEvent: (event: ResponsesServerEvent) => void;
+  onRequestPrepared?: (request: {
+    requestBytes: number;
+    previousResponseIdUsed?: string;
+    incrementalInputCount: number;
+  }) => void;
+  onHandshake?: (handshake: CodexWebSocketHandshake, connectedAt: number) => void;
 }
 
 export class CodexWebSocketSession {
@@ -49,10 +61,12 @@ export class CodexWebSocketSession {
   private handshake?: CodexWebSocketHandshake;
   private currentTurnId?: string;
   private turnState?: string;
-  private lastRequest?: CodexResponsesRequest;
-  private lastResponseId?: string;
-  private lastResponseItems: unknown[] = [];
+  private continuation?: CodexContinuationSnapshot;
   private lastResponseWasPrewarm = false;
+  private activeHandshakeListener?: CodexWebSocketStreamOptions['onHandshake'];
+  private idlePreconnectionErrorListener?: (error: Error) => void;
+  private idlePreconnectionObserver?: CodexWebSocketPreconnectionObserver;
+  private handshakeConnectedAt?: number;
   private used = false;
   private closed = false;
   readonly createdAt = Date.now();
@@ -84,6 +98,22 @@ export class CodexWebSocketSession {
     return this.enqueue(() => this.runResponse(options, true, false));
   }
 
+  protectIdlePreconnection(observer?: CodexWebSocketPreconnectionObserver): void {
+    this.idlePreconnectionObserver = observer;
+    if (this.idlePreconnectionErrorListener) {
+      if (this.handshake) {
+        observer?.onConnected?.(this.handshake);
+      }
+      return;
+    }
+
+    this.idlePreconnectionErrorListener = (error) => {
+      this.idlePreconnectionObserver?.onError?.(error);
+      this.close(1000, 'preconnect failed');
+    };
+    this.socket.on('error', this.idlePreconnectionErrorListener);
+  }
+
   close(code = 1000, reason = 'OK'): void {
     if (this.closed) {
       return;
@@ -111,10 +141,11 @@ export class CodexWebSocketSession {
 
     const incremental = this.buildIncrementalRequest(options.request);
     const request = incremental?.request ?? options.request;
+    const previousResponseId = getAllowedPreviousResponseId(request);
     const builderOptions: CodexRequestBuilderOptions = {
       ...options.builderOptions,
       input: request.input as CodexRequestBuilderOptions['input'],
-      previousResponseId: incremental?.previousResponseId,
+      previousResponseId,
       websocketRequestStartedAt: Date.now()
     };
     const event = buildCodexResponsesWebSocketEvent(builderOptions, prewarm ? false : undefined);
@@ -122,6 +153,11 @@ export class CodexWebSocketSession {
       event.client_metadata[CodexHeader.turnState] = this.turnState;
     }
     const requestBytes = Buffer.byteLength(JSON.stringify(event));
+    options.onRequestPrepared?.({
+      requestBytes,
+      previousResponseIdUsed: previousResponseId,
+      incrementalInputCount: getRequestInput(incremental?.request ?? options.request).length
+    });
 
     const outputItems: unknown[] = [];
     let responseId: string | undefined;
@@ -129,6 +165,12 @@ export class CodexWebSocketSession {
     let failureMessage: string | undefined;
     const abort = () => this.close(1000, 'cancelled');
     options.signal.addEventListener('abort', abort, { once: true });
+    this.releaseIdlePreconnectionGuard();
+    const onHandshake = options.onHandshake;
+    this.activeHandshakeListener = onHandshake;
+    if (onHandshake && this.handshake && this.handshakeConnectedAt !== undefined) {
+      onHandshake(this.handshake, this.handshakeConnectedAt);
+    }
 
     try {
       this.socket.send(event as Parameters<ResponsesWS['send']>[0]);
@@ -183,21 +225,22 @@ export class CodexWebSocketSession {
         throw new Error(failureMessage);
       }
 
-      this.lastRequest = structuredClone(options.request);
-      this.lastResponseId = responseId;
-      this.lastResponseItems = [...outputItems];
+      this.continuation = responseId
+        ? createCodexContinuationSnapshot(options.request, responseId, outputItems, options.identity.turnId)
+        : undefined;
       this.lastResponseWasPrewarm = prewarm;
       return {
         responseId,
         outputItems,
         handshake: this.handshake,
         connectionReused,
-        previousResponseIdUsed: incremental?.previousResponseId,
+        previousResponseIdUsed: previousResponseId,
         incrementalInputCount: getRequestInput(incremental?.request ?? options.request).length,
         turnState: this.turnState,
         requestBytes
       };
     } finally {
+      this.activeHandshakeListener = undefined;
       options.signal.removeEventListener('abort', abort);
     }
   }
@@ -206,10 +249,11 @@ export class CodexWebSocketSession {
     request: CodexResponsesRequest;
     previousResponseId: string;
   } | undefined {
-    if (!this.lastRequest || !this.lastResponseId || !areCodexRequestsIncrementallyCompatible(this.lastRequest, request)) {
+    const continuation = this.continuation;
+    if (!continuation || !areCodexRequestsIncrementallyCompatible(continuation.fullRequest, request)) {
       return undefined;
     }
-    const previousInput = this.lastRequest.input as unknown[];
+    const previousInput = continuation.fullRequest.input as unknown[];
     const currentInput = request.input as unknown[];
     if (currentInput.length < previousInput.length || (currentInput.length === previousInput.length && !this.lastResponseWasPrewarm)) {
       return undefined;
@@ -220,20 +264,16 @@ export class CodexWebSocketSession {
       }
     }
     const incrementalInput = currentInput.slice(previousInput.length);
-    if (incrementalInput.some((item) => (
-      typeof item === 'object'
-      && item !== null
-      && (item as { type?: unknown }).type === 'function_call_output'
-    ))) {
+    if (incrementalInput.some(isFunctionCallOutput)) {
       return undefined;
     }
     return {
       request: {
         ...request,
         input: incrementalInput as CodexResponsesRequest['input'],
-        previous_response_id: this.lastResponseId
+        previous_response_id: continuation.responseId
       },
-      previousResponseId: this.lastResponseId
+      previousResponseId: continuation.responseId
     };
   }
 
@@ -274,10 +314,22 @@ export class CodexWebSocketSession {
         reasoningIncluded: parsed.reasoningIncluded,
         serverModel: parsed.serverModel
       };
+      this.handshakeConnectedAt = Date.now();
+      this.activeHandshakeListener?.(this.handshake, this.handshakeConnectedAt);
+      this.idlePreconnectionObserver?.onConnected?.(this.handshake);
       if (parsed.turnState && !this.turnState) {
         this.turnState = parsed.turnState;
       }
     });
+  }
+
+  private releaseIdlePreconnectionGuard(): void {
+    if (!this.idlePreconnectionErrorListener) {
+      return;
+    }
+    this.socket.off('error', this.idlePreconnectionErrorListener);
+    this.idlePreconnectionErrorListener = undefined;
+    this.idlePreconnectionObserver = undefined;
   }
 }
 
@@ -319,6 +371,23 @@ async function nextWithTimeout<T>(
 
 function getRequestInput(request: CodexResponsesRequest): unknown[] {
   return Array.isArray(request.input) ? request.input : [];
+}
+
+function getAllowedPreviousResponseId(request: CodexResponsesRequest): string | undefined {
+  const previousResponseId = request.previous_response_id;
+  if (typeof previousResponseId !== 'string'
+    || previousResponseId.length === 0
+    || getRequestInput(request).some(isFunctionCallOutput)) {
+    return undefined;
+  }
+
+  return previousResponseId;
+}
+
+function isFunctionCallOutput(item: unknown): boolean {
+  return typeof item === 'object'
+    && item !== null
+    && (item as { type?: unknown }).type === 'function_call_output';
 }
 
 function getMetadataTurnState(event: unknown): string | undefined {

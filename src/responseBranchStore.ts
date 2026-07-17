@@ -6,7 +6,7 @@ import {
   type ResponsesInputMessage
 } from './convertMessages';
 import type { CodexRequestIdentity } from './codexProtocol';
-import type { CodexResponsesRequest } from './codexRequestBuilder';
+import { cloneCodexContinuationSnapshot, type CodexContinuationSnapshot } from './codexContinuation';
 
 export interface CodexTurnState {
   id: string;
@@ -20,10 +20,7 @@ export interface CodexBranchIdentity extends Omit<CodexRequestIdentity, 'turnId'
 export interface CodexBranchState {
   identity: CodexBranchIdentity;
   turn: CodexTurnState;
-  lastRequest?: CodexResponsesRequest;
-  lastResponseId?: string;
-  lastResponseItems: unknown[];
-  requestFingerprint?: string;
+  continuation?: CodexContinuationSnapshot;
   updatedAt: number;
 }
 
@@ -294,8 +291,7 @@ function cloneBranchState(state: CodexBranchState): CodexBranchState {
     ...state,
     identity: { ...state.identity },
     turn: { ...state.turn },
-    lastResponseItems: [...state.lastResponseItems],
-    lastRequest: state.lastRequest ? structuredClone(state.lastRequest) : undefined
+    continuation: state.continuation ? cloneCodexContinuationSnapshot(state.continuation) : undefined
   };
 }
 
@@ -304,8 +300,8 @@ function hasMatchingRequestFingerprint(
   envelope: ResponseBranchReuseEnvelope
 ): boolean {
   return branch.envelope.requestFingerprint === envelope.requestFingerprint
-    && (branch.state?.requestFingerprint === undefined
-      || branch.state.requestFingerprint === envelope.requestFingerprint);
+    && (branch.state?.continuation?.requestFingerprint === undefined
+      || branch.state.continuation.requestFingerprint === envelope.requestFingerprint);
 }
 
 function compareToolSignatures(

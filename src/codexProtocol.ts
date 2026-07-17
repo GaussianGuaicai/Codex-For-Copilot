@@ -59,6 +59,12 @@ export interface CodexDynamicHeaderContext {
   userAgent: string;
 }
 
+export interface CodexWebSocketPreconnectHeaderContext {
+  credentialsHeaders?: Record<string, string>;
+  extensionVersion: string;
+  userAgent: string;
+}
+
 export type CodexTransportKind = 'http' | 'websocket';
 
 export function getCodexCompatibilityProfile(
@@ -114,6 +120,18 @@ export function buildCodexRequestHeaders(
   }
 
   return headers;
+}
+
+export function buildCodexWebSocketPreconnectHeaders(
+  context: CodexWebSocketPreconnectHeaderContext
+): Record<string, string> {
+  return {
+    ...context.credentialsHeaders,
+    'User-Agent': context.userAgent,
+    originator: 'codex-for-copilot',
+    version: context.extensionVersion,
+    [CodexHeader.beta]: CODEX_RESPONSES_WEBSOCKET_BETA
+  };
 }
 
 export function createCodexTurnMetadata(

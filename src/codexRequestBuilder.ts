@@ -1,7 +1,9 @@
-import type { ResponseCreateParamsStreaming, FunctionTool, ToolChoiceOptions } from 'openai/resources/responses/responses';
+import { performance } from 'node:perf_hooks';
+import type { ResponseCreateParamsStreaming, ToolChoiceOptions } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
+import { resolveCodexToolSchemas } from './codexToolSchemaCache';
 import {
   CodexHeader,
   createCodexTurnMetadata,
@@ -44,8 +46,27 @@ export type CodexRequestEnvelopeOptions = Omit<
   'identity' | 'input' | 'previousResponseId' | 'requestKind' | 'websocketRequestStartedAt'
 >;
 
+export interface CodexRequestBuildMetrics {
+  requestBuildMs: number;
+  toolSchemaBytes: number;
+  toolSchemaCacheHit: boolean;
+}
+
+export interface CodexRequestBuildResult {
+  request: CodexResponsesRequest;
+  metrics: CodexRequestBuildMetrics;
+}
+
 export function buildCodexResponsesRequest(options: CodexRequestBuilderOptions): CodexResponsesRequest {
-  const tools = options.tools?.map(convertToolToResponseTool) ?? [];
+  return buildCodexResponsesRequestWithMetrics(options).request;
+}
+
+export function buildCodexResponsesRequestWithMetrics(
+  options: CodexRequestBuilderOptions
+): CodexRequestBuildResult {
+  const startedAt = performance.now();
+  const toolSchemas = resolveCodexToolSchemas(options.tools);
+  const tools = toolSchemas.responseTools;
   const metadata = options.compatibilityEnabled && options.identity
     ? buildCodexClientMetadata(options.identity, options.requestKind ?? 'turn', options.websocketRequestStartedAt)
     : undefined;
@@ -62,7 +83,7 @@ export function buildCodexResponsesRequest(options: CodexRequestBuilderOptions):
       }
     : {};
 
-  return {
+  const request = {
     model: options.model,
     instructions: options.instructions,
     input: options.input,
@@ -73,7 +94,7 @@ export function buildCodexResponsesRequest(options: CodexRequestBuilderOptions):
     ...(options.reasoning ? { reasoning: options.reasoning } : {}),
     ...(tools.length > 0
       ? {
-          tools,
+          tools: [...tools],
           tool_choice: mapToolChoice(options.toolMode),
           parallel_tool_calls: true
         }
@@ -82,6 +103,14 @@ export function buildCodexResponsesRequest(options: CodexRequestBuilderOptions):
     ...identityFields,
     ...(options.omitMaxOutputTokens ? {} : { max_output_tokens: options.maxOutputTokens })
   } as CodexResponsesRequest;
+  return {
+    request,
+    metrics: {
+      requestBuildMs: Math.max(0, performance.now() - startedAt),
+      toolSchemaBytes: toolSchemas.toolSchemaBytes,
+      toolSchemaCacheHit: toolSchemas.cacheHit
+    }
+  };
 }
 
 export function buildCodexResponsesWebSocketEvent(
@@ -146,16 +175,6 @@ export function areCodexRequestsIncrementallyCompatible(
   return fingerprintCodexRequest(previous) === fingerprintCodexRequest(current);
 }
 
-function convertToolToResponseTool(tool: vscode.LanguageModelChatTool): FunctionTool {
-  return {
-    type: 'function',
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.inputSchema ? tool.inputSchema as Record<string, unknown> : null,
-    strict: false
-  };
-}
-
 function mapToolChoice(toolMode: vscode.LanguageModelChatToolMode | undefined): ToolChoiceOptions {
   return toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
 }
@@ -175,3 +194,5 @@ function sortValue(value: unknown): unknown {
   }
   return value;
 }
+
+export { resetCodexToolSchemaCache } from './codexToolSchemaCache';

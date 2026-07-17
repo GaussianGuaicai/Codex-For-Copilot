@@ -4,7 +4,13 @@ const loaded = await loadBundled('src/codexRequestBuilder.ts', {
   LanguageModelChatToolMode: { Required: 2 }
 });
 try {
-  const { buildCodexResponsesRequest, buildCodexResponsesWebSocketEvent, areCodexRequestsIncrementallyCompatible } = loaded.exports;
+  const {
+    areCodexRequestsIncrementallyCompatible,
+    buildCodexResponsesRequest,
+    buildCodexResponsesRequestWithMetrics,
+    buildCodexResponsesWebSocketEvent,
+    resetCodexToolSchemaCache
+  } = loaded.exports;
   const identity = {
     installationId: '11111111-1111-4111-8111-111111111111',
     sessionId: '22222222-2222-4222-8222-222222222222',
@@ -27,6 +33,9 @@ try {
   const request = buildCodexResponsesRequest(base);
   const appended = buildCodexResponsesRequest({ ...base, input: [...base.input, { type: 'message', role: 'user', content: 'next' }] });
   const event = buildCodexResponsesWebSocketEvent(base, false);
+  resetCodexToolSchemaCache();
+  const firstBuild = buildCodexResponsesRequestWithMetrics(base);
+  const secondBuild = buildCodexResponsesRequestWithMetrics(base);
   assertEqual(request.prompt_cache_key, identity.threadId, 'stable prompt cache key');
   assertEqual(request.client_metadata.turn_id, identity.turnId, 'turn metadata');
   assertEqual(request.parallel_tool_calls, true, 'parallel tools');
@@ -35,6 +44,10 @@ try {
   assertEqual(event.generate, false, 'prewarm generate flag');
   assertEqual('stream' in event, false, 'WebSocket stream omitted');
   assertEqual(areCodexRequestsIncrementallyCompatible(request, appended), true, 'input ignored by request fingerprint');
+  assertEqual(firstBuild.metrics.toolSchemaCacheHit, false, 'first request build reports schema cache miss');
+  assertEqual(secondBuild.metrics.toolSchemaCacheHit, true, 'second request build reports schema cache hit');
+  assertEqual(firstBuild.metrics.toolSchemaBytes > 0, true, 'request build reports tool schema bytes');
+  assertEqual(secondBuild.metrics.requestBuildMs >= 0, true, 'request build reports duration');
   console.log('Smoke test passed: shared Codex request construction and incremental fingerprint are correct.');
 } finally {
   await loaded.dispose();

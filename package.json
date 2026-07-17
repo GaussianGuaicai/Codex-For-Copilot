@@ -28,8 +28,9 @@
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",
-    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs",
-    "test:smoke": "npm run test:codex-parity && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
+    "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",
+    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs",
+    "test:smoke": "npm run test:codex-parity && node test/smokeCodexLatency.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
@@ -149,7 +150,12 @@
             "enabled",
             "disabled"
           ],
-          "description": "Controls best-effort generate:false WebSocket prewarming for ChatGPT Codex sessions."
+          "enumDescriptions": [
+            "Skip speculative generate:false requests and rely on idle WebSocket preconnection.",
+            "Experimentally run a bounded generate:false prewarm before a fresh formal WebSocket request.",
+            "Never run generate:false WebSocket prewarming."
+          ],
+          "description": "Controls bounded generate:false WebSocket prewarming for ChatGPT Codex sessions."
         },
         "codexModelProvider.requestCompression": {
           "type": "string",

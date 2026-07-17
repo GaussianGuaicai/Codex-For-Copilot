@@ -93,6 +93,9 @@ try {
   const presentation = [];
   const turnStates = [];
   const handshakeEvents = [];
+  const transportMetrics = [];
+  let responseCompleted = false;
+  let preparedFormalRequestBeforeCompletion = false;
   await streamResponseText({
     baseURL: `http://127.0.0.1:${port}/backend-api/codex/responses`,
     apiKey: 'test-token',
@@ -128,7 +131,18 @@ try {
     },
     onRawResponseItem: (item) => rawItems.push(item),
     onTurnState: (state) => turnStates.push(state),
-    onWebSocketHandshake: (handshake) => handshakeEvents.push(handshake)
+    onWebSocketHandshake: (handshake) => handshakeEvents.push(handshake),
+    onTransportMetrics: (metrics) => {
+      transportMetrics.push(metrics);
+      if (!responseCompleted
+        && metrics.requestBodyBytes > 0
+        && metrics.previousResponseIdUsed === true) {
+        preparedFormalRequestBeforeCompletion = true;
+      }
+    },
+    onResponseCompleted() {
+      responseCompleted = true;
+    }
   });
 
   assertEqual(upgradeHeaders['openai-beta'], 'responses_websockets=2026-02-06', 'upgrade beta');
@@ -158,6 +172,7 @@ try {
   assertEqual(rawItems.length, 2, 'raw output items retained');
   assertEqual(turnStates[0], 'opaque-sticky-state', 'turn state captured');
   assertEqual(handshakeEvents[0].modelsEtag, 'models-etag-test', 'models etag captured');
+  assertEqual(preparedFormalRequestBeforeCompletion, true, 'formal request bytes emitted before completion');
 
   await streamResponseText({
     baseURL: `http://127.0.0.1:${port}/backend-api/codex/responses`,
@@ -192,6 +207,46 @@ try {
 
   assertEqual(frames[2].previous_response_id, undefined, 'full tool replay omits previous response id');
   assertEqual(frames[2].input.length, 3, 'full tool replay retains matching function call');
+
+  const branchContinuationMetrics = [];
+  await streamResponseText({
+    baseURL: `http://127.0.0.1:${port}/backend-api/codex/responses`,
+    apiKey: 'test-token',
+    headers: { 'ChatGPT-Account-ID': 'acct-test' },
+    transport: 'websocket',
+    compatibilityProfile: { enabled: true, endpointKey: `http://127.0.0.1:${port}/backend-api/codex/responses` },
+    authIdentity: 'codexAuth:acct-test',
+    identity: {
+      installationId: '11111111-1111-4111-8111-111111111111',
+      sessionId: '22222222-2222-4222-8222-222222222222',
+      threadId: '33333333-3333-4333-8333-333333333333',
+      turnId: '44444444-4444-4444-8444-444444444446',
+      windowId: '55555555-5555-8555-9555-555555555555'
+    },
+    extensionVersion: '1.2.3',
+    userAgent: 'codex-for-copilot/1.2.3 (test)',
+    websocketPrewarm: 'disabled',
+    requestCompression: 'disabled',
+    previousResponseId: 'resp_final',
+    omitMaxOutputTokens: true,
+    model: 'gpt-test',
+    instructions: 'instructions',
+    input: [{ type: 'message', role: 'user', content: 'Continue this branch.' }],
+    maxOutputTokens: 100,
+    token: createCancellationToken(),
+    onTextDelta() {},
+    onTransportMetrics: (metrics) => branchContinuationMetrics.push(metrics)
+  });
+
+  assertEqual(frames[3].previous_response_id, 'resp_final', 'projected branch continuation preserves previous response id');
+  assertEqual(frames[3].input.length, 1, 'projected branch continuation keeps only appended input');
+  assertEqual(
+    branchContinuationMetrics.some((metrics) => (
+      metrics.previousResponseIdUsed === true && metrics.incrementalInputCount === 1
+    )),
+    true,
+    'projected branch continuation reports previous response use'
+  );
   console.log('Smoke test passed: managed WebSocket handshake, prewarm, continuation, Turn State, and raw items are correct.');
 } finally {
   disposeReusableResponsesWebSockets();

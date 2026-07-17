@@ -11,7 +11,12 @@
 - `responsesClient.ts`: shared request builder and the HTTP/WebSocket transport facade for Responses streaming.
 - `convertMessages.ts`: conversion from VS Code chat messages into Responses input items.
 - `responseBranchStore.ts`: in-memory branch reuse cache keyed by normalized request envelope and transcript prefix.
+- `codexWebSocketSession.ts`: serializes managed WebSocket streams and preserves safe continuation state.
 - `models.ts`: upstream model discovery and provider model shaping.
+- `codexModelCache.ts`: bounded stale-while-revalidate cache for discovered provider models.
+- `codexLatency.ts`: redacted provider-to-response stage timing and derived latency metrics.
+- `codexContinuation.ts`: shared full-request/response snapshot for branch recovery and managed WebSocket continuation.
+- `codexToolSchemaCache.ts`: bounded immutable conversion cache for stable tool definitions and branch signatures.
 
 ## Constraints
 
@@ -29,3 +34,13 @@
 - Capture function-call metadata from `response.output_item.added` and report it once at `response.function_call_arguments.done`, preferring the captured non-empty name; retain `response.output_item.done` only as a deduplicated compatibility fallback.
 - Never replay a `function_call` with an empty call ID or name. Drop its matching `function_call_output`, but retain standalone valid tool outputs used by normal continuation flows.
 - Preserve each Responses reasoning item's identity when creating VS Code thinking parts. Once visible text starts, do not insert later reasoning parts into that text stream.
+- Latency traces may include timestamps, counts, transport state, and request byte sizes, but never prompt text, tool arguments or results, credentials, Turn State, or reasoning content.
+- Model discovery may block only for a cold or expired cache entry. Fresh entries are returned directly; stale entries remain usable while one background refresh is in flight, and failed background refreshes must retain the stale entry.
+- A valid selected `codex::` model ID resolves directly for chat requests; only untrusted, disabled, or temporarily unavailable IDs require a model-directory lookup.
+- `generate:false` prewarm is strictly opt-in and best effort: `auto` skips speculative work, while an enabled prewarm has a short independent budget, must not cancel the formal request, and a timed-out prewarm socket must be discarded before the formal request starts.
+- An idle WebSocket preconnection is keyed only by endpoint/account/auth compatibility, carries no synthetic request identity, and must be short-lived, bounded, and claimed by at most one formal thread request.
+- Latency context is a fixed whitelist of timing-safe counts and enums; never pass raw transport event payloads or request data into it.
+- Tool schema caching may retain only cloned function definitions, semantic signatures, and byte counts. It must never cache user input, tool output, prompt content, or raw tool-result data.
+- Branch Store and managed WebSocket state must record the same `CodexContinuationSnapshot`; tool-output full replay remains required until a compatible backend capability is demonstrated.
+- Fork diagnostics must use redacted item summaries only. A Provider-validated ordinary append may retain its explicit `previous_response_id` on a managed WebSocket, but any request containing `function_call_output` must omit it.
+- Request diagnostics must distinguish ordinary `previous_response_id` reuse from tool-output full replay. Thinking Effort may arrive through `modelOptions`; support recognized reasoning and thinking shapes while logging only the resolved enum and its source.

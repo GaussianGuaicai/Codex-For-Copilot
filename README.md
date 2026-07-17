@@ -52,6 +52,7 @@ Common settings:
 - `codexModelProvider.baseURL`: Codex backend URL, defaulting to `https://chatgpt.com/backend-api/codex/responses`
 - `codexModelProvider.credentialsSource`: `auto`, `codexAuth`, or `secretStorage`. `auto` prefers the Codex auth manager, then the legacy `~/.codex/auth.json` fallback, then SecretStorage.
 - `codexModelProvider.transport`: `auto`, `http`, or `websocket`. `auto` prefers WebSocket and falls back to HTTP only when the WebSocket transport is unavailable; API errors are returned directly.
+- `codexModelProvider.websocketPrewarm`: `auto`, `enabled`, or `disabled`. `auto` skips speculative `generate:false` requests and relies on idle WebSocket preconnection; use `enabled` only when backend measurements show a benefit.
 - `codexModelProvider.model`: fallback model when discovery fails
 - `codexModelProvider.disabledModels`: model IDs to hide when the backend advertises a model that should not appear in the picker
 - `codexModelProvider.modelAliases`: map stale or rejected model IDs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`
@@ -80,10 +81,11 @@ npm run check
 npm run compile
 npm run test:smoke
 npm run test:real-backend
+npm run test:benchmark-provider
 npm run package:vsix
 ```
 
-`npm run test:smoke` runs self-contained checks for HTTP/WebSocket parity, transport fallback, provider model availability, conversation reuse, account usage, and authentication. `npm run test:real-backend` talks to the live Codex backend and expects valid Codex credentials. Set `CODEX_TEST_TRANSPORT=websocket` or `auto` to probe that transport, and set `CODEX_TEST_CONTINUATION=1` to include a follow-up request using `previous_response_id`.
+`npm run test:smoke` runs self-contained checks for HTTP/WebSocket parity, transport fallback, provider model availability, conversation reuse, account usage, and authentication. `npm run test:real-backend` talks to the live Codex backend and expects valid Codex credentials. Set `CODEX_TEST_TRANSPORT=websocket` or `auto` to probe that transport, and set `CODEX_TEST_CONTINUATION=1` to include a follow-up request using `previous_response_id`. `CODEX_BENCHMARK_BACKEND=1 npm run test:benchmark-provider` measures the complete provider path; set `CODEX_BENCHMARK_ITERATIONS` to control sample count.
 
 ## Troubleshooting
 

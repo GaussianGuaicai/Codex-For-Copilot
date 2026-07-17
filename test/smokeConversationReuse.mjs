@@ -103,10 +103,11 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const { compareResponsesInputHistory, convertMessagesToResponsesInput, stableSerialize } = require(compareBundlePath);
 const { ResponseBranchStore } = require(branchStoreBundlePath);
-const { buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures } = require(providerBundlePath);
+const { buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, getReasoningEffort } = require(providerBundlePath);
 
 try {
   runStableSerializeSmokeTest(stableSerialize);
+  runReasoningEffortOptionSmokeTest(getReasoningEffort);
   runCompareHistorySmokeTest(compareResponsesInputHistory);
   runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory);
   runBranchStoreSmokeTest(ResponseBranchStore);
@@ -132,15 +133,65 @@ function runStableSerializeSmokeTest(stableSerialize) {
   assertEqual(left, right, 'stable serialization');
 }
 
+function runReasoningEffortOptionSmokeTest(getReasoningEffort) {
+  const modelDefault = 'high';
+  const noDefault = undefined;
+
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, { modelOptions: { thinking: 'medium' } }, noDefault),
+    'medium',
+    'modelOptions.thinking',
+    false,
+    'direct thinking option overrides model default'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, { modelOptions: { thinking: { effort: 'low' } } }, noDefault),
+    'low',
+    'modelOptions.thinking.effort',
+    false,
+    'nested thinking option overrides model default'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, { modelOptions: { thinkingEffort: 'medium' } }, noDefault),
+    'medium',
+    'modelOptions.thinkingEffort',
+    false,
+    'thinking effort option overrides model default'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, {
+      modelConfiguration: { reasoningEffort: 'low' },
+      modelOptions: { thinking: 'medium' }
+    }, noDefault),
+    'medium',
+    'modelOptions.thinking',
+    true,
+    'request-level thinking option overrides a stale model configuration'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, {}, 'low'),
+    'low',
+    'default',
+    false,
+    'configured default overrides model default'
+  );
+}
+
+function assertReasoningEffort(actual, effort, source, hasExplicitConflict, label) {
+  assertEqual(actual.effort, effort, `${label} effort`);
+  assertEqual(actual.source, source, `${label} source`);
+  assertEqual(actual.hasExplicitConflict, hasExplicitConflict, `${label} conflict state`);
+}
+
 function runCompareHistorySmokeTest(compareResponsesInputHistory) {
   const previousInput = [
     { type: 'message', role: 'user', content: 'hello' },
-    { type: 'message', role: 'assistant', content: 'hi' }
+    { type: 'message', role: 'assistant', content: 'previous-sensitive-content' }
   ];
   const appendInput = [...previousInput, { type: 'message', role: 'user', content: 'continue' }];
   const forkInput = [
     previousInput[0],
-    { type: 'message', role: 'assistant', content: 'different' }
+    { type: 'message', role: 'assistant', content: 'current-sensitive-content' }
   ];
 
   const appendComparison = compareResponsesInputHistory(previousInput, appendInput);
@@ -151,6 +202,18 @@ function runCompareHistorySmokeTest(compareResponsesInputHistory) {
   const forkComparison = compareResponsesInputHistory(previousInput, forkInput);
   assertEqual(forkComparison.kind, 'fork', 'fork comparison kind');
   assertEqual(forkComparison.matchedPrefixCount, 1, 'fork matched prefix count');
+  assertEqual(
+    JSON.stringify(forkComparison.mismatch).includes('previous-sensitive-content'),
+    false,
+    'fork previous mismatch summary redacts content'
+  );
+  assertEqual(
+    JSON.stringify(forkComparison.mismatch).includes('current-sensitive-content'),
+    false,
+    'fork current mismatch summary redacts content'
+  );
+  assertEqual(JSON.parse(forkComparison.mismatch?.previousItemSummary ?? '{}').type, 'message', 'fork summary item type');
+  assertEqual(JSON.parse(forkComparison.mismatch?.currentItemSummary ?? '{}').role, 'assistant', 'fork summary item role');
 }
 
 function runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory) {

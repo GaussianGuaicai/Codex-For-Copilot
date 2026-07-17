@@ -19,6 +19,7 @@ import type { ResponsesInputMessage } from './convertMessages';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { codexFetch } from './auth/codexAuthRequest';
 import {
+  buildCodexWebSocketPreconnectHeaders,
   buildCodexRequestHeaders,
   createCodexTurnMetadata,
   stableSerializeCodexMetadata,
@@ -27,16 +28,23 @@ import {
 } from './codexProtocol';
 import {
   buildCodexResponsesRequest,
+  buildCodexResponsesRequestWithMetrics,
   type CodexRequestBuilderOptions
 } from './codexRequestBuilder';
 import { createCodexFetchAdapter, type RequestCompressionPolicy } from './codexFetchAdapter';
-import { codexConnectionManager, type CodexConnectionScope } from './codexConnectionManager';
-import type { CodexWebSocketHandshake } from './codexWebSocketSession';
+import {
+  codexConnectionManager,
+  type CodexConnectionOrigin,
+  type CodexConnectionScope,
+  type CodexConnectionScopeBase
+} from './codexConnectionManager';
+import type { CodexWebSocketHandshake, CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 2;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const REUSABLE_WEBSOCKET_TTL_MS = 10 * 60 * 1000;
 const MAX_REUSABLE_WEBSOCKETS = 32;
+const WEBSOCKET_PREWARM_BUDGET_MS = 400;
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
@@ -114,7 +122,20 @@ export interface StreamResponseTextOptions {
   }) => void;
   onWebSocketSession?: (event: {
     reused: boolean;
+    origin?: CodexConnectionOrigin;
   }) => void;
+}
+
+export interface PreconnectCodexResponsesWebSocketOptions {
+  baseURL: string;
+  apiKey: string;
+  headers?: Record<string, string>;
+  compatibilityProfile: CodexCompatibilityProfile;
+  authIdentity: string;
+  extensionVersion?: string;
+  userAgent?: string;
+  onConnected?: CodexWebSocketPreconnectionObserver['onConnected'];
+  onError?: CodexWebSocketPreconnectionObserver['onError'];
 }
 
 export function isResponsesContinuationMissError(error: unknown): error is ResponsesContinuationMissError {
@@ -128,6 +149,29 @@ export function disposeReusableResponsesWebSockets(): void {
 
   for (const session of sessions) {
     closeReusableWebSocketSession(session);
+  }
+}
+
+export function preconnectCodexResponsesWebSocket(options: PreconnectCodexResponsesWebSocketOptions): boolean {
+  const scope = getManagedPreconnectionScope(options);
+  if (!scope) {
+    return false;
+  }
+
+  const headers = buildCodexWebSocketPreconnectHeaders({
+    credentialsHeaders: options.headers,
+    extensionVersion: options.extensionVersion ?? '0.0.0',
+    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+  });
+
+  try {
+    const client = createOpenAIClient(options, headers);
+    return codexConnectionManager.preconnect(scope, client, createResponsesWsOptions(headers, options.baseURL), {
+      onConnected: options.onConnected,
+      onError: options.onError
+    });
+  } catch {
+    return false;
   }
 }
 
@@ -208,7 +252,8 @@ async function streamResponseTextOverHttp(
   options: StreamResponseTextOptions,
   abortController: AbortController
 ): Promise<void> {
-  const request = buildResponsesCreateRequest(options);
+  const { request, metrics } = buildResponsesCreateRequest(options);
+  options.onTransportMetrics?.({ ...metrics });
   const headers = buildDynamicHeaders(options, 'http');
   const client = createOpenAIClient(options, headers);
 
@@ -388,22 +433,46 @@ async function streamCodexResponseTextOverManagedWebSocket(
   const headers = buildDynamicHeaders(options, 'websocket');
   const client = createOpenAIClient(options, headers);
   let managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
-  options.onWebSocketSession?.({ reused: managed.reused });
-  const request = buildResponsesCreateRequest(options);
+  options.onWebSocketSession?.({ reused: managed.reused, origin: managed.origin });
+  const { request, metrics } = buildResponsesCreateRequest(options);
+  options.onTransportMetrics?.({ ...metrics });
   const builderOptions = createRequestBuilderOptions(options);
   const handleEvent = createResponsesServerEventHandler(options);
 
+  const prewarmMode = options.websocketPrewarm ?? 'auto';
+  if (!managed.reused && prewarmMode === 'auto') {
+    options.onTransportMetrics?.({ prewarmResult: 'skipped-auto' });
+  }
   if (!managed.reused
-    && options.websocketPrewarm !== 'disabled'
+    && prewarmMode === 'enabled'
     && !codexConnectionManager.isPrewarmDisabled(scope)) {
     const prewarmStartedAt = Date.now();
+    const prewarmController = new AbortController();
+    let prewarmTimedOut = false;
+    const abortPrewarm = () => prewarmController.abort();
+    abortController.signal.addEventListener('abort', abortPrewarm, { once: true });
+    const prewarmBudget = setTimeout(() => {
+      prewarmTimedOut = true;
+      prewarmController.abort();
+    }, WEBSOCKET_PREWARM_BUDGET_MS);
+    prewarmBudget.unref?.();
+    options.onTransportMetrics?.({
+      prewarmEnabled: true,
+      prewarmStartedAt,
+      prewarmBudgetMs: WEBSOCKET_PREWARM_BUDGET_MS
+    });
     try {
       const prewarm = await managed.session.prewarm({
         request,
         builderOptions,
         identity,
-        signal: abortController.signal,
-        onEvent: () => undefined
+        signal: prewarmController.signal,
+        onEvent: () => undefined,
+        onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
+        onHandshake: (handshake, connectedAt) => {
+          options.onWebSocketHandshake?.(handshake);
+          options.onTransportMetrics?.({ websocketConnectedAt: connectedAt });
+        }
       });
       reportManagedWebSocketResult(options, prewarm, 'prewarm', Date.now() - prewarmStartedAt);
     } catch (error) {
@@ -415,10 +484,15 @@ async function streamCodexResponseTextOverManagedWebSocket(
       managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
       options.onTransportMetrics?.({
         prewarmEnabled: true,
-        prewarmResult: 'disabled-after-failure',
+        prewarmResult: prewarmTimedOut ? 'timed-out' : 'disabled-after-failure',
+        prewarmTimedOut,
+        prewarmBudgetMs: WEBSOCKET_PREWARM_BUDGET_MS,
         prewarmLatencyMs: Date.now() - prewarmStartedAt,
         retryReason: error instanceof Error ? error.name : 'unknown'
       });
+    } finally {
+      clearTimeout(prewarmBudget);
+      abortController.signal.removeEventListener('abort', abortPrewarm);
     }
   }
 
@@ -430,6 +504,11 @@ async function streamCodexResponseTextOverManagedWebSocket(
         builderOptions,
         identity,
         signal: abortController.signal,
+        onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
+        onHandshake: (handshake, connectedAt) => {
+          options.onWebSocketHandshake?.(handshake);
+          options.onTransportMetrics?.({ websocketConnectedAt: connectedAt });
+        },
         onEvent: (event) => {
           if (event.type === 'response.output_text.delta'
             || event.type === 'response.reasoning_text.delta'
@@ -460,15 +539,27 @@ async function streamCodexResponseTextOverManagedWebSocket(
   }
 }
 
+function reportManagedWebSocketRequestMetrics(
+  options: StreamResponseTextOptions,
+  prepared: {
+    requestBytes: number;
+    previousResponseIdUsed?: string;
+    incrementalInputCount: number;
+  }
+): void {
+  options.onTransportMetrics?.({
+    requestBodyBytes: prepared.requestBytes,
+    previousResponseIdUsed: Boolean(prepared.previousResponseIdUsed),
+    incrementalInputCount: prepared.incrementalInputCount
+  });
+}
+
 function reportManagedWebSocketResult(
   options: StreamResponseTextOptions,
   result: Awaited<ReturnType<import('./codexWebSocketSession').CodexWebSocketSession['stream']>>,
   kind: 'prewarm' | 'response',
   latencyMs?: number
 ): void {
-  if (result.handshake) {
-    options.onWebSocketHandshake?.(result.handshake);
-  }
   if (result.turnState) {
     options.onTurnState?.(result.turnState);
   }
@@ -482,7 +573,7 @@ function reportManagedWebSocketResult(
     serverModel: result.handshake?.serverModel,
     modelsEtagPresent: Boolean(result.handshake?.modelsEtag),
     ...(kind === 'prewarm'
-      ? { prewarmEnabled: true, prewarmResult: 'success', prewarmLatencyMs: latencyMs }
+      ? { prewarmEnabled: true, prewarmResult: 'success', prewarmLatencyMs: latencyMs, prewarmCompletedAt: Date.now() }
       : {})
   });
 }
@@ -650,11 +741,13 @@ function createOpenAIClient(
 }
 
 function buildResponsesCreateRequest(options: StreamResponseTextOptions) {
-  return buildCodexResponsesRequest(createRequestBuilderOptions(options));
+  return buildCodexResponsesRequestWithMetrics(createRequestBuilderOptions(options));
 }
 
 function buildResponsesCreateEvent(options: StreamResponseTextOptions): ResponsesClientEvent {
-  const { stream: _stream, client_metadata: _metadata, ...request } = buildResponsesCreateRequest(options);
+  const { request: builtRequest, metrics } = buildResponsesCreateRequest(options);
+  options.onTransportMetrics?.({ ...metrics });
+  const { stream: _stream, client_metadata: _metadata, ...request } = builtRequest;
   return { type: 'response.create', ...request } as ResponsesClientEvent;
 }
 
@@ -749,6 +842,20 @@ function getManagedConnectionScope(options: StreamResponseTextOptions): CodexCon
     compatibilityProfile: options.compatibilityProfile.endpointKey,
     sessionId: options.identity.sessionId,
     threadId: options.identity.threadId
+  };
+}
+
+function getManagedPreconnectionScope(
+  options: PreconnectCodexResponsesWebSocketOptions
+): CodexConnectionScopeBase | undefined {
+  if (!options.compatibilityProfile.enabled || !options.authIdentity) {
+    return undefined;
+  }
+  return {
+    baseURL: normalizeBaseURL(options.baseURL),
+    authIdentity: options.authIdentity,
+    accountId: getHeader(options.headers, 'chatgpt-account-id'),
+    compatibilityProfile: options.compatibilityProfile.endpointKey
   };
 }
 

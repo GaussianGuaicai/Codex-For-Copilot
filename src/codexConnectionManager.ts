@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import type { ResponsesWSClientOptions } from 'openai/resources/responses/ws';
-import { CodexWebSocketSession } from './codexWebSocketSession';
+import { CodexWebSocketSession, type CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
 
 export interface CodexConnectionScope {
   baseURL: string;
@@ -11,17 +11,29 @@ export interface CodexConnectionScope {
   threadId: string;
 }
 
+export type CodexConnectionScopeBase = Omit<CodexConnectionScope, 'sessionId' | 'threadId'>;
+
+export type CodexConnectionOrigin = 'fresh' | 'preconnected' | 'previous-response';
+
 interface ManagedConnection {
   session: CodexWebSocketSession;
   scopeKey: string;
   threadKey: string;
 }
 
+interface PreconnectedConnection {
+  session: CodexWebSocketSession;
+  scopeKey: string;
+}
+
 const MAX_CONNECTIONS = 32;
 const CONNECTION_TTL_MS = 10 * 60 * 1000;
+const MAX_PRECONNECTIONS = 16;
+const PRECONNECTION_TTL_MS = 45 * 1000;
 
 export class CodexConnectionManager {
   private readonly connections = new Map<string, ManagedConnection>();
+  private readonly preconnections = new Map<string, PreconnectedConnection>();
   private readonly httpFallbackSessions = new Map<string, number>();
   private readonly prewarmDisabledSessions = new Map<string, number>();
 
@@ -29,22 +41,55 @@ export class CodexConnectionManager {
     scope: CodexConnectionScope,
     client: OpenAI,
     options: ResponsesWSClientOptions
-  ): { session: CodexWebSocketSession; reused: boolean } {
+  ): { session: CodexWebSocketSession; reused: boolean; origin: CodexConnectionOrigin } {
     this.evict();
     const threadKey = this.threadKey(scope);
     const existing = this.connections.get(threadKey);
     if (existing?.session.isUsable()) {
-      return { session: existing.session, reused: true };
+      return { session: existing.session, reused: true, origin: 'previous-response' };
     }
     existing?.session.close();
+    const scopeKey = this.scopeKey(scope);
+    const preconnected = this.preconnections.get(scopeKey);
+    if (preconnected?.session.isUsable()) {
+      this.preconnections.delete(scopeKey);
+      this.connections.set(threadKey, {
+        session: preconnected.session,
+        scopeKey,
+        threadKey
+      });
+      return { session: preconnected.session, reused: false, origin: 'preconnected' };
+    }
+    preconnected?.session.close();
+    this.preconnections.delete(scopeKey);
     const session = new CodexWebSocketSession(client, options);
     this.connections.set(threadKey, {
       session,
-      scopeKey: this.scopeKey(scope),
+      scopeKey,
       threadKey
     });
     this.evict();
-    return { session, reused: false };
+    return { session, reused: false, origin: 'fresh' };
+  }
+
+  preconnect(
+    scope: CodexConnectionScopeBase,
+    client: OpenAI,
+    options: ResponsesWSClientOptions,
+    observer?: CodexWebSocketPreconnectionObserver
+  ): boolean {
+    this.evict();
+    const scopeKey = this.scopeKey(scope);
+    const existing = this.preconnections.get(scopeKey);
+    if (existing?.session.isUsable()) {
+      return false;
+    }
+    existing?.session.close();
+    const session = new CodexWebSocketSession(client, options);
+    session.protectIdlePreconnection(observer);
+    this.preconnections.set(scopeKey, { session, scopeKey });
+    this.evict();
+    return true;
   }
 
   isHttpFallback(scope: CodexConnectionScope): boolean {
@@ -72,8 +117,8 @@ export class CodexConnectionManager {
     this.connections.delete(key);
   }
 
-  invalidateScope(scope: Omit<CodexConnectionScope, 'sessionId' | 'threadId'>): void {
-    const scopeKey = [scope.baseURL, scope.authIdentity, scope.accountId ?? '', scope.compatibilityProfile].join('|');
+  invalidateScope(scope: CodexConnectionScopeBase): void {
+    const scopeKey = this.scopeKey(scope);
     for (const [key, connection] of this.connections) {
       if (connection.scopeKey === scopeKey) {
         connection.session.close();
@@ -85,13 +130,20 @@ export class CodexConnectionManager {
         this.httpFallbackSessions.delete(key);
       }
     }
+    const preconnected = this.preconnections.get(scopeKey);
+    preconnected?.session.close();
+    this.preconnections.delete(scopeKey);
   }
 
   dispose(): void {
     for (const connection of this.connections.values()) {
       connection.session.close();
     }
+    for (const connection of this.preconnections.values()) {
+      connection.session.close();
+    }
     this.connections.clear();
+    this.preconnections.clear();
     this.httpFallbackSessions.clear();
     this.prewarmDisabledSessions.clear();
   }
@@ -105,18 +157,35 @@ export class CodexConnectionManager {
         this.connections.delete(key);
       }
     }
-    if (this.connections.size <= MAX_CONNECTIONS) {
-      return;
-    }
-    const oldest = [...this.connections.entries()]
-      .sort((left, right) => left[1].session.lastUsedAt - right[1].session.lastUsedAt);
-    while (this.connections.size > MAX_CONNECTIONS) {
-      const entry = oldest.shift();
-      if (!entry) {
-        break;
+    for (const [scopeKey, connection] of this.preconnections) {
+      if (!connection.session.isUsable() || now - connection.session.lastUsedAt > PRECONNECTION_TTL_MS) {
+        connection.session.close();
+        this.preconnections.delete(scopeKey);
       }
-      entry[1].session.close();
-      this.connections.delete(entry[0]);
+    }
+    if (this.connections.size > MAX_CONNECTIONS) {
+      const oldest = [...this.connections.entries()]
+        .sort((left, right) => left[1].session.lastUsedAt - right[1].session.lastUsedAt);
+      while (this.connections.size > MAX_CONNECTIONS) {
+        const entry = oldest.shift();
+        if (!entry) {
+          break;
+        }
+        entry[1].session.close();
+        this.connections.delete(entry[0]);
+      }
+    }
+    if (this.preconnections.size > MAX_PRECONNECTIONS) {
+      const oldestPreconnections = [...this.preconnections.entries()]
+        .sort((left, right) => left[1].session.lastUsedAt - right[1].session.lastUsedAt);
+      while (this.preconnections.size > MAX_PRECONNECTIONS) {
+        const entry = oldestPreconnections.shift();
+        if (!entry) {
+          break;
+        }
+        entry[1].session.close();
+        this.preconnections.delete(entry[0]);
+      }
     }
   }
 
@@ -140,7 +209,7 @@ export class CodexConnectionManager {
     }
   }
 
-  private scopeKey(scope: CodexConnectionScope): string {
+  private scopeKey(scope: CodexConnectionScopeBase): string {
     return [scope.baseURL, scope.authIdentity, scope.accountId ?? '', scope.compatibilityProfile].join('|');
   }
 

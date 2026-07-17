@@ -42,10 +42,76 @@ The final upstream recheck found no changes between the initial `4df8027a…` sn
 - SDK custom-fetch timing and optional Zstandard request compression with one safe uncompressed retry.
 - Focused protocol, identity, request, turn, HTTP, WebSocket, fallback, and compression smoke tests plus an opt-in real-backend benchmark.
 
+## Latency and continuation behavior
+
+The provider records a redacted latency trace from the entry of
+`provideLanguageModelChatResponse` through completion. It includes setup, model
+resolution, conversion, branch resolution, identity resolution, connection,
+prewarm, request-created, first-visible, and completion timing. The accompanying
+context is restricted to counts and enums such as cache state, transport origin,
+request bytes, tool count, tool-schema byte count/cache state, request-build time,
+and service tier. It never contains prompt content,
+tool arguments or results, credentials, Turn State, or reasoning content.
+
+Stable tool definitions are converted into a bounded immutable cache keyed by
+tool order, names, descriptions, and input schemas. Each lookup verifies the
+current canonical tool signature before reusing an object-identity entry, so an
+in-place name, description, or nested schema change rebuilds the definition and
+branch-envelope tool signature. The cache serves both the Responses request
+builder and branch-envelope tool signatures. It retains cloned schema definitions
+and aggregate byte counts only; no input, prompt, tool output, or raw tool-result
+content is cached.
+
+Model discovery uses a bounded stale-while-revalidate cache:
+
+| Cache state | Request behavior |
+| --- | --- |
+| Fresh, up to 10 minutes | Return the discovered models without a `/models` request. |
+| Stale, up to 1 hour | Use the existing models immediately and run one background refresh. |
+| Cold or expired | Wait for discovery once; discovery failure falls back for 60 seconds. |
+| Selected `codex::` model ID | Parse the trusted provider ID directly for chat requests, including configured aliases, without waiting for `/models`. |
+| Exact `Model not found` | Invalidate the scoped cache, temporarily hide the rejected model, and refresh the directory in the background. |
+
+For compatible ChatGPT Codex WebSocket sessions, model discovery may schedule one
+45-second idle preconnection per endpoint/account/auth scope. The empty handshake
+contains authentication, account, extension origin, and the WebSocket beta header,
+but deliberately omits synthetic installation, session, thread, and turn identity.
+The next formal request claims that socket and supplies its actual identity. A
+`generate:false` prewarm remains an explicit experimental option with a 400ms
+independent budget. `auto` skips it and relies on idle handshake preconnection,
+because the live Codex backend probe observed a bounded prewarm timeout. When
+explicitly enabled, a timeout discards that socket and a fresh formal request
+proceeds without duplicate output.
+
+### Tool result continuation
+
+`CodexContinuationSnapshot` is the shared state model for the branch store and a
+managed WebSocket session. It records the full request, completed response ID,
+raw response items, semantic request fingerprint, and turn ID after every
+successful response.
+
+The extension currently sends a full input replay whenever appended input contains
+`function_call_output`. This is intentional. Official Responses guidance requires
+manual history management to preserve prior response output items, including
+encrypted reasoning, for `store: false` workflows. The ChatGPT Codex backend has
+also rejected the standalone tool-output continuation in five repeated bounded
+WebSocket probes; every run recovered through a full replay. The replay retained
+the matching `function_call`, omitted `previous_response_id`, used three input
+items, and produced one initial tool call without duplicate output. A future
+backend-specific capability probe may enable a strictly matched incremental
+tool-output path only after repeatable real-backend validation accepts it.
+
+The local suite covers a model-generated single-tool loop, full replay shape,
+no duplicate tool-call reporting, stale-model non-blocking behavior, preconnection
+claiming, and bounded prewarm recovery. The existing real-backend benchmark table
+above remains the recorded transport baseline; new provider-level latency numbers
+must be measured against the same model, prompt, and network conditions rather
+than inferred from local mock timings.
+
 ## Approximate
 
 - VS Code does not expose a stable chat session identifier. Session/thread/fork identity is inferred from append-only `ResponseBranchStore` history with a TTL.
-- WebSocket preconnection starts when the first request resolves its synthetic identity. It is not scheduled during model discovery because no reliable VS Code chat/session identity exists at that point.
+- WebSocket preconnection can be scheduled after model discovery or while a formal request is being prepared. It is keyed only by endpoint/account/auth compatibility, so the idle handshake needs no VS Code chat/session identity; the formal request claims that socket and supplies its synthetic identity.
 - `generate:false` is best effort. Unsupported sessions disable it without changing the selected transport.
 
 ## VS Code API limitations
@@ -67,9 +133,10 @@ npm run test:codex-parity
 npm run test:smoke
 npm run compile
 CODEX_BENCHMARK_BACKEND=1 npm run test:benchmark-backend
+CODEX_BENCHMARK_BACKEND=1 npm run test:benchmark-provider
 ```
 
-The benchmark prints median/p95 first-visible and total latency, request/compressed bytes, connection reuse rate, and fallback rate. Use `CODEX_BENCHMARK_LABEL` to distinguish baseline and candidate runs.
+The transport benchmark prints median/p95 first-visible and total latency, request/compressed bytes, request-build time, schema-cache hit rate, connection reuse rate, and fallback rate. The provider benchmark exercises `CodexModelProvider` from entry through completion and reports provider-to-first-visible, model resolution, full request preparation (schema lookup, envelope construction, and branch fingerprinting), request-to-created, created-to-first-visible, and total timing. Its `provider-websocket-preconnected` scenario waits for an identity-free handshake and asserts that the formal request claims that exact idle socket before timing it. Use `CODEX_BENCHMARK_LABEL` to distinguish baseline and candidate runs.
 
 ## Real-backend benchmark
 
@@ -91,11 +158,31 @@ The locked pre-change commit was also run 10 times for the directly comparable H
 | HTTP short | 1439 / 5580 ms | 1805 / 2329 ms | 1822 / 5999 ms | 1943 / 2524 ms |
 | HTTP long history | 1065 / 2200 ms | 1474 / 2269 ms | 1370 / 2501 ms | 1678 / 2462 ms |
 
-The candidate HTTP median was slower in this sample, while p95 was substantially better for the short request and similar for the first long-history run. An immediate candidate rerun also showed backend variance (short 1898/2463 ms; long 1676/6956 ms first-visible median/p95). Because the request semantics now include Codex identity, cache key, and continuation metadata, the old and new HTTP payloads are not byte-identical. The default remains `auto`: prewarm improved fresh WebSocket median first-visible latency by about 15%, and reused WebSocket was the fastest candidate median. Compression remains thresholded rather than forced for small requests.
+The candidate HTTP median was slower in this sample, while p95 was substantially better for the short request and similar for the first long-history run. An immediate candidate rerun also showed backend variance (short 1898/2463 ms; long 1676/6956 ms first-visible median/p95). Because the request semantics now include Codex identity, cache key, and continuation metadata, the old and new HTTP payloads are not byte-identical. The historical prewarm candidate improved fresh WebSocket median first-visible latency by about 15%, but the current default `auto` skips speculative `generate:false` requests after a live timeout observation; explicit `enabled` remains available for controlled measurement. Compression remains thresholded rather than forced for small requests.
+
+### Full Provider-path run
+
+Model: `gpt-5.5`. Samples: 10 per scenario. This run uses the full provider
+path and the same minimal `OK` workload for every scenario. It is not directly
+comparable to the earlier transport-only table.
+
+| Scenario | Provider-to-first-visible median / p95 | Total median / p95 | Model resolution median | Request preparation median | Median request bytes | Reuse |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| First HTTP request | 2642 / 4962 ms | 2723 / 5456 ms | 316 ms | 0.073 ms | 991 | 0% |
+| Direct selected-model HTTP | 1756 / 3073 ms | 1874 / 3175 ms | 0 ms | 0.025 ms | 991 | 0% |
+| WebSocket, verified preconnected | 1774 / 2698 ms | 1842 / 2908 ms | 0 ms | 0.038 ms | 1055 | 0% |
+| WebSocket, previous-response reuse | 1698 / 2194 ms | 1806 / 2257 ms | 1 ms | 0.042 ms | 1061 | 100% |
+
+The direct selected-model path removes the model-directory wait from this
+workload. The remaining first-visible time is dominated by backend request and
+generation phases rather than local request preparation, which remains below
+0.1 ms at the median for this no-tool workload.
 
 ## Real-backend functional validation
 
-- `gpt-5.5`: HTTP initial + recovery continuation passed 5/5 runs.
-- `gpt-5.5`: WebSocket prewarm + reused continuation passed 5/5 runs, always reporting `[false, true]` connection reuse and no fallback.
+- `gpt-5.5`, HTTP, low reasoning, disabled prewarm: initial response succeeded; `store: false` ordinary continuation rejected `previous_response_id` and recovered to `PONG` with full input.
+- `gpt-5.5`, WebSocket, medium reasoning, enabled prewarm: identity-free preconnection was claimed by the formal request, the 400 ms prewarm timed out and was discarded, and the next turn reused the response session without fallback.
+- `gpt-5.5`, `auto`, high reasoning, auto prewarm: `skipped-auto` was recorded, the preconnected socket was claimed, and the next turn reused the response session without fallback.
+- `gpt-5.5`, WebSocket tool loop, disabled prewarm: 5/5 side-effect-free probes rejected standalone incremental tool output and recovered via full replay with one initial tool call and no duplicate output.
 - `gpt-5.6-sol`: HTTP initial and WebSocket prewarm + reused continuation passed.
 - `auto`: a deliberately unavailable direct WebSocket route fell back to HTTP for only that session and completed successfully.

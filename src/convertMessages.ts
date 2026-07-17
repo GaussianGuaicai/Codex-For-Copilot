@@ -468,8 +468,8 @@ function findMatchingPrefix(
         matchedPrefixCount: index,
         mismatch: {
           index,
-          previousItemSummary: stableSerialize(previousItem).slice(0, 400),
-          currentItemSummary: stableSerialize(currentItem).slice(0, 400)
+          previousItemSummary: summarizeResponsesInputMessageForLog(previousInput[index]),
+          currentItemSummary: summarizeResponsesInputMessageForLog(currentInput[index])
         }
       };
     }

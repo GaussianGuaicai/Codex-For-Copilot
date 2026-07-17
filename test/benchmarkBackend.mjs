@@ -81,6 +81,9 @@ async function benchmark(scenario, operation) {
     totalP95Ms: percentile(samples.map((sample) => sample.totalMs), 0.95),
     requestBytesMedian: percentile(samples.map((sample) => sample.requestBytes), 0.5),
     compressedBytesMedian: percentile(samples.map((sample) => sample.compressedBytes), 0.5),
+    requestBuildMedianMs: percentile(samples.map((sample) => sample.requestBuildMs), 0.5),
+    toolSchemaBytesMedian: percentile(samples.map((sample) => sample.toolSchemaBytes), 0.5),
+    toolSchemaCacheHitRate: samples.filter((sample) => sample.toolSchemaCacheHit).length / samples.length,
     reuseRate: samples.filter((sample) => sample.connectionReused).length / samples.length,
     fallbackRate: samples.filter((sample) => sample.fallback).length / samples.length
   });
@@ -97,6 +100,9 @@ async function runRequest({
   let firstVisibleMs;
   let requestBytes = 0;
   let compressedBytes = 0;
+  let requestBuildMs = 0;
+  let toolSchemaBytes = 0;
+  let toolSchemaCacheHit = false;
   let connectionReused = false;
   let fallback = false;
   const identity = providedIdentity ?? {
@@ -136,6 +142,9 @@ async function runRequest({
     onTransportMetrics(metrics) {
       requestBytes = Number(metrics.requestBodyBytes ?? requestBytes);
       compressedBytes = Number(metrics.compressedBodyBytes ?? compressedBytes);
+      requestBuildMs = Number(metrics.requestBuildMs ?? requestBuildMs);
+      toolSchemaBytes = Number(metrics.toolSchemaBytes ?? toolSchemaBytes);
+      toolSchemaCacheHit ||= metrics.toolSchemaCacheHit === true;
       connectionReused ||= metrics.connectionReused === true;
     }
   });
@@ -144,6 +153,9 @@ async function runRequest({
     totalMs: Date.now() - startedAt,
     requestBytes,
     compressedBytes,
+    requestBuildMs,
+    toolSchemaBytes,
+    toolSchemaCacheHit,
     connectionReused,
     fallback
   };
