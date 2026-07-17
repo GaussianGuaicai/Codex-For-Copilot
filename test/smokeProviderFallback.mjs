@@ -238,7 +238,7 @@ async function runModelCatalogMetadataSmokeTest() {
       'API-key catalog filters API-ineligible models while retaining Auto Review policy'
     );
 
-    const resolvedModels = buildProviderModels(config, accountCatalog);
+    const resolvedModels = buildProviderModels(config, accountCatalog, 'codexAccessToken');
     const gpt54 = resolvedModels.find((model) => model.requestModel === 'gpt-5.4');
     const spark = resolvedModels.find((model) => model.requestModel === 'gpt-5.3-codex-spark');
     const autoReview = resolvedModels.find((model) => model.requestModel === 'codex-auto-review');
@@ -273,7 +273,7 @@ async function runModelCatalogMetadataSmokeTest() {
         context_window: 333000,
         max_context_window: 1000000
       })
-    ])[0];
+    ], 'codexAccessToken')[0];
     assertEqual(discoveredOverride.info.maxInputTokens, 333000, 'valid discovered context overrides fixed fallback');
 
     const fractionalMetadata = buildProviderModels(config, [
@@ -281,17 +281,92 @@ async function runModelCatalogMetadataSmokeTest() {
         context_window: 0.5,
         max_context_window: 0.5
       })
-    ])[0];
+    ], 'codexAccessToken')[0];
     assertEqual(fractionalMetadata.info.maxInputTokens, 272000, 'fractional context below one uses fixed fallback');
     assertEqual(fractionalMetadata.info.detail?.includes('Maximum context:'), false, 'invalid fractional maximum is omitted');
 
     const sparkFallback = buildFallbackModel({
       ...config,
       model: 'gpt-5.3-codex-spark'
-    });
+    }, 'codexAccessToken');
     assertEqual(sparkFallback.requestModel, 'gpt-5.3-codex-spark', 'Spark fallback request model');
     assertEqual(sparkFallback.info.maxInputTokens, 128000, 'Spark fixed fallback context');
     assertEqual(sparkFallback.info.capabilities?.imageInput, false, 'Spark fallback text-only capability');
+
+    const chatGptConfig = {
+      ...config,
+      baseURL: 'https://chatgpt.com/backend-api/codex/responses'
+    };
+    const rollbackCatalog = [
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 272000, max_context_window: 272000 }),
+      createMockModel('gpt-5.6-terra', 'GPT-5.6-Terra', { context_window: 272000, max_context_window: 272000 }),
+      createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { context_window: 272000, max_context_window: 272000 }),
+      createMockModel('gpt-5.6-nova', 'GPT-5.6-Nova', { context_window: 272000, max_context_window: 272000 })
+    ];
+    const rollbackModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'codexAccessToken');
+    const formattedKnownCeiling = (372000).toLocaleString();
+    for (const slug of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+      const model = rollbackModels.find((candidate) => candidate.requestModel === slug);
+      if (!model) {
+        throw new Error(`Expected ${slug} rollback metadata.`);
+      }
+      assertEqual(model.info.maxInputTokens, 272000, `${slug} keeps authenticated active context`);
+      assertEqual(
+        model.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
+        true,
+        `${slug} shows known raw context ceiling`
+      );
+      assertEqual(model.info.maxOutputTokens, config.maxOutputTokens, `${slug} output metadata remains configured`);
+      assertEqual(model.info.detail?.includes('500,000'), false, `${slug} does not expose inferred total context`);
+    }
+
+    const unrelatedModel = rollbackModels.find((model) => model.requestModel === 'gpt-5.6-nova');
+    assertEqual(unrelatedModel?.info.detail?.includes('Known raw context ceiling:'), false, 'unrelated GPT-5.6 model is unchanged');
+
+    const apiKeyModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'openaiApiKey');
+    assertEqual(
+      apiKeyModels.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
+      false,
+      'API-key catalog omits Codex account ceilings'
+    );
+
+    const customBackendModels = buildProviderModels(config, rollbackCatalog, 'codexAccessToken');
+    assertEqual(
+      customBackendModels.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
+      false,
+      'custom backend catalog omits ChatGPT Codex ceilings'
+    );
+
+    for (const baseURL of [
+      'https://chatgpt.com:444/backend-api/codex/responses',
+      'https://user@chatgpt.com/backend-api/codex/responses',
+      'https://chatgpt.com/backend-api/codex/responses?proxy=1',
+      'https://chatgpt.com/backend-api/codex/responses#proxy'
+    ]) {
+      const models = buildProviderModels({ ...chatGptConfig, baseURL }, rollbackCatalog, 'codexAccessToken');
+      assertEqual(
+        models.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
+        false,
+        `noncanonical backend ${baseURL} omits known ceilings`
+      );
+    }
+
+    const promotedModel = buildProviderModels(chatGptConfig, [
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 372000, max_context_window: 372000 })
+    ], 'codexAccessToken')[0];
+    assertEqual(promotedModel.info.maxInputTokens, 372000, 'future 372K catalog value becomes active');
+    assertEqual(promotedModel.info.detail?.includes('Known raw context ceiling:'), false, 'active 372K omits redundant known ceiling');
+
+    const fallbackCeiling = buildFallbackModel({
+      ...chatGptConfig,
+      model: 'gpt-5.6-sol'
+    }, 'codexAccessToken');
+    assertEqual(fallbackCeiling.info.maxInputTokens, 272000, 'fallback keeps conservative active context');
+    assertEqual(
+      fallbackCeiling.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
+      true,
+      'fallback shows known raw context ceiling'
+    );
     assertEqual(catalogRequestCount, 2, 'credential-kind catalog request count');
   } finally {
     server.close();
