@@ -1,0 +1,65 @@
+name: Marketplace Identity Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    name: Verify Microsoft Entra marketplace identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: marketplace
+
+    steps:
+      - name: Validate Microsoft Entra configuration
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          missing=0
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing GitHub environment variable ${name} in the marketplace environment."
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Sign in to Microsoft Entra ID
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Marketplace identity profile
+        shell: bash
+        run: |
+          PROFILE_ID="$(az rest \
+            --method get \
+            --url https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+            --query id \
+            --output tsv)"
+
+          if [[ -z "${PROFILE_ID}" ]]; then
+            echo "::error::Microsoft Entra login succeeded, but no Azure DevOps identity profile ID was returned."
+            exit 1
+          fi
+
+          {
+            echo "## Marketplace identity is available"
+            echo
+            echo "Add this identity profile ID to the \`Gaussian\` Visual Studio Marketplace publisher as a **Contributor**:"
+            echo
+            echo "\`${PROFILE_ID}\`"
+            echo
+            echo "The workflow used GitHub OIDC and did not use a stored client secret or Marketplace PAT."
+          } >> "$GITHUB_STEP_SUMMARY"
