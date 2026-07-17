@@ -87,6 +87,8 @@ npm run package:vsix
 
 `npm run test:smoke` runs self-contained checks for HTTP/WebSocket parity, transport fallback, provider model availability, conversation reuse, account usage, and authentication. `npm run test:real-backend` talks to the live Codex backend and expects valid Codex credentials. Set `CODEX_TEST_TRANSPORT=websocket` or `auto` to probe that transport, and set `CODEX_TEST_CONTINUATION=1` to include a follow-up request using `previous_response_id`.
 
+Release versioning, GitHub Release creation, and keyless Microsoft Entra ID Marketplace publishing are documented in [docs/releasing.md](docs/releasing.md).
+
 ## Troubleshooting
 
 - If the model does not appear, confirm credentials are present and VS Code is new enough.
