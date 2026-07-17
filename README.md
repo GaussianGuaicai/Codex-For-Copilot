@@ -45,6 +45,8 @@ npm run compile
 
 Press F5 in VS Code to launch an Extension Development Host.
 
+The extension also works when the current workspace is opened over Remote-SSH. It is intentionally run in the local UI extension host, so it uses the credentials already stored on your local computer. Do not install a second remote copy of the extension on the SSH host; after updating, run `Developer: Show Running Extensions` and confirm that `Codex For Copilot` is running locally.
+
 ## Configuration
 
 Common settings:
@@ -86,6 +88,8 @@ npm run package:vsix
 ```
 
 `npm run test:smoke` runs self-contained checks for HTTP/WebSocket parity, transport fallback, provider model availability, conversation reuse, account usage, and authentication. `npm run test:real-backend` talks to the live Codex backend and expects valid Codex credentials. Set `CODEX_TEST_TRANSPORT=websocket` or `auto` to probe that transport, and set `CODEX_TEST_CONTINUATION=1` to include a follow-up request using `previous_response_id`. `CODEX_BENCHMARK_BACKEND=1 npm run test:benchmark-provider` measures the complete provider path; set `CODEX_BENCHMARK_ITERATIONS` to control sample count.
+
+Release versioning, GitHub Release creation, and keyless Microsoft Entra ID Marketplace publishing are documented in [docs/releasing.md](docs/releasing.md).
 
 ## Troubleshooting
 

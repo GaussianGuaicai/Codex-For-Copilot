@@ -755,7 +755,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     onCacheState?: (state: CodexModelCacheState | 'fallback') => void
   ): Promise<ResolvedProviderModel[]> {
     const authIdentity = getCredentialIdentity(credentials);
-    const cacheKey = buildModelCacheKey(config, credentials.source, authIdentity);
+    const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
     try {
       const lookup = await this.modelCache.get(
         cacheKey,
@@ -777,7 +777,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       }
       return lookup.value;
     } catch {
-      const fallbackModels = this.applyModelDiscoveryPolicy([buildFallbackModel(config)], config, authIdentity);
+      const fallbackModels = this.applyModelDiscoveryPolicy([buildFallbackModel(config, credentials.kind)], config, authIdentity);
       this.modelCache.set(cacheKey, fallbackModels, {
         freshTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS,
         staleTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS
@@ -797,7 +797,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     authIdentity: string
   ): Promise<ResolvedProviderModel[]> {
     const upstreamModels = await fetchAvailableModels(config, credentials, token);
-    const models = this.applyModelDiscoveryPolicy(buildProviderModels(config, upstreamModels), config, authIdentity);
+    const models = this.applyModelDiscoveryPolicy(buildProviderModels(config, upstreamModels, credentials.kind), config, authIdentity);
     this.outputChannel.info('getAvailableModels discovery success', {
       discoveredCount: upstreamModels.length,
       returnedCount: models.length,
@@ -813,7 +813,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     authIdentity: string
   ): void {
     this.runtimeAvailability.markTemporarilyUnavailable(model, config, authIdentity);
-    const cacheKey = buildModelCacheKey(config, credentials.source, authIdentity);
+    const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
     this.modelCache.invalidate(cacheKey);
     this.modelInfoChangedEmitter.fire();
     this.outputChannel.warn('model marked unavailable after responses rejection', {
@@ -1063,6 +1063,7 @@ function collectErrorMessages(error: unknown): string[] {
 function buildModelCacheKey(
   config: ProviderConfig,
   credentialSource: string,
+  credentialKind: string,
   authIdentity: string
 ): string {
   return [
@@ -1077,6 +1078,7 @@ function buildModelCacheKey(
     config.defaultReasoningEffort ?? 'auto',
     config.maxOutputTokens,
     credentialSource,
+    credentialKind,
     authIdentity
   ].join('|');
 }

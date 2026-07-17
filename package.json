@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -20,6 +20,9 @@
   "activationEvents": [
     "onLanguageModelChatProvider:codex-for-copilot",
     "onStartupFinished"
+  ],
+  "extensionKind": [
+    "ui"
   ],
   "main": "./out/extension.js",
   "scripts": {

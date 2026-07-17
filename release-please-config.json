@@ -1,0 +1,13 @@
+{
+  "bootstrap-sha": "8432528818eb60ea5b2c1ff00c1c0e96ecbf09a8",
+  "release-type": "node",
+  "draft": true,
+  "force-tag-creation": true,
+  "include-component-in-tag": false,
+  "packages": {
+    ".": {
+      "package-name": "codex-for-copilot",
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}
