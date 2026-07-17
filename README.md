@@ -55,12 +55,18 @@ Common settings:
 - `codexModelProvider.credentialsSource`: `auto`, `codexAuth`, or `secretStorage`. `auto` prefers the Codex auth manager, then the legacy `~/.codex/auth.json` fallback, then SecretStorage.
 - `codexModelProvider.transport`: `auto`, `http`, or `websocket`. `auto` prefers WebSocket and falls back to HTTP only when the WebSocket transport is unavailable; API errors are returned directly.
 - `codexModelProvider.model`: fallback model when discovery fails
-- `codexModelProvider.disabledModels`: model IDs to hide when the backend advertises a model that should not appear in the picker
-- `codexModelProvider.modelAliases`: map stale or rejected model IDs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`
+- `codexModelProvider.disabledModels`: real backend model slugs to hide when an advertised model should not appear in the picker; one slug hides all of its local profiles
+- `codexModelProvider.modelAliases`: map stale or rejected real backend model slugs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`; one mapping applies to all local profiles
 - `codexModelProvider.instructions`: top-level Responses API instructions sent with every request
 - `codexModelProvider.defaultServiceTier`: default `service_tier` behavior
 - `codexModelProvider.defaultReasoningEffort`: fallback Thinking Effort setting
 - `codexModelProvider.maxOutputTokens`: maximum output tokens when supported
+
+## Context-window profiles
+
+Standard model entries advertise a usable input budget equal to 95% of the backend's active raw context window. When supported and not already active, the picker also shows a separate **Long context** entry: GPT-5.4 at 950,000 usable tokens when discovery reports a 1,000,000-token maximum, and GPT-5.6 Sol/Terra/Luna at 353,400 usable tokens for Codex access-token accounts on the canonical ChatGPT Codex backend.
+
+Profile suffixes such as `::context=1000000` are local picker IDs only. Standard and long entries send the same real backend model slug; the extension does not add a context-window or long-context field to Responses requests.
 
 ## Commands
 
