@@ -488,7 +488,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     config: ProviderConfig,
     availableModels: readonly ResolvedProviderModel[]
   ): ParsedModelIdentifier {
-    const requestedModel = parseModelIdentifier(modelId || config.model);
+    const parsedModel = parseModelIdentifier(modelId || config.model);
+    const exactAvailableModel = modelId
+      ? availableModels.find((candidate) => candidate.info.id === modelId)
+      : undefined;
+    const requestedModel = {
+      requestModel: exactAvailableModel?.requestModel ?? parsedModel.requestModel,
+      reasoningEffort: parsedModel.reasoningEffort
+    };
     const availableModelNames = new Set(availableModels.map((candidate) => candidate.requestModel));
 
     const aliasedModel = this.resolveModelAlias(requestedModel.requestModel, config.modelAliases, availableModels);
