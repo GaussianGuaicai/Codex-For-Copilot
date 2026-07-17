@@ -56,12 +56,11 @@ Optionally add required reviewers so every Marketplace deployment receives a sec
 
 ### 2. Create a user-assigned managed identity
 
-Create a user-assigned managed identity in the Microsoft Entra tenant connected to the Visual Studio Marketplace publisher. The Azure CLI example below uses placeholders:
+Create a user-assigned managed identity in the Microsoft Entra tenant connected to the Visual Studio Marketplace publisher:
 
 ```bash
 RESOURCE_GROUP=<azure-resource-group>
 IDENTITY_NAME=codex-for-copilot-marketplace
-SUBSCRIPTION_ID=<azure-subscription-id>
 
 az identity create \
   --resource-group "$RESOURCE_GROUP" \
@@ -73,24 +72,10 @@ AZURE_CLIENT_ID="$(az identity show \
   --query clientId \
   --output tsv)"
 
-PRINCIPAL_ID="$(az identity show \
-  --resource-group "$RESOURCE_GROUP" \
-  --name "$IDENTITY_NAME" \
-  --query principalId \
-  --output tsv)"
-
 AZURE_TENANT_ID="$(az account show --query tenantId --output tsv)"
 ```
 
-Assign the minimum Azure role required for the identity to be usable by `azure/login`. The official VS Code publishing guide specifies `Reader`; scope it to the identity's resource group rather than the whole subscription when possible:
-
-```bash
-az role assignment create \
-  --assignee-object-id "$PRINCIPAL_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role Reader \
-  --scope "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}"
-```
+The GitHub workflows perform a tenant-scoped Entra login with `allow-no-subscriptions: true`. The managed identity therefore does not need a Reader role or any other Azure RBAC assignment merely to publish to Visual Studio Marketplace. Marketplace authorization is configured separately through the publisher membership described below.
 
 ### 3. Trust the GitHub environment through OIDC
 
@@ -116,9 +101,8 @@ In **Settings → Environments → marketplace → Environment variables**, add:
 | --- | --- |
 | `AZURE_CLIENT_ID` | Managed identity client ID |
 | `AZURE_TENANT_ID` | Microsoft Entra tenant ID |
-| `AZURE_SUBSCRIPTION_ID` | Azure subscription ID |
 
-These identifiers are not credentials and do not need to be stored as secrets. No client secret is required.
+These identifiers are not credentials and do not need to be stored as secrets. No client secret or subscription ID is required.
 
 ### 5. Resolve the Marketplace identity profile ID
 
