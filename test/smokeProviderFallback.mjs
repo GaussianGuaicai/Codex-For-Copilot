@@ -8,6 +8,7 @@ import { build } from 'esbuild';
 
 const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-provider-fallback-'));
 const bundlePath = join(tempDir, 'provider.cjs');
+const modelsBundlePath = join(tempDir, 'models.cjs');
 const moduleLoad = Module._load;
 const require = createRequire(import.meta.url);
 
@@ -134,6 +135,16 @@ await build({
   external: ['vscode']
 });
 
+await build({
+  entryPoints: ['src/models.ts'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node20',
+  outfile: modelsBundlePath,
+  external: ['vscode']
+});
+
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === 'vscode') {
     return vscodeMock;
@@ -143,8 +154,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const { CodexModelProvider } = require(bundlePath);
+const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
 
 try {
+  await runModelCatalogMetadataSmokeTest();
   await runProviderFallbackSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
@@ -154,6 +167,135 @@ try {
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+async function runModelCatalogMetadataSmokeTest() {
+  const catalog = [
+    createMockModel('gpt-5.4', 'GPT-5.4', {
+      context_window: 272000,
+      max_context_window: 1000000,
+      input_modalities: ['text', 'image']
+    }),
+    createMockModel('gpt-5.3-codex-spark', 'GPT-5.3-Codex-Spark', {
+      context_window: 128000,
+      max_context_window: 128000,
+      input_modalities: ['text'],
+      supported_in_api: false
+    }),
+    createMockModel('codex-auto-review', 'Codex Auto Review', {
+      context_window: 272000,
+      max_context_window: 1000000,
+      input_modalities: ['text', 'image'],
+      visibility: 'hide'
+    })
+  ];
+  let catalogRequestCount = 0;
+  const server = createServer((request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      catalogRequestCount += 1;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: catalog }));
+      return;
+    }
+
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'unexpected request' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const config = {
+    ...configValues,
+    baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`
+  };
+  const sharedCredentials = {
+    apiKey: 'test-api-key',
+    headers: { 'User-Agent': 'model-catalog-smoke' },
+    source: 'codexAuth',
+    omitMaxOutputTokens: true
+  };
+
+  try {
+    const token = createCancellationToken();
+    const accountCatalog = await fetchAvailableModels(config, {
+      ...sharedCredentials,
+      kind: 'codexAccessToken'
+    }, token);
+    const apiKeyCatalog = await fetchAvailableModels(config, {
+      ...sharedCredentials,
+      kind: 'openaiApiKey',
+      omitMaxOutputTokens: false
+    }, token);
+
+    assertEqual(
+      accountCatalog.map((model) => model.slug).join(','),
+      'gpt-5.4,gpt-5.3-codex-spark,codex-auto-review',
+      'Codex account catalog retains API-ineligible account models and hidden Auto Review'
+    );
+    assertEqual(
+      apiKeyCatalog.map((model) => model.slug).join(','),
+      'gpt-5.4,codex-auto-review',
+      'API-key catalog filters API-ineligible models while retaining Auto Review policy'
+    );
+
+    const resolvedModels = buildProviderModels(config, accountCatalog);
+    const gpt54 = resolvedModels.find((model) => model.requestModel === 'gpt-5.4');
+    const spark = resolvedModels.find((model) => model.requestModel === 'gpt-5.3-codex-spark');
+    const autoReview = resolvedModels.find((model) => model.requestModel === 'codex-auto-review');
+    if (!gpt54 || !spark || !autoReview) {
+      throw new Error('Expected GPT-5.4, Spark, and Auto Review model metadata.');
+    }
+
+    const formattedActiveContext = (272000).toLocaleString();
+    const formattedMaximumContext = (1000000).toLocaleString();
+    assertEqual(gpt54.info.maxInputTokens, 272000, 'GPT-5.4 active context');
+    assertEqual(
+      gpt54.info.detail?.includes(
+        `Context: ${formattedActiveContext} tokens (active) | Maximum context: ${formattedMaximumContext} tokens (opt-in)`
+      ),
+      true,
+      'GPT-5.4 active and maximum context detail'
+    );
+    assertEqual(autoReview.info.maxInputTokens, 272000, 'Auto Review active context');
+    assertEqual(
+      autoReview.info.detail?.includes(`Maximum context: ${formattedMaximumContext} tokens (opt-in)`),
+      true,
+      'Auto Review maximum context detail'
+    );
+    assertEqual(spark.info.id, 'codex::gpt-5.3-codex-spark', 'Spark provider model id');
+    assertEqual(spark.info.maxInputTokens, 128000, 'Spark active context');
+    assertEqual(spark.info.capabilities?.imageInput, false, 'Spark text-only capability');
+    assertEqual(spark.info.capabilities?.toolCalling, true, 'Spark tool capability');
+    assertEqual(spark.info.detail?.includes('Maximum context:'), false, 'Spark omits redundant maximum context');
+
+    const discoveredOverride = buildProviderModels(config, [
+      createMockModel('gpt-5.4', 'GPT-5.4', {
+        context_window: 333000,
+        max_context_window: 1000000
+      })
+    ])[0];
+    assertEqual(discoveredOverride.info.maxInputTokens, 333000, 'valid discovered context overrides fixed fallback');
+
+    const fractionalMetadata = buildProviderModels(config, [
+      createMockModel('gpt-5.4', 'GPT-5.4', {
+        context_window: 0.5,
+        max_context_window: 0.5
+      })
+    ])[0];
+    assertEqual(fractionalMetadata.info.maxInputTokens, 272000, 'fractional context below one uses fixed fallback');
+    assertEqual(fractionalMetadata.info.detail?.includes('Maximum context:'), false, 'invalid fractional maximum is omitted');
+
+    const sparkFallback = buildFallbackModel({
+      ...config,
+      model: 'gpt-5.3-codex-spark'
+    });
+    assertEqual(sparkFallback.requestModel, 'gpt-5.3-codex-spark', 'Spark fallback request model');
+    assertEqual(sparkFallback.info.maxInputTokens, 128000, 'Spark fixed fallback context');
+    assertEqual(sparkFallback.info.capabilities?.imageInput, false, 'Spark fallback text-only capability');
+    assertEqual(catalogRequestCount, 2, 'credential-kind catalog request count');
+  } finally {
+    server.close();
+  }
 }
 
 async function runProviderFallbackSmokeTest() {
