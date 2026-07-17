@@ -512,6 +512,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
         onEvent: (event) => {
           if (event.type === 'response.output_text.delta'
             || event.type === 'response.reasoning_text.delta'
+            || event.type === 'response.function_call_arguments.done'
             || event.type === 'response.output_item.done') {
             visibleActivity = true;
           }
@@ -533,6 +534,12 @@ async function streamCodexResponseTextOverManagedWebSocket(
         managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
         options.onTransportMetrics?.({ retryReason: 'websocket_connection_limit_reached' });
         continue;
+      }
+      if (visibleActivity && classified instanceof WebSocketTransportUnavailableError) {
+        throw new WebSocketTransportUnavailableError(classified.message, {
+          cause: classified,
+          fallbackAllowed: false
+        });
       }
       throw classified;
     }
@@ -978,7 +985,7 @@ function shouldFallbackToHttp(
     return false;
   }
 
-  return error instanceof WebSocketTransportUnavailableError;
+  return error instanceof WebSocketTransportUnavailableError && error.fallbackAllowed;
 }
 
 function getMismatchedModelNotFoundName(error: { error?: { message?: string | null } | undefined; message: string } | string | undefined, requestedModel: string): string | undefined {
@@ -1042,10 +1049,17 @@ function collectErrorMessages(error: unknown): string[] {
   return messages;
 }
 
+interface WebSocketTransportUnavailableErrorOptions extends ErrorOptions {
+  fallbackAllowed?: boolean;
+}
+
 class WebSocketTransportUnavailableError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly fallbackAllowed: boolean;
+
+  constructor(message: string, options?: WebSocketTransportUnavailableErrorOptions) {
     super(message, options);
     this.name = 'WebSocketTransportUnavailableError';
+    this.fallbackAllowed = options?.fallbackAllowed ?? true;
   }
 }
 
