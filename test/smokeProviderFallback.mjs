@@ -18,6 +18,7 @@ const configValues = {
   credentialsSource: 'secretStorage',
   transport: 'http',
   model: 'gpt-5.5',
+  includeHiddenModels: false,
   instructions: 'Smoke test instructions',
   defaultServiceTier: 'auto',
   defaultReasoningEffort: 'auto',
@@ -175,7 +176,14 @@ async function runModelCatalogMetadataSmokeTest() {
     createMockModel('gpt-5.4', 'GPT-5.4', {
       context_window: 272000,
       max_context_window: 1000000,
-      input_modalities: ['text', 'image']
+      input_modalities: ['text', 'image'],
+      visibility: 'hide'
+    }),
+    createMockModel('gpt-5.4-mini', 'GPT-5.4-Mini', {
+      context_window: 272000,
+      max_context_window: 272000,
+      input_modalities: ['text', 'image'],
+      visibility: 'hide'
     }),
     createMockModel('gpt-5.3-codex-spark', 'GPT-5.3-Codex-Spark', {
       context_window: 128000,
@@ -218,34 +226,45 @@ async function runModelCatalogMetadataSmokeTest() {
 
   try {
     const token = createCancellationToken();
-    const accountCatalog = await fetchAvailableModels(config, {
+    const defaultAccountCatalog = await fetchAvailableModels(config, {
       ...sharedCredentials,
       kind: 'codexAccessToken'
     }, token);
-    const apiKeyCatalog = await fetchAvailableModels(config, {
+    const includeHiddenConfig = { ...config, includeHiddenModels: true };
+    const accountCatalog = await fetchAvailableModels(includeHiddenConfig, {
+      ...sharedCredentials,
+      kind: 'codexAccessToken'
+    }, token);
+    const apiKeyCatalog = await fetchAvailableModels(includeHiddenConfig, {
       ...sharedCredentials,
       kind: 'openaiApiKey',
       omitMaxOutputTokens: false
     }, token);
 
     assertEqual(
+      defaultAccountCatalog.map((model) => model.slug).join(','),
+      'gpt-5.3-codex-spark,codex-auto-review',
+      'hidden upstream models stay filtered by default while hidden Auto Review remains available'
+    );
+    assertEqual(
       accountCatalog.map((model) => model.slug).join(','),
-      'gpt-5.4,gpt-5.3-codex-spark,codex-auto-review',
-      'Codex account catalog retains API-ineligible account models and hidden Auto Review'
+      'gpt-5.4,gpt-5.4-mini,gpt-5.3-codex-spark,codex-auto-review',
+      'Codex account opt-in retains hidden callable models and API-ineligible account models'
     );
     assertEqual(
       apiKeyCatalog.map((model) => model.slug).join(','),
-      'gpt-5.4,codex-auto-review',
-      'API-key catalog filters API-ineligible models while retaining Auto Review policy'
+      'gpt-5.4,gpt-5.4-mini,codex-auto-review',
+      'API-key hidden-model opt-in still filters API-ineligible models'
     );
 
     const resolvedModels = buildProviderModels(config, accountCatalog, 'codexAccessToken');
     const gpt54 = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4');
     const gpt54Long = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4::context=1000000');
+    const gpt54Mini = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4-mini');
     const spark = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.3-codex-spark');
     const autoReview = resolvedModels.find((model) => model.info.id === 'codex::codex-auto-review');
-    if (!gpt54 || !gpt54Long || !spark || !autoReview) {
-      throw new Error('Expected GPT-5.4 standard/long, Spark, and Auto Review model metadata.');
+    if (!gpt54 || !gpt54Long || !gpt54Mini || !spark || !autoReview) {
+      throw new Error('Expected GPT-5.4 standard/long, GPT-5.4-Mini, Spark, and Auto Review model metadata.');
     }
 
     const formattedActiveContext = (272000).toLocaleString();
@@ -277,6 +296,12 @@ async function runModelCatalogMetadataSmokeTest() {
       JSON.stringify(gpt54Long.info.configurationSchema),
       JSON.stringify(gpt54.info.configurationSchema),
       'GPT-5.4 profiles preserve reasoning configuration'
+    );
+    assertEqual(gpt54Mini.info.maxInputTokens, 272000, 'GPT-5.4-Mini context passes through unchanged');
+    assertEqual(
+      resolvedModels.some((model) => model.info.id.startsWith('codex::gpt-5.4-mini::context=')),
+      false,
+      'GPT-5.4-Mini omits a redundant long profile'
     );
     assertEqual(autoReview.info.maxInputTokens, 272000, 'Auto Review standard context');
     assertEqual(
@@ -488,7 +513,7 @@ async function runModelCatalogMetadataSmokeTest() {
       true,
       'fallback shows known raw context ceiling'
     );
-    assertEqual(catalogRequestCount, 2, 'credential-kind catalog request count');
+    assertEqual(catalogRequestCount, 3, 'visibility and credential-kind catalog request count');
   } finally {
     server.close();
   }

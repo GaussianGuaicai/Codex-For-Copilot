@@ -149,7 +149,7 @@ export async function fetchAvailableModels(
 
   return discovered
     .filter(isUpstreamModel)
-    .filter((model) => isModelVisible(model, credentials.kind));
+    .filter((model) => isModelVisible(model, credentials.kind, config.includeHiddenModels));
 }
 
 export function buildProviderModels(
@@ -530,7 +530,11 @@ function isUpstreamModel(value: unknown): value is UpstreamModel {
   return typeof value === 'object' && value !== null;
 }
 
-function isModelVisible(model: UpstreamModel, credentialKind: ApiCredentials['kind']): boolean {
+function isModelVisible(
+  model: UpstreamModel,
+  credentialKind: ApiCredentials['kind'],
+  includeHiddenModels: boolean
+): boolean {
   if (credentialKind === 'openaiApiKey' && model.supported_in_api === false) {
     return false;
   }
@@ -543,7 +547,7 @@ function isModelVisible(model: UpstreamModel, credentialKind: ApiCredentials['ki
   if (typeof model.visibility === 'string') {
     const visibility = model.visibility.trim().toLowerCase();
     if (visibility === 'hidden' || visibility === 'hide') {
-      return false;
+      return includeHiddenModels;
     }
   }
 

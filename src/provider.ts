@@ -702,6 +702,7 @@ function buildModelCacheKey(
     config.credentialsSource,
     config.transport,
     config.model,
+    config.includeHiddenModels,
     config.disabledModels.join(','),
     stableSerialize(config.modelAliases),
     config.defaultServiceTier ?? 'auto',
