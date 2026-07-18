@@ -55,6 +55,7 @@ Common settings:
 - `codexModelProvider.credentialsSource`: `auto`, `codexAuth`, or `secretStorage`. `auto` prefers the Codex auth manager, then the legacy `~/.codex/auth.json` fallback, then SecretStorage.
 - `codexModelProvider.transport`: `auto`, `http`, or `websocket`. `auto` prefers WebSocket and falls back to HTTP only when the WebSocket transport is unavailable; API errors are returned directly.
 - `codexModelProvider.model`: fallback model when discovery fails
+- `codexModelProvider.includeHiddenModels`: opt in to callable models that the upstream catalog marks hidden; defaults to `false`
 - `codexModelProvider.disabledModels`: real backend model slugs to hide when an advertised model should not appear in the picker; one slug hides all of its local profiles
 - `codexModelProvider.modelAliases`: map stale or rejected real backend model slugs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`; one mapping applies to all local profiles
 - `codexModelProvider.instructions`: top-level Responses API instructions sent with every request
