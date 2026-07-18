@@ -1,9 +1,12 @@
 const assert = require('node:assert');
+const { writeFile } = require('node:fs/promises');
 const { createServer } = require('node:http');
 const vscode = require('vscode');
+const manifest = require('../package.json');
 
 async function run() {
-  const extension = vscode.extensions.getExtension('local.codex-for-copilot');
+  const extensionId = `${manifest.publisher}.${manifest.name}`.toLowerCase();
+  const extension = vscode.extensions.getExtension(extensionId);
   assert(extension, 'Extension is not registered in VS Code.');
 
   await extension.activate();
@@ -84,21 +87,23 @@ async function run() {
   const config = vscode.workspace.getConfiguration('codexModelProvider');
   const originalBaseURL = config.inspect('baseURL')?.globalValue;
   const originalInstructions = config.inspect('instructions')?.globalValue;
+  const originalTransport = config.inspect('transport')?.globalValue;
   const originalIncludeHiddenModels = config.inspect('includeHiddenModels')?.globalValue;
 
   try {
     await config.update('baseURL', `http://127.0.0.1:${address.port}/backend-api/codex/responses`, vscode.ConfigurationTarget.Global);
     await config.update('instructions', 'Extension host smoke instructions', vscode.ConfigurationTarget.Global);
+    await config.update('transport', 'http', vscode.ConfigurationTarget.Global);
     await config.update('includeHiddenModels', true, vscode.ConfigurationTarget.Global);
 
     const models = await vscode.lm.selectChatModels({ vendor: 'codex-for-copilot' });
     assert(models.length > 0, 'No codex-for-copilot language model was selectable.');
-    assert.strictEqual(models[0].name, 'GPT-5.4 (Codex)');
-    assert.strictEqual(models[0].id, 'codex-for-copilot::gpt-5.4');
+    assert.strictEqual(models[0].name, 'GPT-5.4');
+    assert.strictEqual(models[0].id, 'codex::gpt-5.4');
     assert.strictEqual(models[0].family, 'gpt-5.4');
     assert.strictEqual(models[0].maxInputTokens, 272000);
-    assert.strictEqual(models[1].name, 'GPT-5.4 (Long context) (Codex)');
-    assert.strictEqual(models[1].id, 'codex-for-copilot::gpt-5.4::context=1000000');
+    assert.strictEqual(models[1].name, 'GPT-5.4 (Long context)');
+    assert.strictEqual(models[1].id, 'codex::gpt-5.4::context=1000000');
     assert.strictEqual(models[1].family, 'gpt-5.4');
     assert.strictEqual(models[1].maxInputTokens, 1000000);
     assert.strictEqual(models.length, 2);
@@ -111,10 +116,14 @@ async function run() {
     }
 
     assert.strictEqual(text, 'VS Code smoke passed');
+    if (process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH) {
+      await writeFile(process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH, JSON.stringify({ passed: true }));
+    }
     console.log(`Extension host smoke passed: selected and streamed with ${models[0].vendor}/${models[0].id}.`);
   } finally {
     await config.update('baseURL', originalBaseURL, vscode.ConfigurationTarget.Global);
     await config.update('instructions', originalInstructions, vscode.ConfigurationTarget.Global);
+    await config.update('transport', originalTransport, vscode.ConfigurationTarget.Global);
     await config.update('includeHiddenModels', originalIncludeHiddenModels, vscode.ConfigurationTarget.Global);
     server.close();
   }
