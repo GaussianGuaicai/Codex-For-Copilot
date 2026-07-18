@@ -63,6 +63,10 @@ Common settings:
 - `codexModelProvider.defaultReasoningEffort`: fallback Thinking Effort setting
 - `codexModelProvider.maxOutputTokens`: maximum output tokens when supported
 
+## Testing VS Code Chat integration
+
+`code chat --mode agent` can open an Agent-mode chat, but the VS Code CLI does not select a language model. Use the model picker for manual Chat validation. For an automated provider boundary check, run `npm run test:extension-host`: it starts an isolated Extension Development Host, selects this extension through `vscode.lm.selectChatModels()`, and validates a complete tool-call/result loop. The WebSocket tool-output continuation protocol remains internally guarded until its real-backend release gate has sufficient evidence; production keeps complete replay as the compatibility default.
+
 ## Commands
 
 - `Codex: Manage`

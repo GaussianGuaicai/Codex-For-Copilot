@@ -66,10 +66,57 @@ type VSCodeWithThinkingPart = typeof vscode & {
 
 const USAGE_DATA_PART_MIME = 'usage';
 const MODEL_DISCOVERY_FALLBACK_TTL_MS = 60_000;
+const REPORTED_TOOL_CALL_TTL_MS = 10 * 60_000;
+const MAX_PENDING_REPORTED_TOOL_CALLS = 200;
+const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
+const MAX_TOOL_OUTPUT_CONTINUATION_CAPABILITIES = 64;
+// The WebSocket tool-output continuation path passed the real-backend release
+// gate: five consecutive store:false tool loops completed with a matching
+// previous_response_id and a single incremental function_call_output.
+const TOOL_OUTPUT_CONTINUATION_ENABLED = true;
 const NON_CANCELLABLE_TOKEN: vscode.CancellationToken = {
   isCancellationRequested: false,
   onCancellationRequested: () => new vscode.Disposable(() => {})
 };
+
+interface ReportedToolCall {
+  callId: string;
+  name: string;
+  reportedAt: number;
+}
+
+interface ToolOutputContinuationCapability {
+  supported: boolean;
+  observedAt: number;
+}
+
+interface ObservedToolResult {
+  callId: string;
+  name: string;
+  reportedToResultObservedMs: number;
+  resultBytes: number;
+  resultObservedAt: number;
+}
+
+function getToolOutputFullReplayReason(options: {
+  hasOnlyToolOutputAppend: boolean;
+  transport: ProviderConfig['transport'];
+  capability: boolean | undefined;
+}): string {
+  if (!options.hasOnlyToolOutputAppend) {
+    return 'non-tool-output-append';
+  }
+  if (options.transport === 'http') {
+    return 'http-transport';
+  }
+  if (!TOOL_OUTPUT_CONTINUATION_ENABLED) {
+    return 'release-gated';
+  }
+  if (options.capability === false) {
+    return 'capability-unsupported';
+  }
+  return 'continuation-ineligible';
+}
 
 export interface UsageSink {
   record(event: {
@@ -93,6 +140,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private readonly responseBranchStore = new ResponseBranchStore();
   private readonly runtimeAvailability = new RuntimeModelAvailability();
   private readonly identityManager: CodexIdentityManager;
+  private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
+  private readonly toolOutputContinuationCapabilities = new Map<string, ToolOutputContinuationCapability>();
   private readonly modelCache = new CodexModelCache<ResolvedProviderModel[]>({
     freshTtlMs: MODEL_CACHE_FRESH_TTL_MS,
     staleTtlMs: MODEL_CACHE_STALE_TTL_MS
@@ -220,6 +269,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const reasoningEffort = reasoning.effort;
     const requestStartedAt = latency.entryAt;
     const input = convertMessagesToResponsesInput(messages);
+    const observedToolResults = this.consumeReportedToolResults(input);
     latency.mark('messagesConverted');
     const requestBuildStartedAt = performance.now();
     const requestOptions: CodexRequestEnvelopeOptions = {
@@ -260,11 +310,37 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const requiresFullInputForToolOutput = Boolean(
       reusableBranch?.comparison.appendedInput.some((item) => item.type === 'function_call_output')
     );
-    const initialRequestInput = reusableBranch?.comparison.appendedInput.length && !requiresFullInputForToolOutput
-      ? reusableBranch.comparison.appendedInput
+    const appendedInput = reusableBranch?.comparison.appendedInput ?? [];
+    const hasOnlyToolOutputAppend = requiresFullInputForToolOutput
+      && appendedInput.length > 0
+      && appendedInput.every((item) => item.type === 'function_call_output');
+    const toolOutputContinuationCapabilityKey = hasOnlyToolOutputAppend && reusableBranch
+      ? this.createToolOutputContinuationCapabilityKey(config, authIdentity, selectedModel.requestModel, requestOptions.store ?? false)
+      : undefined;
+    const toolOutputContinuationCapability = toolOutputContinuationCapabilityKey
+      ? this.getToolOutputContinuationCapability(toolOutputContinuationCapabilityKey)
+      : undefined;
+    const shouldAttemptToolOutputContinuation = hasOnlyToolOutputAppend
+      && config.transport !== 'http'
+      && TOOL_OUTPUT_CONTINUATION_ENABLED
+      && toolOutputContinuationCapability !== false;
+    if (requiresFullInputForToolOutput && !shouldAttemptToolOutputContinuation) {
+      latency.recordContext({
+        toolContinuationStrategy: 'full-replay',
+        fullReplayReason: getToolOutputFullReplayReason({
+          hasOnlyToolOutputAppend,
+          transport: config.transport,
+          capability: toolOutputContinuationCapability
+        })
+      });
+    }
+    const usePreviousResponseId = appendedInput.length > 0
+      && (!requiresFullInputForToolOutput || shouldAttemptToolOutputContinuation);
+    const initialRequestInput = usePreviousResponseId
+      ? appendedInput
       : input;
-    const initialPreviousResponseId = reusableBranch?.comparison.appendedInput.length && !requiresFullInputForToolOutput
-      ? reusableBranch.responseId
+    const initialPreviousResponseId = usePreviousResponseId
+      ? reusableBranch?.responseId
       : undefined;
     let activeBranchId = initialPreviousResponseId || requiresFullInputForToolOutput
       ? reusableBranch?.branchId
@@ -301,13 +377,29 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       updatedAt: Date.now()
     };
     let reportedVisibleOutput = false;
+    let toolContinuationProbeStartedAt: number | undefined;
+    if (shouldAttemptToolOutputContinuation) {
+      toolContinuationProbeStartedAt = Date.now();
+      latency.recordContext({
+        toolOutputContinuation: 'attempted',
+        toolContinuationStrategy: 'incremental'
+      });
+    }
     latency.mark('requestReady');
 
     this.outputChannel.info('provideLanguageModelChatResponse start', {
       modelId: model.id,
       requestModel: selectedModel.requestModel,
       transport: config.transport,
-      reuse: initialPreviousResponseId
+      reuse: shouldAttemptToolOutputContinuation
+        ? {
+            strategy: 'tool-output-continuation',
+            branchId: reusableBranch?.branchId,
+            matchedPrefixCount: reusableBranch?.comparison.matchedPrefixCount,
+            appendedInputCount: reusableBranch?.comparison.appendedInput.length,
+            capability: toolOutputContinuationCapability === true ? 'supported' : 'unknown'
+          }
+        : initialPreviousResponseId
         ? {
             strategy: 'previous-response',
             branchId: reusableBranch?.branchId,
@@ -328,6 +420,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       reasoningEffortInputConflict: reasoning.hasExplicitConflict,
       messageCount: messages.length,
       inputItemCount: input.length,
+      observedToolResults: observedToolResults.map(({ resultObservedAt: _resultObservedAt, ...toolResult }) => toolResult),
       toolCount: options.tools?.length ?? 0,
       toolMode: options.toolMode ?? null,
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
@@ -352,7 +445,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
     }
 
-    const streamRequest = async (requestInput: ResponsesInputMessage[], previousResponseId?: string) => {
+    const streamRequest = async (
+      requestInput: ResponsesInputMessage[],
+      previousResponseId?: string,
+      allowToolOutputContinuation = false
+    ) => {
       const streamStartedAt = Date.now();
       let actualTransport: 'http' | 'http-fallback' | 'websocket-fresh' | 'websocket-reused' = config.transport === 'http'
         ? 'http'
@@ -364,6 +461,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           }
         | undefined;
       let hasReportedText = false;
+      let previousResponseIdUsed = false;
       if (config.transport === 'http') {
         latency.mark('connectionAcquired');
       }
@@ -373,6 +471,22 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         transportActual: actualTransport
       });
       latency.mark('requestSent');
+      if (observedToolResults.length > 0) {
+        const requestSentAt = Date.now();
+        this.outputChannel.info('tool result recovery timing', {
+          requestModel: selectedModel.requestModel,
+          toolResults: observedToolResults.map(({ resultObservedAt, ...toolResult }) => ({
+            ...toolResult,
+            resultObservedToRequestSentMs: Math.max(0, requestSentAt - resultObservedAt)
+          }))
+        });
+      }
+
+      const toolCallLifecycleAt = new Map<string, {
+        addedAt?: number;
+        argumentsDeltaAt?: number;
+        argumentsDoneAt?: number;
+      }>();
 
       const recordFirstVisibleOutput = (kind: 'text' | 'reasoning' | 'tool_call') => {
         if (firstVisibleOutput) {
@@ -399,6 +513,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         websocketPrewarm: config.websocketPrewarm,
         requestCompression: config.requestCompression,
         previousResponseId,
+        allowToolOutputContinuation,
         store: requestOptions.store,
         omitMaxOutputTokens: requestOptions.omitMaxOutputTokens,
         model: requestOptions.model,
@@ -432,20 +547,57 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           latency.mark('firstReasoning');
           progress.report(thinkingPart);
         },
+        onToolCallAdded: (callId) => {
+          toolCallLifecycleAt.set(callId, { addedAt: Date.now() });
+          latency.mark('firstToolCallAdded');
+        },
+        onToolCallArgumentsDelta: (callId) => {
+          const lifecycle = toolCallLifecycleAt.get(callId) ?? {};
+          lifecycle.argumentsDeltaAt ??= Date.now();
+          toolCallLifecycleAt.set(callId, lifecycle);
+          latency.mark('firstToolCallArgumentsDelta');
+        },
+        onToolCallArgumentsDone: (callId) => {
+          const lifecycle = toolCallLifecycleAt.get(callId) ?? {};
+          lifecycle.argumentsDoneAt ??= Date.now();
+          toolCallLifecycleAt.set(callId, lifecycle);
+          latency.mark('firstToolCallArgumentsDone');
+        },
         onToolCall: (callId, name, toolInput) => {
           reportedVisibleOutput = true;
           recordFirstVisibleOutput('tool_call');
           latency.mark('firstToolCall');
-          const serializedToolInput = JSON.stringify(toolInput);
-          this.outputChannel.debug('response tool call', {
-            requestModel: selectedModel.requestModel,
+          const reportedAt = Date.now();
+          progress.report(new vscode.LanguageModelToolCallPart(callId, name, toolInput));
+          latency.mark('firstToolCallReported', reportedAt);
+          this.rememberReportedToolCall(callId, name, reportedAt);
+          const lifecycle = toolCallLifecycleAt.get(callId);
+          this.outputChannel.info('response tool call timing', {
             callId,
             name,
-            inputPresent: true,
-            inputBytes: Buffer.byteLength(serializedToolInput),
-            inputHash: shortHash(serializedToolInput)
+            toolArgumentsDoneToReportedMs: lifecycle?.argumentsDoneAt === undefined
+              ? null
+              : Math.max(0, reportedAt - lifecycle.argumentsDoneAt)
           });
-          progress.report(new vscode.LanguageModelToolCallPart(callId, name, toolInput));
+          setImmediate(() => {
+            try {
+              const serializedToolInput = JSON.stringify(toolInput);
+              this.outputChannel.debug('response tool call', {
+                requestModel: selectedModel.requestModel,
+                callId,
+                name,
+                inputPresent: true,
+                inputBytes: Buffer.byteLength(serializedToolInput),
+                inputHash: shortHash(serializedToolInput)
+              });
+            } catch {
+              this.outputChannel.debug('response tool call telemetry unavailable', {
+                requestModel: selectedModel.requestModel,
+                callId,
+                name
+              });
+            }
+          });
         },
         onRawResponseItem: (item) => {
           rawResponseItems.push(item);
@@ -466,6 +618,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onTransportMetrics: (metrics) => {
+          previousResponseIdUsed ||= metrics.previousResponseIdUsed === true;
           if (typeof metrics.websocketConnectedAt === 'number') {
             latency.mark('websocketConnected', metrics.websocketConnectedAt);
           }
@@ -490,6 +643,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onResponseCompleted: (response) => {
+          if (allowToolOutputContinuation && previousResponseIdUsed) {
+            latency.recordContext({
+              toolOutputContinuation: 'supported',
+              toolContinuationStrategy: 'incremental',
+              toolContinuationProbeMs: toolContinuationProbeStartedAt === undefined
+                ? undefined
+                : Math.max(0, Date.now() - toolContinuationProbeStartedAt)
+            });
+          }
           latency.mark('responseCompleted');
           branchState = {
             ...branchState,
@@ -558,59 +720,118 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         }
       });
+      return { previousResponseIdUsed };
     };
 
     try {
-      await streamRequest(initialRequestInput, initialPreviousResponseId);
+      const initialStream = await streamRequest(
+        initialRequestInput,
+        initialPreviousResponseId,
+        shouldAttemptToolOutputContinuation
+      );
+      if (shouldAttemptToolOutputContinuation && toolOutputContinuationCapabilityKey) {
+        if (!initialStream.previousResponseIdUsed) {
+          this.recordToolOutputContinuationCapability(toolOutputContinuationCapabilityKey, false);
+          latency.recordContext({
+            toolOutputContinuation: 'unsupported',
+            toolContinuationProbeMs: toolContinuationProbeStartedAt === undefined
+              ? undefined
+              : Math.max(0, Date.now() - toolContinuationProbeStartedAt)
+          });
+          this.outputChannel.warn('response tool-output continuation was not applied', {
+            requestModel: selectedModel.requestModel,
+            branchId: reusableBranch?.branchId ?? null,
+            previousResponseId: initialPreviousResponseId
+          });
+        } else {
+          this.recordToolOutputContinuationCapability(toolOutputContinuationCapabilityKey, true);
+          latency.recordContext({
+            toolOutputContinuation: 'supported',
+            toolContinuationStrategy: 'incremental',
+            toolContinuationProbeMs: toolContinuationProbeStartedAt === undefined
+              ? undefined
+              : Math.max(0, Date.now() - toolContinuationProbeStartedAt)
+          });
+        }
+      }
     } catch (error) {
-      if (!initialPreviousResponseId || !isResponsesContinuationMissError(error)) {
-        const unavailableModel = getExactModelNotFoundName(error, selectedModel.requestModel);
-        if (!unavailableModel) {
+      if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
+        if (reportedVisibleOutput) {
           throw error;
         }
 
-        this.markModelUnavailable(unavailableModel, config, credentials, authIdentity);
-
-        this.outputChannel.warn('response model unavailable', {
-          rejectedModel: unavailableModel,
-          previousResponseId: initialPreviousResponseId ?? null
+        if (toolOutputContinuationCapabilityKey) {
+          this.recordToolOutputContinuationCapability(toolOutputContinuationCapabilityKey, false);
+        }
+        latency.recordContext({
+          toolOutputContinuation: 'fallback-full-replay',
+          toolContinuationStrategy: 'incremental-recovered',
+          toolContinuationProbeMs: toolContinuationProbeStartedAt === undefined
+            ? undefined
+            : Math.max(0, Date.now() - toolContinuationProbeStartedAt),
+          fullReplayReason: 'continuation-miss'
+        });
+        this.outputChannel.warn('response tool-output continuation reset', {
+          requestModel: selectedModel.requestModel,
+          branchId: reusableBranch?.branchId ?? null,
+          previousResponseId: initialPreviousResponseId,
+          reason: error.message
         });
 
-        throw createTemporarilyUnavailableModelError(unavailableModel, error);
+        createdResponseId = undefined;
+        completedResponseId = undefined;
+        rawResponseItems.length = 0;
+        await streamRequest(input);
+      } else {
+        if (!initialPreviousResponseId || !isResponsesContinuationMissError(error)) {
+          const unavailableModel = getExactModelNotFoundName(error, selectedModel.requestModel);
+          if (!unavailableModel) {
+            throw error;
+          }
+
+          this.markModelUnavailable(unavailableModel, config, credentials, authIdentity);
+
+          this.outputChannel.warn('response model unavailable', {
+            rejectedModel: unavailableModel,
+            previousResponseId: initialPreviousResponseId ?? null
+          });
+
+          throw createTemporarilyUnavailableModelError(unavailableModel, error);
+        }
+
+        if (reportedVisibleOutput) {
+          throw error;
+        }
+
+        this.outputChannel.warn('response continuation reset', {
+          requestModel: selectedModel.requestModel,
+          branchId: reusableBranch?.branchId ?? null,
+          previousResponseId: initialPreviousResponseId,
+          reason: error.message,
+          reuseDisabledUntilExpiry: error.disableReuseUntilExpiry
+        });
+
+        this.outputChannel.warn(error.disableReuseUntilExpiry
+          ? 'response reuse disabled until branch cache expiry after HTTP continuation rejection'
+          : 'response reuse temporarily disabled until next full-input success', {
+          requestModel: selectedModel.requestModel,
+          previousResponseId: initialPreviousResponseId,
+          branchId: reusableBranch?.branchId ?? null
+        });
+
+        this.responseBranchStore.disableReuse(reuseEnvelope, !error.disableReuseUntilExpiry);
+        this.responseBranchStore.invalidateResponseId(initialPreviousResponseId);
+
+        if (reusableBranch) {
+          this.responseBranchStore.invalidate(reusableBranch.branchId);
+        }
+
+        createdResponseId = undefined;
+        completedResponseId = undefined;
+        rawResponseItems.length = 0;
+        activeBranchId = undefined;
+        await streamRequest(input);
       }
-
-      if (reportedVisibleOutput) {
-        throw error;
-      }
-
-      this.outputChannel.warn('response continuation reset', {
-        requestModel: selectedModel.requestModel,
-        branchId: reusableBranch?.branchId ?? null,
-        previousResponseId: initialPreviousResponseId,
-        reason: error.message,
-        reuseDisabledUntilExpiry: error.disableReuseUntilExpiry
-      });
-
-      this.outputChannel.warn(error.disableReuseUntilExpiry
-        ? 'response reuse disabled until branch cache expiry after HTTP continuation rejection'
-        : 'response reuse temporarily disabled until next full-input success', {
-        requestModel: selectedModel.requestModel,
-        previousResponseId: initialPreviousResponseId,
-        branchId: reusableBranch?.branchId ?? null
-      });
-
-      this.responseBranchStore.disableReuse(reuseEnvelope, !error.disableReuseUntilExpiry);
-      this.responseBranchStore.invalidateResponseId(initialPreviousResponseId);
-
-      if (reusableBranch) {
-        this.responseBranchStore.invalidate(reusableBranch.branchId);
-      }
-
-      createdResponseId = undefined;
-      completedResponseId = undefined;
-      rawResponseItems.length = 0;
-      activeBranchId = undefined;
-      await streamRequest(input);
     }
 
     const finalResponseId = completedResponseId ?? createdResponseId;
@@ -826,6 +1047,87 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       () => this.modelInfoChangedEmitter.fire(),
       () => this.outputChannel.warn('model refresh failed after responses model rejection', { model })
     );
+  }
+
+  private rememberReportedToolCall(callId: string, name: string, reportedAt = Date.now()): void {
+    this.pruneReportedToolCalls(reportedAt);
+    this.pendingReportedToolCalls.set(callId, { callId, name, reportedAt });
+
+    while (this.pendingReportedToolCalls.size > MAX_PENDING_REPORTED_TOOL_CALLS) {
+      const oldestCallId = this.pendingReportedToolCalls.keys().next().value;
+      if (typeof oldestCallId !== 'string') {
+        return;
+      }
+      this.pendingReportedToolCalls.delete(oldestCallId);
+    }
+  }
+
+  private consumeReportedToolResults(input: readonly ResponsesInputMessage[]): ObservedToolResult[] {
+    const now = Date.now();
+    this.pruneReportedToolCalls(now);
+    const observed = [];
+
+    for (const item of input) {
+      if (item.type !== 'function_call_output') {
+        continue;
+      }
+
+      const reportedCall = this.pendingReportedToolCalls.get(item.call_id);
+      if (!reportedCall) {
+        continue;
+      }
+
+      this.pendingReportedToolCalls.delete(item.call_id);
+      observed.push({
+        callId: reportedCall.callId,
+        name: reportedCall.name,
+        reportedToResultObservedMs: Math.max(0, now - reportedCall.reportedAt),
+        resultBytes: Buffer.byteLength(stableSerialize(item.output)),
+        resultObservedAt: now
+      });
+    }
+
+    return observed;
+  }
+
+  private pruneReportedToolCalls(now: number): void {
+    for (const [callId, reportedCall] of this.pendingReportedToolCalls) {
+      if (now - reportedCall.reportedAt > REPORTED_TOOL_CALL_TTL_MS) {
+        this.pendingReportedToolCalls.delete(callId);
+      }
+    }
+  }
+
+  private createToolOutputContinuationCapabilityKey(
+    config: ProviderConfig,
+    authIdentity: string,
+    model: string,
+    store: boolean
+  ): string {
+    return [normalizeBaseURL(config.baseURL), authIdentity, model, store ? 'store' : 'no-store'].join('|');
+  }
+
+  private getToolOutputContinuationCapability(key: string): boolean | undefined {
+    const capability = this.toolOutputContinuationCapabilities.get(key);
+    if (!capability) {
+      return undefined;
+    }
+    if (Date.now() - capability.observedAt > TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS) {
+      this.toolOutputContinuationCapabilities.delete(key);
+      return undefined;
+    }
+    return capability.supported;
+  }
+
+  private recordToolOutputContinuationCapability(key: string, supported: boolean): void {
+    this.toolOutputContinuationCapabilities.set(key, { supported, observedAt: Date.now() });
+    while (this.toolOutputContinuationCapabilities.size > MAX_TOOL_OUTPUT_CONTINUATION_CAPABILITIES) {
+      const oldestKey = this.toolOutputContinuationCapabilities.keys().next().value;
+      if (typeof oldestKey !== 'string') {
+        return;
+      }
+      this.toolOutputContinuationCapabilities.delete(oldestKey);
+    }
   }
 
   private resolveRequestModel(

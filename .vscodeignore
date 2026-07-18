@@ -15,6 +15,7 @@ tsconfig.json
 esbuild.mjs
 package-lock.json
 *.vsix
+undefined/**
 out/**/*.map
 out/config.js
 out/convertMessages.js

@@ -2,12 +2,12 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
 import { WebSocketServer } from 'ws';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-provider-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-provider-'));
 const bundlePath = join(tempDir, 'responsesClient.cjs');
 const moduleLoad = Module._load;
 const require = createRequire(import.meta.url);
@@ -129,10 +129,17 @@ async function runFunctionCallArgumentsDoneSmokeTest(streamResponseText) {
       }
     });
     send({
-      type: 'response.function_call_arguments.done',
+      type: 'response.function_call_arguments.delta',
       item_id: 'fc_1',
       output_index: 1,
       sequence_number: 3,
+      delta: '{"number":'
+    });
+    send({
+      type: 'response.function_call_arguments.done',
+      item_id: 'fc_1',
+      output_index: 1,
+      sequence_number: 4,
       name: '',
       arguments: '{"number":10}'
     });
@@ -140,7 +147,7 @@ async function runFunctionCallArgumentsDoneSmokeTest(streamResponseText) {
     send({
       type: 'response.output_item.done',
       output_index: 1,
-      sequence_number: 5,
+      sequence_number: 6,
       item: {
         id: 'fc_1',
         type: 'function_call',
@@ -172,11 +179,17 @@ async function runFunctionCallArgumentsDoneSmokeTest(streamResponseText) {
       maxOutputTokens: 32,
       token: createCancellationToken(),
       onTextDelta: (text) => progress.push({ type: 'text', text }),
+      onToolCallAdded: (callId, name) => progress.push({ type: 'tool-added', callId, name }),
+      onToolCallArgumentsDelta: (callId, name) => progress.push({ type: 'tool-arguments-delta', callId, name }),
+      onToolCallArgumentsDone: (callId, name) => progress.push({ type: 'tool-arguments-done', callId, name }),
       onToolCall: (callId, name, input) => progress.push({ type: 'tool', callId, name, input })
     });
 
     assertEqual(JSON.stringify(progress), JSON.stringify([
       { type: 'text', text: 'Before tool.' },
+      { type: 'tool-added', callId: 'call_1', name: 'read_pull_request' },
+      { type: 'tool-arguments-delta', callId: 'call_1', name: 'read_pull_request' },
+      { type: 'tool-arguments-done', callId: 'call_1', name: 'read_pull_request' },
       { type: 'tool', callId: 'call_1', name: 'read_pull_request', input: { number: 10 } },
       { type: 'text', text: 'After tool.' }
     ]), 'complete function call is reported before later stream content without duplication');

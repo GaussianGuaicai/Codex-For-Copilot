@@ -28,6 +28,7 @@
   "scripts": {
     "check": "tsc -p ./ --noEmit",
     "compile": "npm run check && node esbuild.mjs",
+    "test:extension-host": "node test/runExtensionHostSmoke.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",

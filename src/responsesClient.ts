@@ -82,6 +82,7 @@ export interface StreamResponseTextOptions {
   websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
   requestCompression?: RequestCompressionPolicy;
   previousResponseId?: string;
+  allowToolOutputContinuation?: boolean;
   store?: boolean;
   omitMaxOutputTokens?: boolean;
   model: string;
@@ -100,6 +101,9 @@ export interface StreamResponseTextOptions {
     contentIndex: number;
     outputIndex: number;
   }) => void;
+  onToolCallAdded?: (callId: string, name: string) => void;
+  onToolCallArgumentsDelta?: (callId: string, name: string) => void;
+  onToolCallArgumentsDone?: (callId: string, name: string) => void;
   onToolCall?: (callId: string, name: string, input: object) => void;
   onRawResponseItem?: (item: unknown) => void;
   onTurnState?: (turnState: string) => void;
@@ -273,6 +277,8 @@ async function streamResponseTextOverHttp(
   }
   options.onTransportMetrics?.({
     transportActual: 'http',
+    previousResponseIdUsed: Boolean(options.previousResponseId),
+    incrementalInputCount: options.previousResponseId ? options.input.length : 0,
     requestIdPresent: Boolean(requestId),
     turnStateReceived: Boolean(turnState),
     serverModel: response.headers.get('openai-model') ?? undefined,
@@ -466,6 +472,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
         request,
         builderOptions,
         identity,
+        allowToolOutputContinuation: false,
         signal: prewarmController.signal,
         onEvent: () => undefined,
         onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
@@ -503,6 +510,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
         request,
         builderOptions,
         identity,
+        allowToolOutputContinuation: options.allowToolOutputContinuation === true,
         signal: abortController.signal,
         onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
         onHandshake: (handshake, connectedAt) => {
@@ -890,6 +898,15 @@ function createResponsesServerEventHandler(
           callId: event.item.call_id,
           name: event.item.name
         });
+        options.onToolCallAdded?.(event.item.call_id, event.item.name);
+      }
+      return;
+    }
+
+    if (event.type === 'response.function_call_arguments.delta') {
+      const functionCall = functionCallsByItemId.get(event.item_id);
+      if (functionCall) {
+        options.onToolCallArgumentsDelta?.(functionCall.callId, functionCall.name);
       }
       return;
     }
@@ -897,6 +914,10 @@ function createResponsesServerEventHandler(
     if (event.type === 'response.function_call_arguments.done') {
       const functionCall = functionCallsByItemId.get(event.item_id);
       if (functionCall) {
+        options.onToolCallArgumentsDone?.(
+          functionCall.callId,
+          firstNonEmptyString(functionCall.name, event.name)
+        );
         reportFunctionCall(
           event.item_id,
           functionCall.callId,

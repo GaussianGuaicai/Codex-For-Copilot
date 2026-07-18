@@ -1,12 +1,12 @@
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
 export async function loadBundled(entryPoint, vscodeStub = {}) {
-  const tempDir = await mkdtemp(join(tmpdir(), 'codex-parity-test-'));
+  const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-parity-test-'));
   const outfile = join(tempDir, 'bundle.cjs');
   await build({
     entryPoints: [entryPoint],

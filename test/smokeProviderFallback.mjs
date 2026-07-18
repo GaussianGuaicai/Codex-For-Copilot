@@ -2,11 +2,11 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-provider-fallback-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-provider-fallback-'));
 const bundlePath = join(tempDir, 'provider.cjs');
 const modelsBundlePath = join(tempDir, 'models.cjs');
 const moduleLoad = Module._load;
@@ -996,6 +996,7 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
       required: ['filePath']
     }
   };
+  const infoEvents = [];
   const provider = new CodexModelProvider(
     {
       secrets: {
@@ -1005,7 +1006,14 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
       },
       subscriptions: []
     },
-    createOutputChannel(),
+    {
+      debug() {},
+      info(message, data) {
+        infoEvents.push({ message, data });
+      },
+      warn() {},
+      error() {}
+    },
     undefined,
     undefined,
     undefined,
@@ -1060,8 +1068,25 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
       { type: 'function_call', call_id: 'call_tool_loop', name: 'read_file', arguments: '{"filePath":"src/provider.ts"}' },
       { type: 'function_call_output', call_id: 'call_tool_loop', output: 'file contents' }
     ]), 'tool loop replays matching call and output');
+    const secondRequestStart = infoEvents.filter((event) => event.message === 'provideLanguageModelChatResponse start')[1];
+    const observedToolResults = secondRequestStart?.data?.observedToolResults;
+    assertEqual(observedToolResults.length, 1, 'tool result observation is recorded once');
+    assertEqual(observedToolResults[0].callId, 'call_tool_loop', 'observed tool result call id');
+    assertEqual(observedToolResults[0].name, 'read_file', 'observed tool result name');
+    assertEqual(typeof observedToolResults[0].reportedToResultObservedMs, 'number', 'observed tool result latency is numeric');
+    assertEqual(observedToolResults[0].resultBytes > 0, true, 'observed tool result size is recorded');
+    const recoveryTiming = infoEvents.find((event) => event.message === 'tool result recovery timing');
+    assertEqual(recoveryTiming?.data?.toolResults?.length, 1, 'tool recovery timing records one result');
+    assertEqual(recoveryTiming?.data?.toolResults?.[0]?.callId, 'call_tool_loop', 'tool recovery timing call id');
+    assertEqual(
+      typeof recoveryTiming?.data?.toolResults?.[0]?.resultObservedToRequestSentMs,
+      'number',
+      'tool recovery request latency is numeric'
+    );
     assertEqual(secondParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''), 'Tool result received.', 'tool loop continues once');
+
   } finally {
+    configValues.transport = 'http';
     await closeServer(server);
   }
 }

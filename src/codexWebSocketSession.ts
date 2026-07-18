@@ -45,6 +45,7 @@ export interface CodexWebSocketStreamOptions {
   request: CodexResponsesRequest;
   builderOptions: CodexRequestBuilderOptions;
   identity: CodexRequestIdentity;
+  allowToolOutputContinuation?: boolean;
   signal: AbortSignal;
   onEvent: (event: ResponsesServerEvent) => void;
   onRequestPrepared?: (request: {
@@ -139,9 +140,10 @@ export class CodexWebSocketSession {
     const connectionReused = this.used;
     this.used = true;
 
-    const incremental = this.buildIncrementalRequest(options.request);
+    const allowToolOutputContinuation = options.allowToolOutputContinuation === true;
+    const incremental = this.buildIncrementalRequest(options.request, allowToolOutputContinuation);
     const request = incremental?.request ?? options.request;
-    const previousResponseId = getAllowedPreviousResponseId(request);
+    const previousResponseId = getAllowedPreviousResponseId(request, allowToolOutputContinuation);
     const builderOptions: CodexRequestBuilderOptions = {
       ...options.builderOptions,
       input: request.input as CodexRequestBuilderOptions['input'],
@@ -245,7 +247,7 @@ export class CodexWebSocketSession {
     }
   }
 
-  private buildIncrementalRequest(request: CodexResponsesRequest): {
+  private buildIncrementalRequest(request: CodexResponsesRequest, allowToolOutputContinuation: boolean): {
     request: CodexResponsesRequest;
     previousResponseId: string;
   } | undefined {
@@ -264,7 +266,7 @@ export class CodexWebSocketSession {
       }
     }
     const incrementalInput = currentInput.slice(previousInput.length);
-    if (incrementalInput.some(isFunctionCallOutput)) {
+    if (!allowToolOutputContinuation && incrementalInput.some(isFunctionCallOutput)) {
       return undefined;
     }
     return {
@@ -373,11 +375,14 @@ function getRequestInput(request: CodexResponsesRequest): unknown[] {
   return Array.isArray(request.input) ? request.input : [];
 }
 
-function getAllowedPreviousResponseId(request: CodexResponsesRequest): string | undefined {
+function getAllowedPreviousResponseId(
+  request: CodexResponsesRequest,
+  allowToolOutputContinuation = false
+): string | undefined {
   const previousResponseId = request.previous_response_id;
   if (typeof previousResponseId !== 'string'
     || previousResponseId.length === 0
-    || getRequestInput(request).some(isFunctionCallOutput)) {
+    || (!allowToolOutputContinuation && getRequestInput(request).some(isFunctionCallOutput))) {
     return undefined;
   }
 

@@ -1,10 +1,10 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-latency-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-latency-'));
 const bundlePath = join(tempDir, 'codexLatency.cjs');
 const require = createRequire(import.meta.url);
 
@@ -34,6 +34,11 @@ try {
   latency.mark('responseCreated', 1_200);
   latency.mark('firstReasoning', 1_225);
   latency.mark('firstText', 1_240);
+  latency.mark('firstToolCallAdded', 1_250);
+  latency.mark('firstToolCallArgumentsDelta', 1_260);
+  latency.mark('firstToolCallArgumentsDone', 1_290);
+  latency.mark('firstToolCallReported', 1_294);
+  latency.mark('firstToolCall', 1_294);
   latency.mark('responseCompleted', 1_300);
   latency.recordContext({
     connectionOrigin: 'prewarm',
@@ -65,9 +70,14 @@ try {
   assertEqual(snapshot.trace.requestToCreatedMs, 65, 'request to created duration');
   assertEqual(snapshot.trace.createdToFirstVisibleMs, 25, 'created to first visible duration');
   assertEqual(snapshot.trace.providerToFirstVisibleMs, 225, 'provider to first visible duration');
+  assertEqual(snapshot.trace.toolCallAddedToFirstArgumentsDeltaMs, 10, 'tool call added to first arguments duration');
+  assertEqual(snapshot.trace.toolCallArgumentsToDoneMs, 30, 'tool arguments to done duration');
+  assertEqual(snapshot.trace.toolCallDoneToReportedMs, 4, 'tool call done to reported duration');
   assertEqual(snapshot.trace.totalMs, 300, 'total duration');
   assertEqual(snapshot.firstVisibleStage, 'firstReasoning', 'first visible stage');
   assertEqual(snapshot.stageOffsetsMs.responseCompleted, 300, 'completed stage offset');
+  assertEqual(snapshot.stageOffsetsMs.firstToolCallAdded, 250, 'tool call added stage offset');
+  assertEqual(snapshot.stageOffsetsMs.firstToolCallReported, 294, 'tool call reported stage offset');
   assertEqual(snapshot.context.connectionOrigin, 'prewarm', 'connection origin context');
   assertEqual(snapshot.context.incrementalInputCount, 1, 'incremental input context');
   assertEqual(snapshot.context.modelDiscoveryCacheState, 'stale', 'model cache context');

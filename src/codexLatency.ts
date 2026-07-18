@@ -14,6 +14,10 @@ export type CodexLatencyStage =
   | 'responseCreated'
   | 'firstReasoning'
   | 'firstText'
+  | 'firstToolCallAdded'
+  | 'firstToolCallArgumentsDelta'
+  | 'firstToolCallArgumentsDone'
+  | 'firstToolCallReported'
   | 'firstToolCall'
   | 'responseCompleted';
 
@@ -29,6 +33,9 @@ export interface CodexLatencyTrace {
   requestToCreatedMs?: number;
   createdToFirstVisibleMs?: number;
   providerToFirstVisibleMs?: number;
+  toolCallAddedToFirstArgumentsDeltaMs?: number;
+  toolCallArgumentsToDoneMs?: number;
+  toolCallDoneToReportedMs?: number;
   totalMs: number;
 }
 
@@ -46,6 +53,10 @@ export interface CodexLatencyContext {
   modelDiscoveryCacheState?: 'cold' | 'fresh' | 'stale' | 'fallback' | 'direct';
   prewarmResult?: 'success' | 'timed-out' | 'disabled-after-failure' | 'skipped-auto';
   transportActual?: 'http' | 'http-fallback' | 'websocket-fresh' | 'websocket-reused';
+  toolOutputContinuation?: 'attempted' | 'supported' | 'fallback-full-replay' | 'unsupported';
+  toolContinuationStrategy?: 'incremental' | 'full-replay' | 'incremental-recovered';
+  toolContinuationProbeMs?: number;
+  fullReplayReason?: string;
   reasoningEffort?: string | null;
   serviceTier?: string;
 }
@@ -115,6 +126,18 @@ export class CodexLatencyRecorder {
     if (context.transportActual !== undefined) {
       this.context.transportActual = context.transportActual;
     }
+    if (context.toolOutputContinuation !== undefined) {
+      this.context.toolOutputContinuation = context.toolOutputContinuation;
+    }
+    if (context.toolContinuationStrategy !== undefined) {
+      this.context.toolContinuationStrategy = context.toolContinuationStrategy;
+    }
+    if (context.toolContinuationProbeMs !== undefined) {
+      this.context.toolContinuationProbeMs = context.toolContinuationProbeMs;
+    }
+    if (context.fullReplayReason !== undefined) {
+      this.context.fullReplayReason = context.fullReplayReason;
+    }
     if (context.reasoningEffort !== undefined) {
       this.context.reasoningEffort = context.reasoningEffort;
     }
@@ -145,6 +168,18 @@ export class CodexLatencyRecorder {
         requestToCreatedMs: this.optionalDuration(requestSent, responseCreated),
         createdToFirstVisibleMs: this.optionalDuration(responseCreated, firstVisible),
         providerToFirstVisibleMs: this.optionalDuration(providerEntry, firstVisible),
+        toolCallAddedToFirstArgumentsDeltaMs: this.optionalDuration(
+          this.at('firstToolCallAdded'),
+          this.at('firstToolCallArgumentsDelta')
+        ),
+        toolCallArgumentsToDoneMs: this.optionalDuration(
+          this.at('firstToolCallArgumentsDelta'),
+          this.at('firstToolCallArgumentsDone')
+        ),
+        toolCallDoneToReportedMs: this.optionalDuration(
+          this.at('firstToolCallArgumentsDone'),
+          this.at('firstToolCallReported')
+        ),
         totalMs: this.duration(providerEntry, responseCompleted, completedAt)
       },
       stageOffsetsMs: Object.fromEntries(

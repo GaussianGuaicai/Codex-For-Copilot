@@ -208,6 +208,48 @@ try {
   assertEqual(frames[2].previous_response_id, undefined, 'full tool replay omits previous response id');
   assertEqual(frames[2].input.length, 3, 'full tool replay retains matching function call');
 
+  const toolOutputContinuationMetrics = [];
+  await streamResponseText({
+    baseURL: `http://127.0.0.1:${port}/backend-api/codex/responses`,
+    apiKey: 'test-token',
+    headers: { 'ChatGPT-Account-ID': 'acct-test' },
+    transport: 'websocket',
+    compatibilityProfile: { enabled: true, endpointKey: `http://127.0.0.1:${port}/backend-api/codex/responses` },
+    authIdentity: 'codexAuth:acct-test',
+    identity: {
+      installationId: '11111111-1111-4111-8111-111111111111',
+      sessionId: '22222222-2222-4222-8222-222222222222',
+      threadId: '33333333-3333-4333-8333-333333333333',
+      turnId: '44444444-4444-4444-8444-444444444445',
+      windowId: '55555555-5555-4555-9555-555555555555'
+    },
+    extensionVersion: '1.2.3',
+    userAgent: 'codex-for-copilot/1.2.3 (test)',
+    websocketPrewarm: 'disabled',
+    requestCompression: 'disabled',
+    previousResponseId: 'resp_final',
+    allowToolOutputContinuation: true,
+    omitMaxOutputTokens: true,
+    model: 'gpt-test',
+    instructions: 'instructions',
+    input: [{ type: 'function_call_output', call_id: 'call_managed', output: 'tool result' }],
+    maxOutputTokens: 100,
+    token: createCancellationToken(),
+    onTextDelta() {},
+    onTransportMetrics: (metrics) => toolOutputContinuationMetrics.push(metrics)
+  });
+
+  assertEqual(frames[3].previous_response_id, 'resp_final', 'tool-output continuation preserves previous response id');
+  assertEqual(frames[3].input.length, 1, 'tool-output continuation sends only the appended result');
+  assertEqual(frames[3].input[0].type, 'function_call_output', 'tool-output continuation preserves result type');
+  assertEqual(
+    toolOutputContinuationMetrics.some((metrics) => (
+      metrics.previousResponseIdUsed === true && metrics.incrementalInputCount === 1
+    )),
+    true,
+    'tool-output continuation reports previous response use'
+  );
+
   const branchContinuationMetrics = [];
   await streamResponseText({
     baseURL: `http://127.0.0.1:${port}/backend-api/codex/responses`,
@@ -238,8 +280,8 @@ try {
     onTransportMetrics: (metrics) => branchContinuationMetrics.push(metrics)
   });
 
-  assertEqual(frames[3].previous_response_id, 'resp_final', 'projected branch continuation preserves previous response id');
-  assertEqual(frames[3].input.length, 1, 'projected branch continuation keeps only appended input');
+  assertEqual(frames[4].previous_response_id, 'resp_final', 'projected branch continuation preserves previous response id');
+  assertEqual(frames[4].input.length, 1, 'projected branch continuation keeps only appended input');
   assertEqual(
     branchContinuationMetrics.some((metrics) => (
       metrics.previousResponseIdUsed === true && metrics.incrementalInputCount === 1

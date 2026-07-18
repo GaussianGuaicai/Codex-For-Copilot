@@ -28,7 +28,7 @@ const requestServiceTier = requestedServiceTier === 'fast'
     ? undefined
     : requestedServiceTier;
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-real-'));
+const tempDir = await mkdtemp(join(resolveTempDirectory(), 'codex-for-copilot-real-'));
 const secretsBundlePath = join(tempDir, 'secrets.cjs');
 const responsesBundlePath = join(tempDir, 'responsesClient.cjs');
 const moduleLoad = Module._load;
@@ -411,6 +411,7 @@ async function runToolContinuationProbe({
     ...baseOptions,
     input: [toolOutput],
     previousResponseId: initialResponseId,
+    allowToolOutputContinuation: true,
     toolMode: undefined,
     onTextDelta: (text) => output.push(text),
     onTransportMetrics: (metric) => metrics.push(metric)
@@ -493,6 +494,15 @@ function parsePositiveInteger(value, defaultValue) {
     return parsed;
   }
   throw new Error(`CODEX_TEST_TIMEOUT_MS must be a positive integer, got ${value}.`);
+}
+
+function resolveTempDirectory() {
+  const configured = tmpdir();
+  if (configured && !configured.startsWith('undefined')) {
+    return configured;
+  }
+
+  return join(homedir(), 'AppData', 'Local', 'Temp');
 }
 
 function summarizeTransportMetrics(metrics) {

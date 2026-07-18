@@ -19,7 +19,8 @@
 - `smokeCodexTurnLifecycle.mjs`: branch turn identity and continuation-snapshot clone coverage.
 - `realBackendProbe.mjs`: live ChatGPT Codex backend probe using local credentials, including opt-in real function-call continuation validation.
 - `benchmarkProviderBackend.mjs`: opt-in real-backend benchmark from provider entry through first visible output and completion.
-- `extensionHostSmoke.cjs`: lightweight extension-host-facing smoke coverage.
+- `extensionHostSmoke.cjs`: Extension Development Host coverage for model selection, streamed tool calls, and compatible full-replay tool-result recovery.
+- `runExtensionHostSmoke.mjs`: isolated-profile runner for the Extension Development Host smoke through the VS Code CLI.
 
 ## Constraints
 
@@ -33,6 +34,7 @@
 - Fork-reuse diagnostics must never expose message content; assert redacted type/role/byte/hash summaries instead. A managed WebSocket must preserve a Provider-validated ordinary append's explicit `previous_response_id` and report it in transport metrics.
 - Reasoning-option tests must prove recognized `modelOptions.thinking` shapes override the model's default effort, and request diagnostics must identify tool-output full replay separately from ordinary prior-response reuse.
 - A model-generated tool-loop test must verify the first tool call is emitted once and the following tool result is replayed with its matching call.
+- The Extension Development Host smoke must exercise `vscode.lm.selectChatModels()` and a complete tool-call/result loop, so the provider-facing VS Code API boundary is covered separately from direct provider tests.
 - Repeated reasoning deltas for one Responses item must retain one thinking-part ID, and reasoning that arrives after visible text must not interrupt the text sequence.
 - Complete function calls must be reported from `response.function_call_arguments.done` before later text, using the non-empty `output_item.added` name when the early event omits it; `response.output_item.done` must not duplicate the tool call.
 - Malformed historical function calls and their matched outputs must be excluded, while valid standalone tool outputs remain available for continuation.
