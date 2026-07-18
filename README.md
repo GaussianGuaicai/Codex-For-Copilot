@@ -64,9 +64,9 @@ Common settings:
 
 ## Context-window profiles
 
-Standard model entries advertise a usable input budget equal to 95% of the backend's active raw context window. When supported and not already active, the picker also shows a separate **Long context** entry: GPT-5.4 at 950,000 usable tokens when discovery reports a 1,000,000-token maximum, and GPT-5.6 Sol/Terra/Luna at 353,400 usable tokens for Codex access-token accounts on the canonical ChatGPT Codex backend.
+Standard model entries pass through the backend's active `context_window` unchanged. When supported and not already active, the picker also shows a separate **Long context** entry: GPT-5.4 at the discovered 1,000,000-token maximum, and GPT-5.6 Sol/Terra/Luna at the known 372,000-token ceiling for Codex access-token accounts on the canonical ChatGPT Codex backend.
 
-Profile suffixes such as `::context=1000000` are local picker IDs only. Standard and long entries send the same real backend model slug; the extension does not add a context-window or long-context field to Responses requests.
+Profile suffixes such as `::context=1000000` are local picker IDs only. Standard and long entries send the same real backend model slug; the extension does not add a context-window or long-context field to Responses requests, alter caller-supplied history, or perform provider-side compaction.
 
 ## Commands
 
