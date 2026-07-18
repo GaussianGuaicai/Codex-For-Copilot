@@ -22,7 +22,7 @@ async function run() {
             max_context_window: 1000000,
             input_modalities: ['text'],
             supported_in_api: true,
-            visibility: 'list',
+            visibility: 'hide',
             comp_hash: 'mockhash',
             default_reasoning_level: 'high',
             supported_reasoning_levels: [
@@ -84,10 +84,12 @@ async function run() {
   const config = vscode.workspace.getConfiguration('codexModelProvider');
   const originalBaseURL = config.inspect('baseURL')?.globalValue;
   const originalInstructions = config.inspect('instructions')?.globalValue;
+  const originalIncludeHiddenModels = config.inspect('includeHiddenModels')?.globalValue;
 
   try {
     await config.update('baseURL', `http://127.0.0.1:${address.port}/backend-api/codex/responses`, vscode.ConfigurationTarget.Global);
     await config.update('instructions', 'Extension host smoke instructions', vscode.ConfigurationTarget.Global);
+    await config.update('includeHiddenModels', true, vscode.ConfigurationTarget.Global);
 
     const models = await vscode.lm.selectChatModels({ vendor: 'codex-for-copilot' });
     assert(models.length > 0, 'No codex-for-copilot language model was selectable.');
@@ -113,6 +115,7 @@ async function run() {
   } finally {
     await config.update('baseURL', originalBaseURL, vscode.ConfigurationTarget.Global);
     await config.update('instructions', originalInstructions, vscode.ConfigurationTarget.Global);
+    await config.update('includeHiddenModels', originalIncludeHiddenModels, vscode.ConfigurationTarget.Global);
     server.close();
   }
   await vscode.commands.executeCommand('workbench.action.closeWindow');

@@ -149,6 +149,14 @@
             "advanced"
           ]
         },
+        "codexModelProvider.includeHiddenModels": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include callable models that the upstream catalog marks hidden. Their catalog context metadata is still passed through unchanged.",
+          "tags": [
+            "advanced"
+          ]
+        },
         "codexModelProvider.disabledModels": {
           "type": "array",
           "default": [],
