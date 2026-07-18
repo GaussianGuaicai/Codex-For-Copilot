@@ -577,7 +577,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           }
 
           const identity = `reasoning:${itemId}:${contentIndex}`;
-          if (!createThinkingPart(text, identity)) {
+          const thinkingPartId = `${itemId}:${contentIndex}`;
+          if (!createThinkingPart(text, thinkingPartId)) {
             return;
           }
 
@@ -586,7 +587,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             identity,
             text,
             emit: (presentedText) => {
-              const thinkingPart = createThinkingPart(presentedText, identity);
+              const thinkingPart = createThinkingPart(presentedText, thinkingPartId);
               if (thinkingPart) {
                 progress.report(thinkingPart);
               }
