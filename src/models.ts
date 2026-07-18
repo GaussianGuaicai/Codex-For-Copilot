@@ -173,7 +173,6 @@ export function buildProviderModels(
 
 export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCredentials['kind']): ResolvedProviderModel {
   const fallbackContextWindow = getFallbackContextWindow(config.model);
-  const fallbackMaxInputTokens = effectiveInputTokens(fallbackContextWindow);
   const knownRawContextCeiling = getKnownCodexRawContextCeiling(config.model, config.baseURL, credentialKind);
   const reasoningEffort = getDefaultReasoningEffort(undefined, config.model);
   const reasoningOptions = getReasoningOptions(undefined, config.model);
@@ -185,11 +184,10 @@ export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCr
       name: formatDisplayName(config.model),
       family: config.model,
       version: '1.0.0',
-      maxInputTokens: fallbackMaxInputTokens,
+      maxInputTokens: fallbackContextWindow,
       maxOutputTokens: config.maxOutputTokens,
       tooltip: getModelDescription(undefined, config.model),
       detail: buildModelDetail(
-        fallbackMaxInputTokens,
         fallbackContextWindow,
         reasoningOptions,
         reasoningEffort,
@@ -228,7 +226,6 @@ function buildDiscoveredModels(
   const reasoningEfforts = reasoningOptions.map((option) => option.effort);
   const defaultReasoningEffort = getDefaultReasoningEffort(model, slug);
   const activeContextWindow = getModelContextWindow(slug, model.context_window);
-  const maxInputTokens = effectiveInputTokens(activeContextWindow);
   const maximumContextWindow = getPositiveInteger(model.max_context_window);
   const knownRawContextCeiling = getKnownCodexRawContextCeiling(slug, config.baseURL, credentialKind);
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
@@ -240,11 +237,10 @@ function buildDiscoveredModels(
     name: displayName,
     family: slug,
     version: versionBase,
-    maxInputTokens,
+    maxInputTokens: activeContextWindow,
     maxOutputTokens: config.maxOutputTokens,
     tooltip,
     detail: buildModelDetail(
-      maxInputTokens,
       activeContextWindow,
       reasoningOptions,
       defaultReasoningEffort,
@@ -281,7 +277,7 @@ function buildDiscoveredModels(
         ...info,
         id: toLongContextProviderModelId(slug, longContextWindow),
         name: `${displayName} (Long context)`,
-        maxInputTokens: effectiveInputTokens(longContextWindow),
+        maxInputTokens: longContextWindow,
         detail: buildLongContextDetail(longContextWindow, reasoningOptions, defaultReasoningEffort)
       }
     }
@@ -366,10 +362,6 @@ function getFallbackContextWindow(model: string): number {
   return FIXED_MODEL_CONTEXT_WINDOWS[model] ?? DEFAULT_FALLBACK_CONTEXT_WINDOW;
 }
 
-export function effectiveInputTokens(contextWindow: number): number {
-  return Math.floor((contextWindow * 95) / 100);
-}
-
 function getLongContextWindow(
   model: string,
   activeContextWindow: number,
@@ -437,7 +429,6 @@ function stripProviderModelIdPrefix(modelId: string): string {
 }
 
 function buildModelDetail(
-  maxInputTokens: number,
   activeContextWindow: number,
   reasoningOptions?: readonly ReasoningOption[],
   defaultReasoningEffort?: ReasoningEffort,
@@ -449,9 +440,9 @@ function buildModelDetail(
   const hasLargerKnownCeiling = knownRawContextCeiling !== undefined
     && knownRawContextCeiling > activeContextWindow
     && (maximumContextWindow === undefined || knownRawContextCeiling > maximumContextWindow);
-  const parts = [
-    `Standard context: ${formatTokenValue(maxInputTokens)} usable tokens (${formatTokenValue(activeContextWindow)}-token raw active window)`
-  ];
+  const parts = [hasLargerMaximum
+    ? `Context: ${formatTokenCount(activeContextWindow)} (active)`
+    : `Context: ${formatTokenCount(activeContextWindow)}`];
 
   if (hasLargerMaximum) {
     parts.push(`Maximum context: ${formatTokenCount(maximumContextWindow)} (opt-in)`);
@@ -476,7 +467,7 @@ function buildLongContextDetail(
   defaultReasoningEffort?: ReasoningEffort
 ): string {
   const parts = [
-    `Long context: ${formatTokenValue(effectiveInputTokens(contextWindow))} usable tokens (${formatTokenValue(contextWindow)}-token window)`
+    `Long context: ${formatTokenCount(contextWindow)}`
   ];
   appendReasoningDetail(parts, reasoningOptions, defaultReasoningEffort);
   return parts.join(' | ');
@@ -520,11 +511,7 @@ function buildThinkingEffortSchema(reasoningOptions: readonly ReasoningOption[],
 }
 
 function formatTokenCount(value: number): string {
-  return `${formatTokenValue(value)} tokens`;
-}
-
-function formatTokenValue(value: number): string {
-  return value.toLocaleString();
+  return `${value.toLocaleString()} tokens`;
 }
 
 function formatReasoningEffort(effort: ReasoningEffort): string {

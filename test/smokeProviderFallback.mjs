@@ -154,7 +154,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const { CodexModelProvider } = require(bundlePath);
-const { buildFallbackModel, buildProviderModels, effectiveInputTokens, fetchAvailableModels } = require(modelsBundlePath);
+const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
 
 try {
   await runModelCatalogMetadataSmokeTest();
@@ -249,22 +249,20 @@ async function runModelCatalogMetadataSmokeTest() {
     }
 
     const formattedActiveContext = (272000).toLocaleString();
-    const formattedActiveUsable = (258400).toLocaleString();
     const formattedMaximumContext = (1000000).toLocaleString();
-    assertEqual(effectiveInputTokens(333001), 316350, 'effective input budget floors to 95 percent');
-    assertEqual(gpt54.info.maxInputTokens, 258400, 'GPT-5.4 standard effective input budget');
+    assertEqual(gpt54.info.maxInputTokens, 272000, 'GPT-5.4 standard context');
     assertEqual(
       gpt54.info.detail?.includes(
-        `Standard context: ${formattedActiveUsable} usable tokens (${formattedActiveContext}-token raw active window) | Maximum context: ${formattedMaximumContext} tokens (opt-in)`
+        `Context: ${formattedActiveContext} tokens (active) | Maximum context: ${formattedMaximumContext} tokens (opt-in)`
       ),
       true,
-      'GPT-5.4 standard detail distinguishes usable, active, and maximum context'
+      'GPT-5.4 detail distinguishes active and maximum context'
     );
     assertEqual(gpt54Long.info.name, 'GPT-5.4 (Long context)', 'GPT-5.4 long profile name');
-    assertEqual(gpt54Long.info.maxInputTokens, 950000, 'GPT-5.4 long effective input budget');
+    assertEqual(gpt54Long.info.maxInputTokens, 1000000, 'GPT-5.4 long context');
     assertEqual(gpt54Long.requestModel, 'gpt-5.4', 'GPT-5.4 long profile keeps real request model');
     assertEqual(
-      gpt54Long.info.detail?.includes('Long context: 950,000 usable tokens (1,000,000-token window)'),
+      gpt54Long.info.detail?.includes('Long context: 1,000,000 tokens'),
       true,
       'GPT-5.4 long profile detail'
     );
@@ -280,14 +278,14 @@ async function runModelCatalogMetadataSmokeTest() {
       JSON.stringify(gpt54.info.configurationSchema),
       'GPT-5.4 profiles preserve reasoning configuration'
     );
-    assertEqual(autoReview.info.maxInputTokens, 258400, 'Auto Review standard effective input budget');
+    assertEqual(autoReview.info.maxInputTokens, 272000, 'Auto Review standard context');
     assertEqual(
       autoReview.info.detail?.includes(`Maximum context: ${formattedMaximumContext} tokens (opt-in)`),
       true,
       'Auto Review maximum context detail'
     );
     assertEqual(spark.info.id, 'codex::gpt-5.3-codex-spark', 'Spark provider model id');
-    assertEqual(spark.info.maxInputTokens, 121600, 'Spark standard effective input budget');
+    assertEqual(spark.info.maxInputTokens, 128000, 'Spark standard context');
     assertEqual(spark.info.capabilities?.imageInput, false, 'Spark text-only capability');
     assertEqual(spark.info.capabilities?.toolCalling, true, 'Spark tool capability');
     assertEqual(spark.info.detail?.includes('Maximum context:'), false, 'Spark omits redundant maximum context');
@@ -320,7 +318,7 @@ async function runModelCatalogMetadataSmokeTest() {
       })
     ], 'codexAccessToken');
     const discoveredOverride = discoveredOverrideModels.find((model) => model.info.id === 'codex::gpt-5.4');
-    assertEqual(discoveredOverride?.info.maxInputTokens, 316350, 'valid discovered context gets a 95-percent effective budget');
+    assertEqual(discoveredOverride?.info.maxInputTokens, 333000, 'valid discovered context passes through unchanged');
     assertEqual(
       discoveredOverrideModels.some((model) => model.info.id === 'codex::gpt-5.4::context=1000000'),
       true,
@@ -333,7 +331,7 @@ async function runModelCatalogMetadataSmokeTest() {
         max_context_window: 0.5
       })
     ], 'codexAccessToken')[0];
-    assertEqual(fractionalMetadata.info.maxInputTokens, 258400, 'fractional context below one uses effective fixed fallback');
+    assertEqual(fractionalMetadata.info.maxInputTokens, 272000, 'fractional context below one uses fixed fallback');
     assertEqual(fractionalMetadata.info.detail?.includes('Maximum context:'), false, 'invalid fractional maximum is omitted');
 
     const sparkFallback = buildFallbackModel({
@@ -341,15 +339,15 @@ async function runModelCatalogMetadataSmokeTest() {
       model: 'gpt-5.3-codex-spark'
     }, 'codexAccessToken');
     assertEqual(sparkFallback.requestModel, 'gpt-5.3-codex-spark', 'Spark fallback request model');
-    assertEqual(sparkFallback.info.maxInputTokens, 121600, 'Spark effective fixed fallback context');
+    assertEqual(sparkFallback.info.maxInputTokens, 128000, 'Spark fixed fallback context');
     assertEqual(sparkFallback.info.capabilities?.imageInput, false, 'Spark fallback text-only capability');
 
     const defaultFallback = buildFallbackModel(config, 'codexAccessToken');
-    assertEqual(defaultFallback.info.maxInputTokens, 258400, 'default fallback uses effective context budget');
+    assertEqual(defaultFallback.info.maxInputTokens, 272000, 'default fallback passes through configured context');
     assertEqual(
-      defaultFallback.info.detail?.includes(`Standard context: ${formattedActiveUsable} usable tokens (${formattedActiveContext}-token raw active window)`),
+      defaultFallback.info.detail?.includes(`Context: ${formattedActiveContext} tokens`),
       true,
-      'fallback detail distinguishes usable and raw selected window'
+      'fallback detail reports configured context'
     );
     assertEqual(defaultFallback.info.detail?.includes(config.baseURL), true, 'fallback detail retains source URL');
 
@@ -372,17 +370,17 @@ async function runModelCatalogMetadataSmokeTest() {
       if (!standardModel || !longModel) {
         throw new Error(`Expected ${slug} standard and long metadata.`);
       }
-      assertEqual(standardModel.info.maxInputTokens, 258400, `${slug} advertises effective standard context`);
+      assertEqual(standardModel.info.maxInputTokens, 272000, `${slug} passes through standard context`);
       assertEqual(
         standardModel.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
         true,
         `${slug} shows known raw context ceiling`
       );
-      assertEqual(longModel.info.maxInputTokens, 353400, `${slug} advertises exact long effective context`);
+      assertEqual(longModel.info.maxInputTokens, 372000, `${slug} advertises exact long context`);
       assertEqual(longModel.requestModel, slug, `${slug} long profile keeps real request model`);
       assertEqual(longModel.info.name, `${standardModel.info.name} (Long context)`, `${slug} long profile name`);
       assertEqual(
-        longModel.info.detail?.includes('Long context: 353,400 usable tokens (372,000-token window)'),
+        longModel.info.detail?.includes('Long context: 372,000 tokens'),
         true,
         `${slug} long detail is truthful`
       );
@@ -465,7 +463,7 @@ async function runModelCatalogMetadataSmokeTest() {
       createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 372000, max_context_window: 372000 })
     ], 'codexAccessToken');
     const promotedModel = promotedModels[0];
-    assertEqual(promotedModel.info.maxInputTokens, 353400, 'future 372K catalog value gets an effective standard budget');
+    assertEqual(promotedModel.info.maxInputTokens, 372000, 'future 372K catalog value passes through unchanged');
     assertEqual(promotedModel.info.detail?.includes('Known raw context ceiling:'), false, 'active 372K omits redundant known ceiling');
     assertEqual(promotedModels.length, 1, 'active 372K catalog does not duplicate the long profile');
 
@@ -473,7 +471,7 @@ async function runModelCatalogMetadataSmokeTest() {
       createMockModel('gpt-5.4', 'GPT-5.4', { context_window: 1000000, max_context_window: 1000000 })
     ], 'codexAccessToken');
     assertEqual(activeMillionModels.length, 1, 'active GPT-5.4 1M catalog does not duplicate the long profile');
-    assertEqual(activeMillionModels[0].info.maxInputTokens, 950000, 'active GPT-5.4 1M standard budget is effective');
+    assertEqual(activeMillionModels[0].info.maxInputTokens, 1000000, 'active GPT-5.4 1M context passes through unchanged');
 
     const nearMatchModels = buildProviderModels(chatGptConfig, [
       createMockModel('gpt-5.4-preview', 'GPT-5.4 Preview', { context_window: 272000, max_context_window: 1000000 })
@@ -484,7 +482,7 @@ async function runModelCatalogMetadataSmokeTest() {
       ...chatGptConfig,
       model: 'gpt-5.6-sol'
     }, 'codexAccessToken');
-    assertEqual(fallbackCeiling.info.maxInputTokens, 258400, 'fallback keeps conservative effective context');
+    assertEqual(fallbackCeiling.info.maxInputTokens, 272000, 'fallback keeps conservative context');
     assertEqual(
       fallbackCeiling.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
       true,
