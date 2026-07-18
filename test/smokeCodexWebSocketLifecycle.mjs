@@ -173,6 +173,14 @@ try {
   assertEqual(turnStates[0], 'opaque-sticky-state', 'turn state captured');
   assertEqual(handshakeEvents[0].modelsEtag, 'models-etag-test', 'models etag captured');
   assertEqual(preparedFormalRequestBeforeCompletion, true, 'formal request bytes emitted before completion');
+  const formalRequestMetrics = transportMetrics.find((metrics) => metrics.previousResponseIdUsed === true
+    && typeof metrics.websocketSerializeMs === 'number');
+  assertEqual(typeof formalRequestMetrics?.websocketSerializeMs, 'number', 'WebSocket serialization timing is reported');
+  assertEqual(
+    formalRequestMetrics?.requestBodyBytes,
+    Buffer.byteLength(JSON.stringify(frames[1])),
+    'reported WebSocket bytes match the raw response.create frame'
+  );
 
   await streamResponseText({
     baseURL: `http://127.0.0.1:${port}/backend-api/codex/responses`,

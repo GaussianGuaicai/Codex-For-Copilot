@@ -30,6 +30,7 @@ import { shortHash } from './codexTelemetry';
 import { CodexLatencyRecorder, type CodexLatencyContext } from './codexLatency';
 import { createCodexContinuationSnapshot } from './codexContinuation';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
+import { StreamPresenter } from './streamPresenter';
 import {
   CodexModelCache,
   MODEL_CACHE_FRESH_TTL_MS,
@@ -488,18 +489,52 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         argumentsDoneAt?: number;
       }>();
 
-      const recordFirstVisibleOutput = (kind: 'text' | 'reasoning' | 'tool_call') => {
+      const recordFirstVisibleOutput = (
+        kind: 'text' | 'reasoning' | 'tool_call',
+        reportedAt = Date.now()
+      ) => {
         if (firstVisibleOutput) {
           return;
         }
 
         firstVisibleOutput = {
           kind,
-          latencyMs: Date.now() - streamStartedAt
+          latencyMs: Math.max(0, reportedAt - streamStartedAt)
         };
       };
 
-      await streamResponseText({
+      const presenter = new StreamPresenter(
+        (_kind, receivedAt) => latency.mark('firstBackendDelta', receivedAt),
+        (kind, reportedAt) => {
+          reportedVisibleOutput = true;
+          recordFirstVisibleOutput(kind, reportedAt);
+          if (kind === 'text') {
+            latency.mark('firstText', reportedAt);
+          } else {
+            latency.mark('firstReasoning', reportedAt);
+          }
+        }
+      );
+      let presentationMetricsRecorded = false;
+      const recordPresentationMetrics = () => {
+        if (presentationMetricsRecorded) {
+          return;
+        }
+        presentationMetricsRecorded = true;
+        const metrics = presenter.metrics();
+        latency.recordContext({
+          metricVersion: 2,
+          backendDeltaCount: metrics.backendDeltaCount,
+          progressReportCount: metrics.progressReportCount,
+          coalescedDeltaCount: metrics.coalescedDeltaCount,
+          coalescingDelayP95Ms: metrics.coalescingDelayP95Ms,
+          coalescingDelayMaxMs: metrics.coalescingDelayMaxMs
+        });
+        this.outputChannel.debug('response stream presentation', metrics);
+      };
+
+      try {
+        await streamResponseText({
         baseURL: config.baseURL,
         apiKey: credentials.apiKey,
         headers: credentials.headers,
@@ -526,26 +561,37 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         maxOutputTokens: requestOptions.maxOutputTokens,
         token,
         onTextDelta: (text) => {
-          reportedVisibleOutput = true;
-          hasReportedText ||= text.length > 0;
-          recordFirstVisibleOutput('text');
-          latency.mark('firstText');
-          progress.report(new vscode.LanguageModelTextPart(text));
+          presenter.push({
+            kind: 'text',
+            identity: 'text',
+            text,
+            emit: (presentedText) => {
+              hasReportedText ||= presentedText.length > 0;
+              progress.report(new vscode.LanguageModelTextPart(presentedText));
+            }
+          });
         },
         onReasoningTextDelta: ({ text, itemId, contentIndex }) => {
           if (hasReportedText) {
             return;
           }
 
-          const thinkingPart = createThinkingPart(text, `${itemId}:${contentIndex}`);
-          if (!thinkingPart) {
+          const identity = `reasoning:${itemId}:${contentIndex}`;
+          if (!createThinkingPart(text, identity)) {
             return;
           }
 
-          reportedVisibleOutput = true;
-          recordFirstVisibleOutput('reasoning');
-          latency.mark('firstReasoning');
-          progress.report(thinkingPart);
+          presenter.push({
+            kind: 'reasoning',
+            identity,
+            text,
+            emit: (presentedText) => {
+              const thinkingPart = createThinkingPart(presentedText, identity);
+              if (thinkingPart) {
+                progress.report(thinkingPart);
+              }
+            }
+          });
         },
         onToolCallAdded: (callId) => {
           toolCallLifecycleAt.set(callId, { addedAt: Date.now() });
@@ -564,10 +610,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           latency.mark('firstToolCallArgumentsDone');
         },
         onToolCall: (callId, name, toolInput) => {
+          presenter.flushBoundary();
           reportedVisibleOutput = true;
-          recordFirstVisibleOutput('tool_call');
-          latency.mark('firstToolCall');
           const reportedAt = Date.now();
+          latency.mark('firstToolCall', reportedAt);
+          recordFirstVisibleOutput('tool_call', reportedAt);
           progress.report(new vscode.LanguageModelToolCallPart(callId, name, toolInput));
           latency.mark('firstToolCallReported', reportedAt);
           this.rememberReportedToolCall(callId, name, reportedAt);
@@ -643,6 +690,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onResponseCompleted: (response) => {
+          presenter.flushBoundary();
+          recordPresentationMetrics();
           if (allowToolOutputContinuation && previousResponseIdUsed) {
             latency.recordContext({
               toolOutputContinuation: 'supported',
@@ -691,6 +740,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           void this.accountUsageRefreshSink?.refresh();
         },
         onResponseFailed: (message) => {
+          presenter.flushBoundary();
+          recordPresentationMetrics();
           this.outputChannel.error(`response failed model=${selectedModel.requestModel} previousResponseId=${previousResponseId ?? 'none'} message=${message}`);
         },
         onTransportFallback: ({ from, to, reason }) => {
@@ -719,7 +770,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             previousResponseId: previousResponseId ?? null
           });
         }
-      });
+        });
+      } finally {
+        presenter.flushBoundary();
+        recordPresentationMetrics();
+      }
       return { previousResponseIdUsed };
     };
 
@@ -847,7 +902,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           fullRequest,
           finalResponseId,
           rawResponseItems,
-          requestIdentity.turnId
+          requestIdentity.turnId,
+          {
+            clone: false,
+            requestFingerprint: reuseEnvelope.requestFingerprint
+          }
         ),
         updatedAt: Date.now()
       };
@@ -1556,6 +1615,7 @@ function readLatencyContextFromTransportMetrics(metrics: Record<string, unknown>
       ? readNonNegativeInteger(metrics.incrementalInputCount)
       : undefined,
     requestBodyBytes: readNonNegativeInteger(metrics.requestBodyBytes),
+    websocketSerializeMs: readNonNegativeNumber(metrics.websocketSerializeMs),
     prewarmResult
   };
 }
@@ -1575,5 +1635,11 @@ function readPrewarmResult(value: unknown): CodexLatencyContext['prewarmResult']
 function readNonNegativeInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? Math.floor(value)
+    : undefined;
+}
+
+function readNonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
     : undefined;
 }

@@ -29,7 +29,7 @@
 - Conversation reuse is allowed only for append-only transcript growth with an identical shared-builder request fingerprint; input, prior-response IDs, cache routing, and turn metadata are excluded, while model settings, tools, and schema changes must bust reuse.
 - Request-compression capability is endpoint-normalized, TTL-bounded, and reset for connection configuration or credential changes; only an explicit Content-Encoding rejection may disable it.
 - Both transports must convert a rejected `previous_response_id` into a continuation miss so the provider can retry once with the full input history.
-- Tool-result continuations must replay the matching `function_call` and `function_call_output` as full input; neither the provider nor a managed WebSocket session may compress that replay back into a standalone tool-output continuation.
+- Tool-result continuations may send only appended `function_call_output` items with `previous_response_id` on an eligible managed WebSocket. HTTP, socket changes, history forks, incompatible envelopes, and cached capability misses must retain the full `function_call` plus `function_call_output` replay.
 - Preserve configured `instructions` verbatim when tools are provided; tool definitions and the model determine tool-call ordering.
 - Capture function-call metadata from `response.output_item.added` and report it once at `response.function_call_arguments.done`, preferring the captured non-empty name; retain `response.output_item.done` only as a deduplicated compatibility fallback.
 - Never replay a `function_call` with an empty call ID or name. Drop its matching `function_call_output`, but retain standalone valid tool outputs used by normal continuation flows.
@@ -41,6 +41,6 @@
 - An idle WebSocket preconnection is keyed only by endpoint/account/auth compatibility, carries no synthetic request identity, and must be short-lived, bounded, and claimed by at most one formal thread request.
 - Latency context is a fixed whitelist of timing-safe counts and enums; never pass raw transport event payloads or request data into it.
 - Tool schema caching may retain only cloned function definitions, semantic signatures, and byte counts. It must never cache user input, tool output, prompt content, or raw tool-result data.
-- Branch Store and managed WebSocket state must record the same `CodexContinuationSnapshot`; tool-output full replay remains required until a compatible backend capability is demonstrated.
-- Fork diagnostics must use redacted item summaries only. A Provider-validated ordinary append may retain its explicit `previous_response_id` on a managed WebSocket, but any request containing `function_call_output` must omit it.
-- Request diagnostics must distinguish ordinary `previous_response_id` reuse from tool-output full replay. Thinking Effort may arrive through `modelOptions`; support recognized reasoning and thinking shapes while logging only the resolved enum and its source.
+- Branch Store owns ordinary conversation continuation snapshots. A managed WebSocket may retain only its short-lived prewarm snapshot; it must not independently choose ordinary or tool-result continuation.
+- Fork diagnostics must use redacted item summaries only. Provider-validated ordinary appends and eligible WebSocket tool-result appends may retain their explicit `previous_response_id`; all other tool-result requests must omit it.
+- Request diagnostics must distinguish ordinary `previous_response_id` reuse, WebSocket tool-result incremental continuation, and tool-result full replay. Thinking Effort may arrive through `modelOptions`; support recognized reasoning and thinking shapes while logging only the resolved enum and its source.

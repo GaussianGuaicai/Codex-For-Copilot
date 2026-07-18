@@ -12,6 +12,7 @@ export type CodexLatencyStage =
   | 'prewarmCompleted'
   | 'requestSent'
   | 'responseCreated'
+  | 'firstBackendDelta'
   | 'firstReasoning'
   | 'firstText'
   | 'firstToolCallAdded'
@@ -31,6 +32,9 @@ export interface CodexLatencyTrace {
   websocketConnectMs?: number;
   prewarmMs?: number;
   requestToCreatedMs?: number;
+  responseCreatedToFirstBackendDeltaMs?: number;
+  firstBackendDeltaToFirstReportMs?: number;
+  providerToFirstReportMs?: number;
   createdToFirstVisibleMs?: number;
   providerToFirstVisibleMs?: number;
   toolCallAddedToFirstArgumentsDeltaMs?: number;
@@ -40,6 +44,7 @@ export interface CodexLatencyTrace {
 }
 
 export interface CodexLatencyContext {
+  metricVersion?: 2;
   connectionOrigin?: 'fresh' | 'preconnected' | 'prewarm' | 'previous-response';
   connectionReused?: boolean;
   previousResponseIdUsed?: boolean;
@@ -59,6 +64,12 @@ export interface CodexLatencyContext {
   fullReplayReason?: string;
   reasoningEffort?: string | null;
   serviceTier?: string;
+  backendDeltaCount?: number;
+  progressReportCount?: number;
+  coalescedDeltaCount?: number;
+  coalescingDelayP95Ms?: number;
+  coalescingDelayMaxMs?: number;
+  websocketSerializeMs?: number;
 }
 
 export interface CodexLatencySnapshot {
@@ -87,6 +98,9 @@ export class CodexLatencyRecorder {
   }
 
   recordContext(context: CodexLatencyContext): void {
+    if (context.metricVersion !== undefined) {
+      this.context.metricVersion = context.metricVersion;
+    }
     if (context.connectionOrigin !== undefined) {
       this.context.connectionOrigin = context.connectionOrigin;
     }
@@ -144,6 +158,24 @@ export class CodexLatencyRecorder {
     if (context.serviceTier !== undefined) {
       this.context.serviceTier = context.serviceTier;
     }
+    if (context.backendDeltaCount !== undefined) {
+      this.context.backendDeltaCount = context.backendDeltaCount;
+    }
+    if (context.progressReportCount !== undefined) {
+      this.context.progressReportCount = context.progressReportCount;
+    }
+    if (context.coalescedDeltaCount !== undefined) {
+      this.context.coalescedDeltaCount = context.coalescedDeltaCount;
+    }
+    if (context.coalescingDelayP95Ms !== undefined) {
+      this.context.coalescingDelayP95Ms = context.coalescingDelayP95Ms;
+    }
+    if (context.coalescingDelayMaxMs !== undefined) {
+      this.context.coalescingDelayMaxMs = context.coalescingDelayMaxMs;
+    }
+    if (context.websocketSerializeMs !== undefined) {
+      this.context.websocketSerializeMs = context.websocketSerializeMs;
+    }
   }
 
   snapshot(completedAt = Date.now()): CodexLatencySnapshot {
@@ -152,6 +184,7 @@ export class CodexLatencyRecorder {
     const connectionAcquired = this.at('connectionAcquired');
     const requestSent = this.at('requestSent');
     const responseCreated = this.at('responseCreated');
+    const firstBackendDelta = this.at('firstBackendDelta');
     const firstVisible = this.firstVisibleAt();
     const responseCompleted = this.at('responseCompleted') ?? completedAt;
 
@@ -166,6 +199,9 @@ export class CodexLatencyRecorder {
         websocketConnectMs: this.optionalDuration(connectionAcquired, this.at('websocketConnected')),
         prewarmMs: this.optionalDuration(this.at('prewarmStarted'), this.at('prewarmCompleted')),
         requestToCreatedMs: this.optionalDuration(requestSent, responseCreated),
+        responseCreatedToFirstBackendDeltaMs: this.optionalDuration(responseCreated, firstBackendDelta),
+        firstBackendDeltaToFirstReportMs: this.optionalDuration(firstBackendDelta, firstVisible),
+        providerToFirstReportMs: this.optionalDuration(providerEntry, firstVisible),
         createdToFirstVisibleMs: this.optionalDuration(responseCreated, firstVisible),
         providerToFirstVisibleMs: this.optionalDuration(providerEntry, firstVisible),
         toolCallAddedToFirstArgumentsDeltaMs: this.optionalDuration(

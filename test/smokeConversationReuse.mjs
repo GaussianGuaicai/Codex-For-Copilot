@@ -1,11 +1,11 @@
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-reuse-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-reuse-'));
 const compareBundlePath = join(tempDir, 'convertMessages.cjs');
 const branchStoreBundlePath = join(tempDir, 'responseBranchStore.cjs');
 const providerBundlePath = join(tempDir, 'provider.cjs');

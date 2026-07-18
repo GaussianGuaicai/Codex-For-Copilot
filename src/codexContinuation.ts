@@ -12,13 +12,18 @@ export function createCodexContinuationSnapshot(
   fullRequest: CodexResponsesRequest,
   responseId: string,
   responseItems: readonly unknown[],
-  turnId: string
+  turnId: string,
+  options: {
+    clone?: boolean;
+    requestFingerprint?: string;
+  } = {}
 ): CodexContinuationSnapshot {
+  const clone = options.clone !== false;
   return {
-    fullRequest: structuredClone(fullRequest),
+    fullRequest: clone ? structuredClone(fullRequest) : fullRequest,
     responseId,
-    responseItems: structuredClone([...responseItems]),
-    requestFingerprint: fingerprintCodexRequest(fullRequest),
+    responseItems: clone ? structuredClone([...responseItems]) : [...responseItems],
+    requestFingerprint: options.requestFingerprint ?? fingerprintCodexRequest(fullRequest),
     turnId
   };
 }

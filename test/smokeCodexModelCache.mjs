@@ -1,10 +1,10 @@
 import { createRequire } from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-model-cache-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-model-cache-'));
 const bundlePath = join(tempDir, 'codexModelCache.cjs');
 const require = createRequire(import.meta.url);
 

@@ -558,12 +558,14 @@ function reportManagedWebSocketRequestMetrics(
   options: StreamResponseTextOptions,
   prepared: {
     requestBytes: number;
+    websocketSerializeMs: number;
     previousResponseIdUsed?: string;
     incrementalInputCount: number;
   }
 ): void {
   options.onTransportMetrics?.({
     requestBodyBytes: prepared.requestBytes,
+    websocketSerializeMs: prepared.websocketSerializeMs,
     previousResponseIdUsed: Boolean(prepared.previousResponseIdUsed),
     incrementalInputCount: prepared.incrementalInputCount
   });

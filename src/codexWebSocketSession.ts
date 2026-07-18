@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { performance } from 'node:perf_hooks';
 import { ResponsesWS, type ResponsesWSClientOptions } from 'openai/resources/responses/ws';
 import type { ResponsesServerEvent } from 'openai/resources/responses/responses';
 import {
@@ -50,6 +51,7 @@ export interface CodexWebSocketStreamOptions {
   onEvent: (event: ResponsesServerEvent) => void;
   onRequestPrepared?: (request: {
     requestBytes: number;
+    websocketSerializeMs: number;
     previousResponseIdUsed?: string;
     incrementalInputCount: number;
   }) => void;
@@ -62,7 +64,7 @@ export class CodexWebSocketSession {
   private handshake?: CodexWebSocketHandshake;
   private currentTurnId?: string;
   private turnState?: string;
-  private continuation?: CodexContinuationSnapshot;
+  private prewarmContinuation?: CodexContinuationSnapshot;
   private lastResponseWasPrewarm = false;
   private activeHandshakeListener?: CodexWebSocketStreamOptions['onHandshake'];
   private idlePreconnectionErrorListener?: (error: Error) => void;
@@ -141,7 +143,7 @@ export class CodexWebSocketSession {
     this.used = true;
 
     const allowToolOutputContinuation = options.allowToolOutputContinuation === true;
-    const incremental = this.buildIncrementalRequest(options.request, allowToolOutputContinuation);
+    const incremental = this.buildPrewarmContinuationRequest(options.request);
     const request = incremental?.request ?? options.request;
     const previousResponseId = getAllowedPreviousResponseId(request, allowToolOutputContinuation);
     const builderOptions: CodexRequestBuilderOptions = {
@@ -154,9 +156,13 @@ export class CodexWebSocketSession {
     if (this.turnState && event.client_metadata) {
       event.client_metadata[CodexHeader.turnState] = this.turnState;
     }
-    const requestBytes = Buffer.byteLength(JSON.stringify(event));
+    const serializationStartedAt = performance.now();
+    const serializedEvent = JSON.stringify(event);
+    const websocketSerializeMs = Math.max(0, performance.now() - serializationStartedAt);
+    const requestBytes = Buffer.byteLength(serializedEvent);
     options.onRequestPrepared?.({
       requestBytes,
+      websocketSerializeMs,
       previousResponseIdUsed: previousResponseId,
       incrementalInputCount: getRequestInput(incremental?.request ?? options.request).length
     });
@@ -175,7 +181,7 @@ export class CodexWebSocketSession {
     }
 
     try {
-      this.socket.send(event as Parameters<ResponsesWS['send']>[0]);
+      this.socket.sendRaw(serializedEvent);
       const iterator = this.socket.stream()[Symbol.asyncIterator]();
       while (true) {
         const next = await nextWithTimeout(iterator, WEBSOCKET_IDLE_TIMEOUT_MS, options.signal);
@@ -227,7 +233,7 @@ export class CodexWebSocketSession {
         throw new Error(failureMessage);
       }
 
-      this.continuation = responseId
+      this.prewarmContinuation = prewarm && responseId
         ? createCodexContinuationSnapshot(options.request, responseId, outputItems, options.identity.turnId)
         : undefined;
       this.lastResponseWasPrewarm = prewarm;
@@ -247,11 +253,15 @@ export class CodexWebSocketSession {
     }
   }
 
-  private buildIncrementalRequest(request: CodexResponsesRequest, allowToolOutputContinuation: boolean): {
+  private buildPrewarmContinuationRequest(request: CodexResponsesRequest): {
     request: CodexResponsesRequest;
     previousResponseId: string;
   } | undefined {
-    const continuation = this.continuation;
+    if (!this.lastResponseWasPrewarm) {
+      return undefined;
+    }
+
+    const continuation = this.prewarmContinuation;
     if (!continuation || !areCodexRequestsIncrementallyCompatible(continuation.fullRequest, request)) {
       return undefined;
     }
@@ -266,9 +276,6 @@ export class CodexWebSocketSession {
       }
     }
     const incrementalInput = currentInput.slice(previousInput.length);
-    if (!allowToolOutputContinuation && incrementalInput.some(isFunctionCallOutput)) {
-      return undefined;
-    }
     return {
       request: {
         ...request,
