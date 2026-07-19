@@ -819,6 +819,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     } catch (error) {
       if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
         if (reportedVisibleOutput) {
+          this.responseBranchStore.invalidateResponseId(error.previousResponseId);
+          if (reusableBranch) {
+            this.responseBranchStore.invalidate(reusableBranch.branchId);
+          }
           throw error;
         }
 
@@ -862,6 +866,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         }
 
         if (reportedVisibleOutput) {
+          this.responseBranchStore.invalidateResponseId(error.previousResponseId);
+          if (reusableBranch) {
+            this.responseBranchStore.invalidate(reusableBranch.branchId);
+          }
           throw error;
         }
 
