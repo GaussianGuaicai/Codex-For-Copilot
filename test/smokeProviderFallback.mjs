@@ -1041,6 +1041,9 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
     assertEqual(toolCalls.length, 1, 'model-generated tool call is reported once');
     assertEqual(toolCalls[0].callId, 'call_tool_loop', 'model-generated tool call id');
     assertEqual(toolCalls[0].name, 'read_file', 'model-generated tool call name');
+    const firstRequestStart = infoEvents.find((event) => event.message === 'provideLanguageModelChatResponse start');
+    assertEqual(firstRequestStart?.data?.toolMode, null, 'omitted tool mode remains distinguishable in diagnostics');
+    assertEqual(JSON.stringify(firstRequestStart?.data?.toolNames), JSON.stringify(['read_file']), 'request diagnostics record the delivered tool names');
 
     const secondParts = [];
     await provider.provideLanguageModelChatResponse(

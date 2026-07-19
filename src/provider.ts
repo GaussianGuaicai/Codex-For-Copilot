@@ -423,7 +423,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       inputItemCount: input.length,
       observedToolResults: observedToolResults.map(({ resultObservedAt: _resultObservedAt, ...toolResult }) => toolResult),
       toolCount: options.tools?.length ?? 0,
-      toolMode: options.toolMode ?? null,
+      toolMode: getToolModeName(options.toolMode),
+      toolNames: summarizeToolNames(options.tools),
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
       maxOutputTokens: config.maxOutputTokens
     });
@@ -1590,6 +1591,23 @@ export function buildResponseBranchToolSignatures(
   tools: readonly vscode.LanguageModelChatTool[] | undefined
 ): ResponseBranchToolSignatures {
   return resolveCodexToolSchemas(tools).toolSignatures;
+}
+
+function getToolModeName(toolMode: vscode.LanguageModelChatToolMode | undefined): 'auto' | 'required' | null {
+  if (toolMode === undefined) {
+    return null;
+  }
+  if (toolMode === vscode.LanguageModelChatToolMode.Required) {
+    return 'required';
+  }
+  if (toolMode === vscode.LanguageModelChatToolMode.Auto) {
+    return 'auto';
+  }
+  return null;
+}
+
+function summarizeToolNames(tools: readonly vscode.LanguageModelChatTool[] | undefined): readonly string[] {
+  return Object.freeze([...(tools ?? [])].map((tool) => tool.name).sort());
 }
 
 function getCredentialIdentity(credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>): string {
