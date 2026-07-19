@@ -202,6 +202,12 @@ export function parseModelIdentifier(modelId: string): ParsedModelIdentifier {
   return { requestModel, reasoningEffort };
 }
 
+export function isProviderModelIdentifier(modelId: string | undefined): modelId is string {
+  return typeof modelId === 'string'
+    && modelId.startsWith(PROVIDER_MODEL_ID_PREFIX)
+    && modelId.length > PROVIDER_MODEL_ID_PREFIX.length;
+}
+
 function buildDiscoveredModel(
   model: UpstreamModel,
   config: ProviderConfig,

@@ -7,6 +7,7 @@ import type {
   ResponseInputMessageContentList,
   ResponseInputTextContent
 } from 'openai/resources/responses/responses';
+import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 
 export type ResponsesInputMessage = ResponseInputItem;
@@ -31,7 +32,7 @@ const HISTORY_IMAGE_URI_ANNOTATION_PATTERN = /^\s*\[Image URI: ([^\]]+)\]\s*$/;
 const IGNORED_HISTORY_CONTENT = Symbol('ignored-history-content');
 
 export function convertMessagesToResponsesInput(messages: readonly vscode.LanguageModelChatRequestMessage[]): ResponsesInputMessage[] {
-  return messages.flatMap((message) => convertMessageToResponsesInput(message));
+  return normalizeDanglingFunctionCallsForReplay(messages.flatMap((message) => convertMessageToResponsesInput(message)));
 }
 
 export function estimateTokenCount(value: string | vscode.LanguageModelChatRequestMessage): number {
@@ -105,7 +106,14 @@ export function summarizeResponsesInputMessageForLog(item: ResponsesInputMessage
     return null;
   }
 
-  return stableSerialize(normalizeHistoryItemForComparison(item, createHistoryComparisonNormalizationState())).slice(0, 400);
+  const serialized = stableSerialize(normalizeHistoryItemForComparison(item, createHistoryComparisonNormalizationState()));
+  const record = item as { type?: unknown; role?: unknown };
+  return stableSerialize({
+    type: typeof record.type === 'string' ? record.type : 'unknown',
+    role: typeof record.role === 'string' ? record.role : null,
+    bytes: Buffer.byteLength(serialized),
+    hash: createHash('sha256').update(serialized).digest('hex').slice(0, 12)
+  });
 }
 
 export function getTextFromMessage(message: vscode.LanguageModelChatRequestMessage): string {
@@ -192,10 +200,12 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
 
     if (part instanceof vscode.LanguageModelToolCallPart) {
       flushMessage();
+      const callId = firstNonEmptyString(part.callId);
+      const name = firstNonEmptyString(part.name);
       items.push({
         type: 'function_call',
-        call_id: part.callId,
-        name: part.name,
+        call_id: callId,
+        name,
         arguments: stableJsonStringify(part.input ?? {})
       });
       continue;
@@ -203,9 +213,10 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
 
     if (part instanceof vscode.LanguageModelToolResultPart) {
       flushMessage();
+      const callId = firstNonEmptyString(part.callId);
       items.push({
         type: 'function_call_output',
-        call_id: part.callId,
+        call_id: callId,
         output: serializeToolResultContent(part.content)
       });
     }
@@ -213,6 +224,75 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
 
   flushMessage();
   return items;
+}
+
+function normalizeDanglingFunctionCallsForReplay(input: ResponsesInputMessage[]): ResponsesInputMessage[] {
+  const replayableFunctionCallIds = new Set<string>();
+  const malformedFunctionCallIds = new Set<string>();
+  for (const item of input) {
+    if (item.type !== 'function_call') {
+      continue;
+    }
+
+    if (isReplayableFunctionCall(item)) {
+      replayableFunctionCallIds.add(item.call_id);
+    } else {
+      malformedFunctionCallIds.add(item.call_id);
+    }
+  }
+  const outputCallIds = new Set(
+    input
+      .filter((item) => item.type === 'function_call_output')
+      .filter((item) => replayableFunctionCallIds.has(item.call_id))
+      .map((item) => item.call_id)
+  );
+  const normalized: ResponsesInputMessage[] = [];
+
+  for (const item of input) {
+    if (item.type === 'function_call') {
+      if (!isReplayableFunctionCall(item)) {
+        continue;
+      }
+
+      if (outputCallIds.has(item.call_id)) {
+        normalized.push(item);
+        continue;
+      }
+
+      normalized.push({
+        role: 'assistant',
+        content: `The previous assistant turn was interrupted before tool execution. It had prepared a call to ${item.name} with arguments ${item.arguments}, but no tool output was produced.`,
+        type: 'message'
+      });
+      continue;
+    }
+
+    if (item.type === 'function_call_output') {
+      if (firstNonEmptyString(item.call_id) && !malformedFunctionCallIds.has(item.call_id)) {
+        normalized.push(item);
+      }
+      continue;
+    }
+
+    normalized.push(item);
+  }
+
+  return normalized;
+}
+
+function isReplayableFunctionCall(item: ResponsesInputMessage): boolean {
+  return item.type === 'function_call'
+    && firstNonEmptyString(item.call_id).length > 0
+    && firstNonEmptyString(item.name).length > 0;
+}
+
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return '';
 }
 
 function serializeToolResultContent(content: readonly unknown[]): string | ResponseFunctionCallOutputItemList {
@@ -388,8 +468,8 @@ function findMatchingPrefix(
         matchedPrefixCount: index,
         mismatch: {
           index,
-          previousItemSummary: stableSerialize(previousItem).slice(0, 400),
-          currentItemSummary: stableSerialize(currentItem).slice(0, 400)
+          previousItemSummary: summarizeResponsesInputMessageForLog(previousInput[index]),
+          currentItemSummary: summarizeResponsesInputMessageForLog(currentInput[index])
         }
       };
     }

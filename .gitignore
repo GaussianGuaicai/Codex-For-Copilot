@@ -5,3 +5,4 @@ out/
 .vscode-test-user-data*/
 .vscode-test-extensions*/
 *.log
+undefined/**

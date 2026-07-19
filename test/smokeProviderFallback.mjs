@@ -2,15 +2,17 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-provider-fallback-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-provider-fallback-'));
 const bundlePath = join(tempDir, 'provider.cjs');
 const modelsBundlePath = join(tempDir, 'models.cjs');
 const moduleLoad = Module._load;
 const require = createRequire(import.meta.url);
+let performanceNow = () => Date.now();
+const performanceMock = { now: () => performanceNow() };
 
 const configValues = {
   baseURL: '',
@@ -70,6 +72,14 @@ class LanguageModelDataPart {
   }
 }
 
+class LanguageModelThinkingPart {
+  constructor(value, id, metadata) {
+    this.value = value;
+    this.id = id;
+    this.metadata = metadata;
+  }
+}
+
 class LanguageModelToolCallPart {
   constructor(callId, name, input) {
     this.callId = callId;
@@ -90,6 +100,7 @@ const vscodeMock = {
   EventEmitter,
   LanguageModelTextPart,
   LanguageModelDataPart,
+  LanguageModelThinkingPart,
   LanguageModelToolCallPart,
   LanguageModelToolResultPart,
   LanguageModelChatMessageRole: {
@@ -149,6 +160,9 @@ Module._load = function patchedLoad(request, parent, isMain) {
   if (request === 'vscode') {
     return vscodeMock;
   }
+  if (request === 'node:perf_hooks') {
+    return { performance: performanceMock };
+  }
 
   return moduleLoad.call(this, request, parent, isMain);
 };
@@ -159,10 +173,16 @@ const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = requir
 try {
   await runModelCatalogMetadataSmokeTest();
   await runProviderFallbackSmokeTest();
+  await runInterleavedResponsePresentationSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
+  await runRequestEnvelopeReuseInvalidationSmokeTest();
+  await runToolOutputFullInputReplaySmokeTest();
+  await runModelGeneratedToolLoopFullReplaySmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
+  await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
+  await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
   console.log('Smoke test passed: provider keeps catalog discovery separate from runtime availability and temporarily disables rejected models without retrying.');
 } finally {
   Module._load = moduleLoad;
@@ -481,7 +501,110 @@ async function runProviderFallbackSmokeTest() {
     assertEqual(warnings.some((entry) => entry.message === 'response model unavailable'), true, 'unavailable warning emitted');
     assertEqual(thrownMessage.includes('hidden temporarily from the model picker'), true, 'clear unavailable-model error');
   } finally {
-    server.close();
+    await closeServer(server);
+  }
+}
+
+async function runInterleavedResponsePresentationSmokeTest() {
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    for await (const _chunk of request) {
+      // Consume the request before starting the deterministic event sequence.
+    }
+
+    const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    send({
+      type: 'response.reasoning_text.delta',
+      item_id: 'rs_planning',
+      output_index: 0,
+      content_index: 0,
+      delta: 'Optimized ',
+      sequence_number: 1
+    });
+    send({
+      type: 'response.reasoning_text.delta',
+      item_id: 'rs_planning',
+      output_index: 0,
+      content_index: 0,
+      delta: 'tool selection',
+      sequence_number: 2
+    });
+    send({ type: 'response.output_text.delta', delta: '我先看一下仓库的', sequence_number: 3 });
+    send({
+      type: 'response.reasoning_text.delta',
+      item_id: 'rs_later',
+      output_index: 2,
+      content_index: 0,
+      delta: 'Analyzing',
+      sequence_number: 4
+    });
+    send({ type: 'response.output_text.delta', delta: '结构。', sequence_number: 5 });
+    send({ type: 'response.completed', response: { id: 'resp_interleaved', object: 'response', status: 'completed' } });
+    response.write('data: [DONE]\n\n');
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for interleaved response presentation test.');
+    }
+
+    const parts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('What is this repository?')] }],
+      {},
+      { report(part) { parts.push(part); } },
+      token
+    );
+
+    const presentation = parts
+      .filter((part) => part instanceof LanguageModelThinkingPart || part instanceof LanguageModelTextPart)
+      .map((part) => part instanceof LanguageModelThinkingPart
+        ? { type: 'thinking', value: part.value, id: part.id }
+        : { type: 'text', value: part.value });
+    assertEqual(JSON.stringify(presentation), JSON.stringify([
+      { type: 'thinking', value: 'Optimized ', id: 'rs_planning:0' },
+      { type: 'thinking', value: 'tool selection', id: 'rs_planning:0' },
+      { type: 'text', value: '我先看一下仓库的' },
+      { type: 'text', value: '结构。' }
+    ]), 'interleaved reasoning does not interrupt visible text streaming');
+  } finally {
+    await closeServer(server);
   }
 }
 
@@ -602,7 +725,373 @@ async function runHttpContinuationRecoverySmokeTest() {
       'disabled continuation full input'
     );
   } finally {
-    server.close();
+    await closeServer(server);
+  }
+}
+
+async function runRequestEnvelopeReuseInvalidationSmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    writeSseResponse(
+      response,
+      responseRequests.length === 1 ? 'first reply' : 'second reply',
+      responseRequests.length === 1 ? 'resp_envelope_initial' : 'resp_envelope_changed'
+    );
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalDefaultServiceTier = configValues.defaultServiceTier;
+  const originalMaxOutputTokens = configValues.maxOutputTokens;
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.defaultServiceTier = 'auto';
+  configValues.maxOutputTokens = 32;
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for request envelope reuse test.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    configValues.defaultServiceTier = 'fast';
+    configValues.maxOutputTokens = 64;
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'request envelope invalidation request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'request envelope change omits previous response id');
+    assertEqual(responseRequests[1].service_tier, 'priority', 'request envelope change applies new service tier');
+    assertEqual(responseRequests[1].max_output_tokens, 64, 'request envelope change applies new output cap');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'First request', type: 'message' },
+      { role: 'assistant', content: 'first reply', type: 'message' },
+      { role: 'user', content: 'Follow up', type: 'message' }
+    ]), 'request envelope change replays full input');
+  } finally {
+    configValues.defaultServiceTier = originalDefaultServiceTier;
+    configValues.maxOutputTokens = originalMaxOutputTokens;
+    await closeServer(server);
+  }
+}
+
+async function runToolOutputFullInputReplaySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (body.previous_response_id) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          message: 'No tool call found for function call output with call_id call_missing.',
+          param: 'input'
+        }
+      }));
+      return;
+    }
+
+    writeSseResponse(response, responseRequests.length === 1 ? 'first reply' : 'recovered reply', responseRequests.length === 1 ? 'resp_initial' : 'resp_recovered');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for tool output full-input replay test.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_missing', 'read_file', { filePath: 'src/provider.ts' })]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolResultPart('call_missing', [new vscodeMock.LanguageModelTextPart('file contents')])]
+        }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'tool output full-input replay request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'tool output full-input replay omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'First request', type: 'message' },
+      { type: 'function_call', call_id: 'call_missing', name: 'read_file', arguments: '{"filePath":"src/provider.ts"}' },
+      { type: 'function_call_output', call_id: 'call_missing', output: 'file contents' }
+    ]), 'tool output full-input replay');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runModelGeneratedToolLoopFullReplaySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    if (responseRequests.length === 1) {
+      send({
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: {
+          id: 'fc_tool_loop',
+          type: 'function_call',
+          call_id: 'call_tool_loop',
+          name: 'read_file',
+          arguments: ''
+        }
+      });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: 'fc_tool_loop',
+        output_index: 0,
+        name: '',
+        arguments: '{"filePath":"src/provider.ts"}'
+      });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'fc_tool_loop',
+          type: 'function_call',
+          call_id: 'call_tool_loop',
+          name: 'read_file',
+          arguments: '{"filePath":"src/provider.ts"}'
+        }
+      });
+      send({ type: 'response.completed', response: { id: 'resp_tool_loop', status: 'completed' } });
+    } else {
+      send({ type: 'response.output_text.delta', delta: 'Tool result received.' });
+      send({ type: 'response.completed', response: { id: 'resp_tool_loop_final', status: 'completed' } });
+    }
+    response.write('data: [DONE]\n\n');
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const tool = {
+    name: 'read_file',
+    description: 'Reads a workspace file.',
+    inputSchema: {
+      type: 'object',
+      properties: { filePath: { type: 'string' } },
+      required: ['filePath']
+    }
+  };
+  const infoEvents = [];
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    {
+      debug() {},
+      info(message, data) {
+        infoEvents.push({ message, data });
+      },
+      warn() {},
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for generated tool-loop coverage.');
+    }
+
+    const firstParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Read provider.ts.')] }],
+      { tools: [tool] },
+      { report(part) { firstParts.push(part); } },
+      token
+    );
+
+    const toolCalls = firstParts.filter((part) => part instanceof LanguageModelToolCallPart);
+    assertEqual(toolCalls.length, 1, 'model-generated tool call is reported once');
+    assertEqual(toolCalls[0].callId, 'call_tool_loop', 'model-generated tool call id');
+    assertEqual(toolCalls[0].name, 'read_file', 'model-generated tool call name');
+    const firstRequestStart = infoEvents.find((event) => event.message === 'provideLanguageModelChatResponse start');
+    assertEqual(firstRequestStart?.data?.toolMode, null, 'omitted tool mode remains distinguishable in diagnostics');
+    assertEqual(JSON.stringify(firstRequestStart?.data?.toolNames), JSON.stringify(['read_file']), 'request diagnostics record the delivered tool names');
+
+    const secondParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Read provider.ts.')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_tool_loop', 'read_file', { filePath: 'src/provider.ts' })]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolResultPart('call_tool_loop', [new vscodeMock.LanguageModelTextPart('file contents')])]
+        }
+      ],
+      { tools: [tool] },
+      { report(part) { secondParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'model-generated tool loop request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'tool loop full replay omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Read provider.ts.', type: 'message' },
+      { type: 'function_call', call_id: 'call_tool_loop', name: 'read_file', arguments: '{"filePath":"src/provider.ts"}' },
+      { type: 'function_call_output', call_id: 'call_tool_loop', output: 'file contents' }
+    ]), 'tool loop replays matching call and output');
+    const secondRequestStart = infoEvents.filter((event) => event.message === 'provideLanguageModelChatResponse start')[1];
+    const observedToolResults = secondRequestStart?.data?.observedToolResults;
+    assertEqual(observedToolResults.length, 1, 'tool result observation is recorded once');
+    assertEqual(observedToolResults[0].callId, 'call_tool_loop', 'observed tool result call id');
+    assertEqual(observedToolResults[0].name, 'read_file', 'observed tool result name');
+    assertEqual(typeof observedToolResults[0].reportedToResultObservedMs, 'number', 'observed tool result latency is numeric');
+    assertEqual(typeof observedToolResults[0].responseCompletedToResultObservedMs, 'number', 'VS Code tool-loop latency after provider completion is numeric');
+    assertEqual(observedToolResults[0].resultBytes > 0, true, 'observed tool result size is recorded');
+    const recoveryTiming = infoEvents.find((event) => event.message === 'tool result recovery timing');
+    assertEqual(recoveryTiming?.data?.toolResults?.length, 1, 'tool recovery timing records one result');
+    assertEqual(recoveryTiming?.data?.toolResults?.[0]?.callId, 'call_tool_loop', 'tool recovery timing call id');
+    assertEqual(
+      typeof recoveryTiming?.data?.toolResults?.[0]?.resultObservedToRequestSentMs,
+      'number',
+      'tool recovery request latency is numeric'
+    );
+    assertEqual(secondParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''), 'Tool result received.', 'tool loop continues once');
+
+  } finally {
+    configValues.transport = 'http';
+    await closeServer(server);
   }
 }
 
@@ -663,7 +1152,7 @@ async function runProviderCatalogVersionNeutralSmokeTest() {
     assertEqual(models.map((model) => model.id).join(','), 'codex::gpt-5.6-sol,codex::gpt-5.6-luna', 'multi-agent version does not affect discovery visibility');
   } finally {
     globalThis.fetch = originalFetch;
-    server.close();
+    await closeServer(server);
   }
 }
 
@@ -755,7 +1244,7 @@ async function runProviderUnavailableScopeSmokeTest() {
     assertEqual(requestedModels.join(','), 'http:gpt-5.6-luna', 'scoped unavailability test issues only one failing request');
   } finally {
     configValues.transport = 'http';
-    server.close();
+    await closeServer(server);
   }
 }
 
@@ -778,6 +1267,12 @@ function writeSseResponse(response, text, responseId) {
   response.write(`data: ${JSON.stringify({ type: 'response.completed', response: { id: responseId, object: 'response', status: 'completed' } })}\n\n`);
   response.write('data: [DONE]\n\n');
   response.end();
+}
+
+async function closeServer(server) {
+  await new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
 }
 
 function assertEqual(actual, expected, label) {
@@ -866,7 +1361,222 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
   } finally {
     configValues.disabledModels = [];
     configValues.modelAliases = {};
-    server.close();
+    await closeServer(server);
+  }
+}
+
+async function runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest() {
+  let responseRequestCount = 0;
+  let resolveResponseRequest;
+  const responseRequestStarted = new Promise((resolve) => {
+    resolveResponseRequest = resolve;
+  });
+  const server = createServer(async (request, response) => {
+    if (request.method !== 'POST') {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Unexpected request.' } }));
+      return;
+    }
+
+    for await (const _chunk of request) {
+      // Consume the request before emitting the deterministic stream.
+    }
+    responseRequestCount += 1;
+    resolveResponseRequest();
+    writeSseResponse(response, 'stale cache response', 'resp_stale_cache');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  let now = 1_000;
+  let modelRequestCount = 0;
+  let resolveRefreshStarted;
+  const refreshStarted = new Promise((resolve) => {
+    resolveRefreshStarted = resolve;
+  });
+  let resolveBackgroundRefresh;
+  const backgroundRefresh = new Promise((resolve) => {
+    resolveBackgroundRefresh = resolve;
+  });
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  Date.now = () => now;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    if (new URL(requestUrl).pathname.endsWith('/models')) {
+      modelRequestCount += 1;
+      if (modelRequestCount === 1) {
+        return new Response(JSON.stringify({
+          models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')]
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+
+      resolveRefreshStarted();
+      await backgroundRefresh;
+      return new Response(JSON.stringify({
+        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')]
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    return originalFetch(input, init);
+  };
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const initialModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = initialModels.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected a discovered model for stale-cache coverage.');
+    }
+
+    now += 10 * 60 * 1000 + 1;
+    const response = provider.provideLanguageModelChatResponse(
+      { ...model, id: 'gpt-5.6-sol' },
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue without waiting for /models.')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    await Promise.all([refreshStarted, responseRequestStarted]);
+    assertEqual(modelRequestCount, 2, 'stale cache starts one background model refresh');
+    assertEqual(responseRequestCount, 1, 'stale cache does not block the Responses request');
+
+    resolveBackgroundRefresh();
+    await response;
+  } finally {
+    resolveBackgroundRefresh?.();
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
+    await closeServer(server);
+  }
+}
+
+async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
+  let modelRequestCount = 0;
+  let responseRequestCount = 0;
+  let resolveModelRequestStarted;
+  const modelRequestStarted = new Promise((resolve) => {
+    resolveModelRequestStarted = resolve;
+  });
+  let resolveResponseRequestStarted;
+  const responseRequestStarted = new Promise((resolve) => {
+    resolveResponseRequestStarted = resolve;
+  });
+  let resolveModelResponse;
+  const modelResponse = new Promise((resolve) => {
+    resolveModelResponse = resolve;
+  });
+  const requestedModels = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      modelRequestCount += 1;
+      resolveModelRequestStarted();
+      await modelResponse;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequestCount += 1;
+    requestedModels.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).model);
+    resolveResponseRequestStarted();
+    writeSseResponse(response, 'direct model response', 'resp_direct_model');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.modelAliases = { 'gpt-5.6-luna': 'gpt-5.6-sol' };
+  const latencySnapshots = [];
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    {
+      debug() {},
+      info(message, payload) {
+        if (message === 'response latency') {
+          latencySnapshots.push(payload);
+        }
+      },
+      warn() {},
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  let responsePromise;
+
+  try {
+    const token = createCancellationToken();
+    const performanceValues = [100, 110, 116, 125, 130, 131];
+    performanceNow = () => performanceValues.shift() ?? 132;
+    responsePromise = provider.provideLanguageModelChatResponse(
+      { id: 'codex::gpt-5.6-luna', name: 'GPT-5.6-Luna', family: 'gpt-5.6-luna', version: 'mock', maxInputTokens: 372000 },
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue from the selected model.')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    const firstRequest = await Promise.race([
+      modelRequestStarted.then(() => 'models'),
+      responseRequestStarted.then(() => 'response')
+    ]);
+    assertEqual(firstRequest, 'response', 'provider model id bypasses cold model discovery');
+    assertEqual(modelRequestCount, 0, 'provider model id does not request /models before Responses');
+    assertEqual(responseRequestCount, 1, 'provider model id reaches Responses');
+    assertEqual(requestedModels.join(','), 'gpt-5.6-sol', 'provider model id applies configured alias directly');
+    await responsePromise;
+    assertEqual(latencySnapshots.length, 1, 'provider emits one latency snapshot');
+    assertEqual(latencySnapshots[0].context.requestBuildMs, 25, 'provider request build timing starts after message conversion');
+  } finally {
+    resolveModelResponse();
+    await responsePromise?.catch(() => undefined);
+    performanceNow = () => Date.now();
+    configValues.modelAliases = {};
+    await closeServer(server);
   }
 }
 

@@ -9,21 +9,42 @@ import OpenAI, {
 import { ResponsesWS, type ResponsesWSClientOptions } from 'openai/resources/responses/ws';
 import type {
   ResponsesClientEvent,
-  FunctionTool,
   ResponsesServerEvent,
-  ResponseUsage,
-  ToolChoiceOptions
+  ResponseUsage
 } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { ResponsesInputMessage } from './convertMessages';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { codexFetch } from './auth/codexAuthRequest';
+import {
+  buildCodexWebSocketPreconnectHeaders,
+  buildCodexRequestHeaders,
+  createCodexTurnMetadata,
+  stableSerializeCodexMetadata,
+  type CodexCompatibilityProfile,
+  type CodexRequestIdentity
+} from './codexProtocol';
+import {
+  buildCodexResponsesRequest,
+  buildCodexResponsesRequestWithMetrics,
+  type CodexRequestBuilderOptions
+} from './codexRequestBuilder';
+import { createCodexFetchAdapter, type RequestCompressionPolicy } from './codexFetchAdapter';
+import {
+  codexConnectionManager,
+  type CodexConnectionOrigin,
+  type CodexConnectionScope,
+  type CodexConnectionScopeBase
+} from './codexConnectionManager';
+import type { CodexWebSocketHandshake, CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 2;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const REUSABLE_WEBSOCKET_TTL_MS = 10 * 60 * 1000;
 const MAX_REUSABLE_WEBSOCKETS = 32;
+const WEBSOCKET_PREWARM_BUDGET_MS = 400;
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
@@ -52,7 +73,16 @@ export interface StreamResponseTextOptions {
   apiKey: string;
   headers?: Record<string, string>;
   transport?: 'auto' | 'http' | 'websocket';
+  compatibilityProfile?: CodexCompatibilityProfile;
+  identity?: CodexRequestIdentity;
+  turnState?: string;
+  authIdentity?: string;
+  extensionVersion?: string;
+  userAgent?: string;
+  websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
+  requestCompression?: RequestCompressionPolicy;
   previousResponseId?: string;
+  allowToolOutputContinuation?: boolean;
   store?: boolean;
   omitMaxOutputTokens?: boolean;
   model: string;
@@ -65,8 +95,20 @@ export interface StreamResponseTextOptions {
   maxOutputTokens: number;
   token: vscode.CancellationToken;
   onTextDelta: (text: string) => void;
-  onReasoningTextDelta?: (text: string) => void;
+  onReasoningTextDelta?: (delta: {
+    text: string;
+    itemId: string;
+    contentIndex: number;
+    outputIndex: number;
+  }) => void;
+  onToolCallAdded?: (callId: string, name: string) => void;
+  onToolCallArgumentsDelta?: (callId: string, name: string) => void;
+  onToolCallArgumentsDone?: (callId: string, name: string) => void;
   onToolCall?: (callId: string, name: string, input: object) => void;
+  onRawResponseItem?: (item: unknown) => void;
+  onTurnState?: (turnState: string) => void;
+  onWebSocketHandshake?: (handshake: CodexWebSocketHandshake) => void;
+  onTransportMetrics?: (metrics: Record<string, unknown>) => void;
   onResponseCreated?: (response: {
     id?: string;
     status?: string;
@@ -84,7 +126,20 @@ export interface StreamResponseTextOptions {
   }) => void;
   onWebSocketSession?: (event: {
     reused: boolean;
+    origin?: CodexConnectionOrigin;
   }) => void;
+}
+
+export interface PreconnectCodexResponsesWebSocketOptions {
+  baseURL: string;
+  apiKey: string;
+  headers?: Record<string, string>;
+  compatibilityProfile: CodexCompatibilityProfile;
+  authIdentity: string;
+  extensionVersion?: string;
+  userAgent?: string;
+  onConnected?: CodexWebSocketPreconnectionObserver['onConnected'];
+  onError?: CodexWebSocketPreconnectionObserver['onError'];
 }
 
 export function isResponsesContinuationMissError(error: unknown): error is ResponsesContinuationMissError {
@@ -92,11 +147,35 @@ export function isResponsesContinuationMissError(error: unknown): error is Respo
 }
 
 export function disposeReusableResponsesWebSockets(): void {
+  codexConnectionManager.dispose();
   const sessions = new Set(reusableWebSocketSessions.values());
   reusableWebSocketSessions.clear();
 
   for (const session of sessions) {
     closeReusableWebSocketSession(session);
+  }
+}
+
+export function preconnectCodexResponsesWebSocket(options: PreconnectCodexResponsesWebSocketOptions): boolean {
+  const scope = getManagedPreconnectionScope(options);
+  if (!scope) {
+    return false;
+  }
+
+  const headers = buildCodexWebSocketPreconnectHeaders({
+    credentialsHeaders: options.headers,
+    extensionVersion: options.extensionVersion ?? '0.0.0',
+    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+  });
+
+  try {
+    const client = createOpenAIClient(options, headers);
+    return codexConnectionManager.preconnect(scope, client, createResponsesWsOptions(headers, options.baseURL), {
+      onConnected: options.onConnected,
+      onError: options.onError
+    });
+  } catch {
+    return false;
   }
 }
 
@@ -125,7 +204,10 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
           throw error;
         }
 
-        disposeReusableResponsesWebSockets();
+        const managedScope = getManagedConnectionScope(options);
+        if (managedScope) {
+          codexConnectionManager.markHttpFallback(managedScope);
+        }
 
         options.onTransportFallback?.({
           from: 'websocket',
@@ -141,13 +223,27 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       return;
     }
 
-    if (options.previousResponseId && isOpaqueHttpContinuationRejection(error)) {
-      throw new ResponsesContinuationMissError(
-        'Responses API rejected previous_response_id with an opaque HTTP 400 response.',
-        options.previousResponseId,
-        { cause: error instanceof Error ? error : undefined },
-        true
-      );
+    if (options.previousResponseId) {
+      if (error instanceof ResponsesContinuationMissError) {
+        throw error;
+      }
+
+      if (isOpaqueHttpContinuationRejection(error)) {
+        throw new ResponsesContinuationMissError(
+          'Responses API rejected previous_response_id with an opaque HTTP 400 response.',
+          options.previousResponseId,
+          { cause: error instanceof Error ? error : undefined },
+          true
+        );
+      }
+
+      if (isMissingFunctionCallForToolOutputError(error)) {
+        throw new ResponsesContinuationMissError(
+          'Responses API rejected function_call_output because its previous_response_id lacks the matching function_call.',
+          options.previousResponseId,
+          { cause: error instanceof Error ? error : undefined }
+        );
+      }
     }
 
     throw normalizeResponsesError(error, options.baseURL);
@@ -160,17 +256,35 @@ async function streamResponseTextOverHttp(
   options: StreamResponseTextOptions,
   abortController: AbortController
 ): Promise<void> {
-  const client = createOpenAIClient(options);
-  const request = buildResponsesCreateRequest(options);
+  const { request, metrics } = buildResponsesCreateRequest(options);
+  options.onTransportMetrics?.({ ...metrics });
+  const headers = buildDynamicHeaders(options, 'http');
+  const client = createOpenAIClient(options, headers);
 
-  const stream = await client.responses.create(
+  const responsePromise = client.responses.create(
     request,
     {
+      headers,
       signal: abortController.signal,
       maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
       timeout: OPENAI_DEFAULT_TIMEOUT_MS
     }
   );
+  const { data: stream, response, request_id: requestId } = await responsePromise.withResponse();
+  const turnState = response.headers.get('x-codex-turn-state')?.trim();
+  if (turnState) {
+    options.onTurnState?.(turnState);
+  }
+  options.onTransportMetrics?.({
+    transportActual: 'http',
+    previousResponseIdUsed: Boolean(options.previousResponseId),
+    incrementalInputCount: options.previousResponseId ? options.input.length : 0,
+    requestIdPresent: Boolean(requestId),
+    turnStateReceived: Boolean(turnState),
+    serverModel: response.headers.get('openai-model') ?? undefined,
+    modelsEtagPresent: Boolean(response.headers.get('x-models-etag'))
+  });
+  const handleEvent = createResponsesServerEventHandler(options);
 
   for await (const event of stream) {
     if (options.token.isCancellationRequested) {
@@ -178,7 +292,7 @@ async function streamResponseTextOverHttp(
       return;
     }
 
-    handleResponsesServerEvent(event, options);
+    handleEvent(event);
   }
 }
 
@@ -186,6 +300,11 @@ async function streamResponseTextOverWebSocket(
   options: StreamResponseTextOptions,
   abortController: AbortController
 ): Promise<void> {
+  if (options.compatibilityProfile?.enabled && options.identity && options.authIdentity) {
+    await streamCodexResponseTextOverManagedWebSocket(options, abortController);
+    return;
+  }
+
   evictReusableWebSocketSessions();
 
   const reusedSession = takeReusableWebSocketSession(options);
@@ -193,6 +312,7 @@ async function streamResponseTextOverWebSocket(
   const socket = session.socket;
   let reusableResponseId: string | undefined;
   let keepSession = false;
+  const handleEvent = createResponsesServerEventHandler(options);
 
   options.onWebSocketSession?.({ reused: Boolean(reusedSession) });
 
@@ -212,9 +332,12 @@ async function streamResponseTextOverWebSocket(
   let sawTerminalEvent = false;
 
   try {
+    // Register the SDK error listener before sending on a reused open socket.
+    // The backend can reject a bad previous_response_id immediately.
+    const stream = socket.stream();
     socket.send(buildResponsesCreateEvent(options));
 
-    for await (const streamEvent of socket.stream()) {
+    for await (const streamEvent of stream) {
       if (options.token.isCancellationRequested) {
         abortController.abort();
         return;
@@ -223,7 +346,7 @@ async function streamResponseTextOverWebSocket(
       if (streamEvent.type === 'message') {
         sawResponseActivity = true;
         const message = streamEvent.message;
-        handleResponsesServerEvent(message, options);
+        handleEvent(message);
 
         if (message.type === 'response.completed') {
           sawTerminalEvent = true;
@@ -252,10 +375,11 @@ async function streamResponseTextOverWebSocket(
           );
         }
 
-        if (options.previousResponseId && isPreviousResponseNotFoundError(streamEvent.error.error?.code, streamEvent.error.error?.message)) {
+        const responseError = getResponseErrorDetails(streamEvent.error);
+        if (options.previousResponseId && isPreviousResponseNotFoundError(responseError.code, responseError.message)) {
           releaseReusableWebSocketSession(session, undefined, false);
           throw new ResponsesContinuationMissError(
-            streamEvent.error.error?.message ?? streamEvent.error.message,
+            typeof responseError.message === 'string' ? responseError.message : streamEvent.error.message,
             options.previousResponseId,
             { cause: streamEvent.error }
           );
@@ -302,11 +426,202 @@ async function streamResponseTextOverWebSocket(
   }
 }
 
+async function streamCodexResponseTextOverManagedWebSocket(
+  options: StreamResponseTextOptions,
+  abortController: AbortController
+): Promise<void> {
+  const identity = options.identity!;
+  const scope = getManagedConnectionScope(options)!;
+  if (codexConnectionManager.isHttpFallback(scope)) {
+    throw new WebSocketTransportUnavailableError('This Codex session is using its HTTP fallback.');
+  }
+
+  const headers = buildDynamicHeaders(options, 'websocket');
+  const client = createOpenAIClient(options, headers);
+  let managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+  options.onWebSocketSession?.({ reused: managed.reused, origin: managed.origin });
+  const { request, metrics } = buildResponsesCreateRequest(options);
+  options.onTransportMetrics?.({ ...metrics });
+  const builderOptions = createRequestBuilderOptions(options);
+  const handleEvent = createResponsesServerEventHandler(options);
+
+  const prewarmMode = options.websocketPrewarm ?? 'auto';
+  if (!managed.reused && prewarmMode === 'auto') {
+    options.onTransportMetrics?.({ prewarmResult: 'skipped-auto' });
+  }
+  if (!managed.reused
+    && prewarmMode === 'enabled'
+    && !codexConnectionManager.isPrewarmDisabled(scope)) {
+    const prewarmStartedAt = Date.now();
+    const prewarmController = new AbortController();
+    let prewarmTimedOut = false;
+    const abortPrewarm = () => prewarmController.abort();
+    abortController.signal.addEventListener('abort', abortPrewarm, { once: true });
+    const prewarmBudget = setTimeout(() => {
+      prewarmTimedOut = true;
+      prewarmController.abort();
+    }, WEBSOCKET_PREWARM_BUDGET_MS);
+    prewarmBudget.unref?.();
+    options.onTransportMetrics?.({
+      prewarmEnabled: true,
+      prewarmStartedAt,
+      prewarmBudgetMs: WEBSOCKET_PREWARM_BUDGET_MS
+    });
+    try {
+      const prewarm = await managed.session.prewarm({
+        request,
+        builderOptions,
+        identity,
+        allowToolOutputContinuation: false,
+        signal: prewarmController.signal,
+        onEvent: () => undefined,
+        onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
+        onHandshake: (handshake, connectedAt) => {
+          options.onWebSocketHandshake?.(handshake);
+          options.onTransportMetrics?.({ websocketConnectedAt: connectedAt });
+        }
+      });
+      reportManagedWebSocketResult(options, prewarm, 'prewarm', Date.now() - prewarmStartedAt);
+    } catch (error) {
+      if (options.token.isCancellationRequested || abortController.signal.aborted) {
+        return;
+      }
+      codexConnectionManager.disablePrewarm(scope);
+      codexConnectionManager.closeThread(scope);
+      managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+      options.onTransportMetrics?.({
+        prewarmEnabled: true,
+        prewarmResult: prewarmTimedOut ? 'timed-out' : 'disabled-after-failure',
+        prewarmTimedOut,
+        prewarmBudgetMs: WEBSOCKET_PREWARM_BUDGET_MS,
+        prewarmLatencyMs: Date.now() - prewarmStartedAt,
+        retryReason: error instanceof Error ? error.name : 'unknown'
+      });
+    } finally {
+      clearTimeout(prewarmBudget);
+      abortController.signal.removeEventListener('abort', abortPrewarm);
+    }
+  }
+
+  let visibleActivity = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await managed.session.stream({
+        request,
+        builderOptions,
+        identity,
+        allowToolOutputContinuation: options.allowToolOutputContinuation === true,
+        signal: abortController.signal,
+        onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
+        onHandshake: (handshake, connectedAt) => {
+          options.onWebSocketHandshake?.(handshake);
+          options.onTransportMetrics?.({ websocketConnectedAt: connectedAt });
+        },
+        onEvent: (event) => {
+          if (event.type === 'response.output_text.delta'
+            || event.type === 'response.reasoning_text.delta'
+            || event.type === 'response.function_call_arguments.done'
+            || event.type === 'response.output_item.done') {
+            visibleActivity = true;
+          }
+          handleEvent(event);
+        }
+      });
+      if (result.handshake?.serverModel && result.handshake.serverModel !== options.model) {
+        codexConnectionManager.closeThread(scope);
+        throw new WebSocketTransportUnavailableError(
+          `Responses WebSocket resolved server model ${result.handshake.serverModel} while requesting ${options.model}.`
+        );
+      }
+      reportManagedWebSocketResult(options, result, 'response');
+      return;
+    } catch (error) {
+      codexConnectionManager.closeThread(scope);
+      const classified = classifyManagedWebSocketError(error, options);
+      if (attempt === 0 && !visibleActivity && /connection limit/i.test(classified.message)) {
+        managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+        options.onTransportMetrics?.({ retryReason: 'websocket_connection_limit_reached' });
+        continue;
+      }
+      if (visibleActivity && classified instanceof WebSocketTransportUnavailableError) {
+        throw new WebSocketTransportUnavailableError(classified.message, {
+          cause: classified,
+          fallbackAllowed: false
+        });
+      }
+      throw classified;
+    }
+  }
+}
+
+function reportManagedWebSocketRequestMetrics(
+  options: StreamResponseTextOptions,
+  prepared: {
+    requestBytes: number;
+    websocketSerializeMs: number;
+    previousResponseIdUsed?: string;
+    incrementalInputCount: number;
+  }
+): void {
+  options.onTransportMetrics?.({
+    requestBodyBytes: prepared.requestBytes,
+    websocketSerializeMs: prepared.websocketSerializeMs,
+    previousResponseIdUsed: Boolean(prepared.previousResponseIdUsed),
+    incrementalInputCount: prepared.incrementalInputCount
+  });
+}
+
+function reportManagedWebSocketResult(
+  options: StreamResponseTextOptions,
+  result: Awaited<ReturnType<import('./codexWebSocketSession').CodexWebSocketSession['stream']>>,
+  kind: 'prewarm' | 'response',
+  latencyMs?: number
+): void {
+  if (result.turnState) {
+    options.onTurnState?.(result.turnState);
+  }
+  options.onTransportMetrics?.({
+    transportActual: 'websocket',
+    connectionReused: result.connectionReused,
+    previousResponseIdUsed: Boolean(result.previousResponseIdUsed),
+    incrementalInputCount: result.incrementalInputCount,
+    requestBodyBytes: result.requestBytes,
+    turnStateReceived: Boolean(result.turnState ?? result.handshake?.turnState),
+    serverModel: result.handshake?.serverModel,
+    modelsEtagPresent: Boolean(result.handshake?.modelsEtag),
+    ...(kind === 'prewarm'
+      ? { prewarmEnabled: true, prewarmResult: 'success', prewarmLatencyMs: latencyMs, prewarmCompletedAt: Date.now() }
+      : {})
+  });
+}
+
+function classifyManagedWebSocketError(error: unknown, options: StreamResponseTextOptions): Error {
+  const messages = collectErrorMessages(error);
+  if (options.previousResponseId && messages.some((message) => /previous_response_not_found/i.test(message))) {
+    return new ResponsesContinuationMissError(messages[0] ?? 'previous_response_not_found', options.previousResponseId, {
+      cause: error instanceof Error ? error : undefined
+    });
+  }
+  if (messages.some((message) => /connection limit|websocket_connection_limit_reached/i.test(message))) {
+    return new WebSocketTransportUnavailableError('Responses WebSocket connection limit reached.', {
+      cause: error instanceof Error ? error : undefined
+    });
+  }
+  if (error instanceof Error) {
+    const causeCode = (error as Error & { cause?: { code?: unknown } }).cause?.code;
+    if (/websocket/i.test(error.name)
+      || typeof causeCode === 'string'
+      || /websocket|socket|connection|handshake|closed|terminal event|before the response completed|getaddrinfo/i.test(error.message)) {
+      return new WebSocketTransportUnavailableError(error.message, { cause: error });
+    }
+    return error;
+  }
+  return new Error(String(error));
+}
+
 function createReusableWebSocketSession(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): ReusableResponsesWebSocketSession {
   const client = createOpenAIClient(options);
-  const socketOptions = (options.headers
-    ? { headers: options.headers }
-    : {}) as ResponsesWSClientOptions;
+  const socketOptions = createResponsesWsOptions(options.headers, options.baseURL);
 
   return {
     socket: new ResponsesWS(client, socketOptions),
@@ -415,60 +730,240 @@ function evictReusableWebSocketSessions(): void {
   }
 }
 
-function createOpenAIClient(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): OpenAI {
+function createOpenAIClient(
+  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
+  defaultHeaders = options.headers
+): OpenAI {
+  const customFetch = createCodexFetchAdapter({
+    endpointKey: options.compatibilityProfile?.endpointKey ?? normalizeBaseURL(options.baseURL),
+    compatibilityEnabled: options.compatibilityProfile?.enabled ?? false,
+    compression: options.requestCompression ?? 'disabled',
+    onObservation: (observation) => options.onTransportMetrics?.({
+      requestBodyBytes: observation.requestBytes,
+      compressedBodyBytes: observation.compressedBytes,
+      compressionAttempted: observation.compressionAttempted,
+      compressionUsed: observation.compressionUsed,
+      networkDurationMs: observation.durationMs,
+      responseStatus: observation.responseStatus
+    })
+  });
   return new OpenAI({
     apiKey: options.apiKey,
     baseURL: normalizeBaseURL(options.baseURL),
-    defaultHeaders: options.headers,
+    defaultHeaders,
+    fetch: customFetch,
     maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
     timeout: OPENAI_DEFAULT_TIMEOUT_MS
   });
 }
 
 function buildResponsesCreateRequest(options: StreamResponseTextOptions) {
-  const tools = options.tools?.map(convertToolToResponseTool) ?? [];
-
-  return {
-    model: options.model,
-    instructions: options.instructions,
-    input: options.input,
-    stream: true,
-    store: options.store ?? false,
-    ...(options.previousResponseId ? { previous_response_id: options.previousResponseId } : {}),
-    ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-    ...(options.reasoning ? { reasoning: options.reasoning } : {}),
-    ...(tools.length > 0
-      ? {
-          tools,
-          tool_choice: mapToolChoice(options.toolMode)
-        }
-      : {}),
-    ...(options.omitMaxOutputTokens ? {} : { max_output_tokens: options.maxOutputTokens })
-  } as const;
+  return buildCodexResponsesRequestWithMetrics(createRequestBuilderOptions(options));
 }
 
 function buildResponsesCreateEvent(options: StreamResponseTextOptions): ResponsesClientEvent {
-  const { stream: _stream, ...request } = buildResponsesCreateRequest(options);
+  const { request: builtRequest, metrics } = buildResponsesCreateRequest(options);
+  options.onTransportMetrics?.({ ...metrics });
+  const { stream: _stream, client_metadata: _metadata, ...request } = builtRequest;
+  return { type: 'response.create', ...request } as ResponsesClientEvent;
+}
 
+function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexRequestBuilderOptions {
   return {
-    type: 'response.create',
-    ...request
+    compatibilityEnabled: options.compatibilityProfile?.enabled ?? false,
+    identity: options.identity,
+    model: options.model,
+    instructions: options.instructions,
+    input: options.input,
+    tools: options.tools,
+    toolMode: options.toolMode,
+    reasoning: options.reasoning,
+    serviceTier: options.serviceTier,
+    previousResponseId: options.previousResponseId,
+    store: options.store,
+    omitMaxOutputTokens: options.omitMaxOutputTokens,
+    maxOutputTokens: options.maxOutputTokens,
+    textVerbosity: 'medium',
+    includeEncryptedReasoning: true
   };
 }
 
-function handleResponsesServerEvent(event: ResponsesServerEvent, options: StreamResponseTextOptions): void {
+function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'http' | 'websocket'): Record<string, string> {
+  if (!options.compatibilityProfile?.enabled || !options.identity) {
+    return { ...options.headers };
+  }
+  const metadata = stableSerializeCodexMetadata(createCodexTurnMetadata(options.identity));
+  return buildCodexRequestHeaders({
+    credentialsHeaders: options.headers,
+    identity: options.identity,
+    turnMetadata: metadata,
+    turnState: options.turnState,
+    extensionVersion: options.extensionVersion ?? '0.0.0',
+    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+  }, transport);
+}
+
+function getHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
+  const entry = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1];
+}
+
+function createResponsesWsOptions(headers?: Record<string, string>, baseURL?: string): ResponsesWSClientOptions {
+  const workspace = (vscode as typeof vscode & {
+    workspace?: { getConfiguration?(section?: string): { get?<T>(key: string): T | undefined } };
+  }).workspace;
+  const configuredProxy = workspace?.getConfiguration?.('http').get?.<string>('proxy')?.trim();
+  const candidateProxy = configuredProxy || process.env.HTTPS_PROXY || process.env.https_proxy
+    || process.env.HTTP_PROXY || process.env.http_proxy;
+  const proxy = baseURL && shouldBypassProxy(baseURL) ? undefined : candidateProxy;
+  return {
+    ...(headers ? { headers } : {}),
+    ...(proxy ? { agent: new HttpsProxyAgent(proxy) } : {})
+  } as unknown as ResponsesWSClientOptions;
+}
+
+export function shouldBypassProxy(baseURL: string, environment: NodeJS.ProcessEnv = process.env): boolean {
+  let url: URL;
+  try {
+    url = new URL(baseURL);
+  } catch {
+    return false;
+  }
+  const noProxy = [environment.NO_PROXY, environment.no_proxy]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(',');
+  if (!noProxy) {
+    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+  }
+  return noProxy.split(',').some((entry) => {
+    const pattern = entry.trim().toLowerCase();
+    if (!pattern) {
+      return false;
+    }
+    if (pattern === '*') {
+      return true;
+    }
+    const hostname = pattern.replace(/^https?:\/\//, '').split(':')[0].replace(/^\./, '');
+    return url.hostname.toLowerCase() === hostname || url.hostname.toLowerCase().endsWith(`.${hostname}`);
+  });
+}
+
+function getManagedConnectionScope(options: StreamResponseTextOptions): CodexConnectionScope | undefined {
+  if (!options.compatibilityProfile?.enabled || !options.identity || !options.authIdentity) {
+    return undefined;
+  }
+  return {
+    baseURL: normalizeBaseURL(options.baseURL),
+    authIdentity: options.authIdentity,
+    accountId: getHeader(options.headers, 'chatgpt-account-id'),
+    compatibilityProfile: options.compatibilityProfile.endpointKey,
+    sessionId: options.identity.sessionId,
+    threadId: options.identity.threadId
+  };
+}
+
+function getManagedPreconnectionScope(
+  options: PreconnectCodexResponsesWebSocketOptions
+): CodexConnectionScopeBase | undefined {
+  if (!options.compatibilityProfile.enabled || !options.authIdentity) {
+    return undefined;
+  }
+  return {
+    baseURL: normalizeBaseURL(options.baseURL),
+    authIdentity: options.authIdentity,
+    accountId: getHeader(options.headers, 'chatgpt-account-id'),
+    compatibilityProfile: options.compatibilityProfile.endpointKey
+  };
+}
+
+function createResponsesServerEventHandler(
+  options: StreamResponseTextOptions
+): (event: ResponsesServerEvent) => void {
+  const functionCallsByItemId = new Map<string, { callId: string; name: string }>();
+  const reportedFunctionCallItemIds = new Set<string>();
+
+  const reportFunctionCall = (itemId: string, callId: string, name: string, argumentsJson: string) => {
+    const normalizedCallId = callId.trim();
+    const normalizedName = name.trim();
+    if (!normalizedCallId || !normalizedName || reportedFunctionCallItemIds.has(itemId)) {
+      return;
+    }
+
+    reportedFunctionCallItemIds.add(itemId);
+    options.onToolCall?.(normalizedCallId, normalizedName, parseToolCallInput(argumentsJson));
+  };
+
+  return (event) => {
+    if (event.type === 'response.output_item.added' && event.item.type === 'function_call') {
+      if (event.item.id) {
+        functionCallsByItemId.set(event.item.id, {
+          callId: event.item.call_id,
+          name: event.item.name
+        });
+        options.onToolCallAdded?.(event.item.call_id, event.item.name);
+      }
+      return;
+    }
+
+    if (event.type === 'response.function_call_arguments.delta') {
+      const functionCall = functionCallsByItemId.get(event.item_id);
+      if (functionCall) {
+        options.onToolCallArgumentsDelta?.(functionCall.callId, functionCall.name);
+      }
+      return;
+    }
+
+    if (event.type === 'response.function_call_arguments.done') {
+      const functionCall = functionCallsByItemId.get(event.item_id);
+      if (functionCall) {
+        options.onToolCallArgumentsDone?.(
+          functionCall.callId,
+          firstNonEmptyString(functionCall.name, event.name)
+        );
+        reportFunctionCall(
+          event.item_id,
+          functionCall.callId,
+          firstNonEmptyString(functionCall.name, event.name),
+          event.arguments
+        );
+      }
+      return;
+    }
+
+    handleResponsesServerEvent(event, options, reportFunctionCall);
+  };
+}
+
+function firstNonEmptyString(...values: string[]): string {
+  return values.find((value) => value.trim().length > 0)?.trim() ?? '';
+}
+
+function handleResponsesServerEvent(
+  event: ResponsesServerEvent,
+  options: StreamResponseTextOptions,
+  reportFunctionCall: (itemId: string, callId: string, name: string, argumentsJson: string) => void
+): void {
+  if (event.type === 'response.output_item.done') {
+    options.onRawResponseItem?.(event.item);
+  }
+
   if (event.type === 'response.output_text.delta') {
     options.onTextDelta(event.delta);
     return;
   }
 
   if (event.type === 'response.reasoning_text.delta') {
-    options.onReasoningTextDelta?.(event.delta);
+    options.onReasoningTextDelta?.({
+      text: event.delta,
+      itemId: event.item_id,
+      contentIndex: event.content_index,
+      outputIndex: event.output_index
+    });
     return;
   }
 
   if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
-    options.onToolCall?.(event.item.call_id, event.item.name, parseToolCallInput(event.item.arguments));
+    reportFunctionCall(event.item.id ?? event.item.call_id, event.item.call_id, event.item.name, event.item.arguments);
     return;
   }
 
@@ -513,7 +1008,7 @@ function shouldFallbackToHttp(
     return false;
   }
 
-  return error instanceof WebSocketTransportUnavailableError || Boolean(getModelNotFoundName(error));
+  return error instanceof WebSocketTransportUnavailableError && error.fallbackAllowed;
 }
 
 function getMismatchedModelNotFoundName(error: { error?: { message?: string | null } | undefined; message: string } | string | undefined, requestedModel: string): string | undefined {
@@ -577,10 +1072,17 @@ function collectErrorMessages(error: unknown): string[] {
   return messages;
 }
 
+interface WebSocketTransportUnavailableErrorOptions extends ErrorOptions {
+  fallbackAllowed?: boolean;
+}
+
 class WebSocketTransportUnavailableError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly fallbackAllowed: boolean;
+
+  constructor(message: string, options?: WebSocketTransportUnavailableErrorOptions) {
     super(message, options);
     this.name = 'WebSocketTransportUnavailableError';
+    this.fallbackAllowed = options?.fallbackAllowed ?? true;
   }
 }
 
@@ -632,24 +1134,6 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
   return Math.floor(payload.input_tokens);
 }
 
-function convertToolToResponseTool(tool: vscode.LanguageModelChatTool): FunctionTool {
-  return {
-    type: 'function',
-    name: tool.name,
-    description: tool.description,
-    parameters: normalizeToolParameters(tool.inputSchema),
-    strict: false
-  };
-}
-
-function normalizeToolParameters(inputSchema: object | undefined): { [key: string]: unknown } | null {
-  return inputSchema ? (inputSchema as { [key: string]: unknown }) : null;
-}
-
-function mapToolChoice(toolMode: vscode.LanguageModelChatToolMode | undefined): ToolChoiceOptions {
-  return toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto';
-}
-
 function parseToolCallInput(argumentsJson: string): object {
   if (!argumentsJson.trim()) {
     return {};
@@ -676,10 +1160,48 @@ function isPreviousResponseNotFoundError(code: unknown, message: unknown): boole
   return typeof message === 'string' && message.includes('previous_response_not_found');
 }
 
+function getResponseErrorDetails(error: unknown): {
+  code: unknown;
+  message: unknown;
+} {
+  if (typeof error !== 'object' || error === null) {
+    return {
+      code: undefined,
+      message: undefined
+    };
+  }
+
+  const record = error as {
+    code?: unknown;
+    message?: unknown;
+    error?: unknown;
+  };
+  if (record.error && typeof record.error === 'object') {
+    const nested = record.error as {
+      code?: unknown;
+      message?: unknown;
+    };
+    return {
+      code: nested.code,
+      message: nested.message ?? record.message
+    };
+  }
+
+  return {
+    code: record.code,
+    message: record.message
+  };
+}
+
 function isOpaqueHttpContinuationRejection(error: unknown): boolean {
   return error instanceof APIError
     && error.status === 400
     && /\b400 status code \(no body\)/i.test(error.message);
+}
+
+function isMissingFunctionCallForToolOutputError(error: unknown): boolean {
+  return collectErrorMessages(error)
+    .some((message) => /no tool call found for function call output with call_id/i.test(message));
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {

@@ -1,11 +1,11 @@
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-auth-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-auth-'));
 const bundlePath = join(tempDir, 'auth.cjs');
 const entryPath = join(tempDir, 'auth-entry.ts');
 const repoImport = (relativePath) => JSON.stringify(join(process.cwd(), relativePath));
