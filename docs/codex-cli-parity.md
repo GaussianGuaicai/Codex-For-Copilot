@@ -53,6 +53,17 @@ request bytes, tool count, tool-schema byte count/cache state, request-build tim
 and service tier. It never contains prompt content,
 tool arguments or results, credentials, Turn State, or reasoning content.
 
+Tool-loop diagnostics keep the provider/VS Code boundary explicit. For every
+reported call, `toolArgumentsDoneToReportedMs` measures complete-argument
+delivery into `progress.report`. When the matching tool result returns in the
+next provider request, `reportedToResultObservedMs` measures the whole external
+interval and `responseCompletedToResultObservedMs` isolates the portion after
+the prior provider response completed. `resultObservedToRequestSentMs` then
+measures continuation dispatch. The provider has no stable callback for tool
+start, tool completion, or renderer paint, so the post-completion interval is
+reported as VS Code Chat tool-loop time rather than attributed to transport or
+the extension.
+
 Stable tool definitions are converted into a bounded immutable cache keyed by
 tool order, names, descriptions, and input schemas. Each lookup verifies the
 current canonical tool signature before reusing an object-identity entry, so an

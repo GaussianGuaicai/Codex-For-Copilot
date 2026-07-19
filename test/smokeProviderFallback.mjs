@@ -1077,6 +1077,7 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
     assertEqual(observedToolResults[0].callId, 'call_tool_loop', 'observed tool result call id');
     assertEqual(observedToolResults[0].name, 'read_file', 'observed tool result name');
     assertEqual(typeof observedToolResults[0].reportedToResultObservedMs, 'number', 'observed tool result latency is numeric');
+    assertEqual(typeof observedToolResults[0].responseCompletedToResultObservedMs, 'number', 'VS Code tool-loop latency after provider completion is numeric');
     assertEqual(observedToolResults[0].resultBytes > 0, true, 'observed tool result size is recorded');
     const recoveryTiming = infoEvents.find((event) => event.message === 'tool result recovery timing');
     assertEqual(recoveryTiming?.data?.toolResults?.length, 1, 'tool recovery timing records one result');

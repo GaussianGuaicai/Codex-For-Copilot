@@ -84,6 +84,7 @@ interface ReportedToolCall {
   callId: string;
   name: string;
   reportedAt: number;
+  responseCompletedAt?: number;
 }
 
 interface ToolOutputContinuationCapability {
@@ -95,6 +96,7 @@ interface ObservedToolResult {
   callId: string;
   name: string;
   reportedToResultObservedMs: number;
+  responseCompletedToResultObservedMs?: number;
   resultBytes: number;
   resultObservedAt: number;
 }
@@ -489,6 +491,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         argumentsDeltaAt?: number;
         argumentsDoneAt?: number;
       }>();
+      const reportedToolCallIds = new Set<string>();
 
       const recordFirstVisibleOutput = (
         kind: 'text' | 'reasoning' | 'tool_call',
@@ -620,6 +623,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           progress.report(new vscode.LanguageModelToolCallPart(callId, name, toolInput));
           latency.mark('firstToolCallReported', reportedAt);
           this.rememberReportedToolCall(callId, name, reportedAt);
+          reportedToolCallIds.add(callId);
           const lifecycle = toolCallLifecycleAt.get(callId);
           this.outputChannel.info('response tool call timing', {
             callId,
@@ -692,6 +696,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onResponseCompleted: (response) => {
+          this.markReportedToolCallsResponseCompleted(reportedToolCallIds);
           presenter.flushBoundary();
           recordPresentationMetrics();
           if (allowToolOutputContinuation && previousResponseIdUsed) {
@@ -1123,6 +1128,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
   }
 
+  private markReportedToolCallsResponseCompleted(callIds: ReadonlySet<string>, completedAt = Date.now()): void {
+    for (const callId of callIds) {
+      const reportedCall = this.pendingReportedToolCalls.get(callId);
+      if (reportedCall) {
+        reportedCall.responseCompletedAt = completedAt;
+      }
+    }
+  }
+
   private consumeReportedToolResults(input: readonly ResponsesInputMessage[]): ObservedToolResult[] {
     const now = Date.now();
     this.pruneReportedToolCalls(now);
@@ -1143,6 +1157,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         callId: reportedCall.callId,
         name: reportedCall.name,
         reportedToResultObservedMs: Math.max(0, now - reportedCall.reportedAt),
+        responseCompletedToResultObservedMs: reportedCall.responseCompletedAt === undefined
+          ? undefined
+          : Math.max(0, now - reportedCall.responseCompletedAt),
         resultBytes: Buffer.byteLength(stableSerialize(item.output)),
         resultObservedAt: now
       });

@@ -67,6 +67,8 @@ Common settings:
 
 `code chat --mode agent` can open an Agent-mode chat, but the VS Code CLI does not select a language model. Use the model picker for manual Chat validation. For an automated provider boundary check, run `npm run test:extension-host`: it starts an isolated Extension Development Host, selects this extension through `vscode.lm.selectChatModels()`, and validates a complete tool-call/result loop. Eligible WebSocket tool-result loops use the validated incremental `previous_response_id` continuation path; HTTP tool results and incompatible WebSocket branches keep full replay as the compatibility fallback.
 
+For tool-loop diagnosis, `Codex: Open Debug Logs` records only redacted timing and byte counts. In particular, `toolArgumentsDoneToReportedMs` measures the provider's delivery path, `responseCompletedToResultObservedMs` measures the interval after the provider response has completed until VS Code Chat returns a tool result, and `resultObservedToRequestSentMs` measures continuation dispatch. The middle interval belongs to VS Code's tool loop (including scheduling, confirmation, execution, and result delivery); it is not treated as extension transport latency or as a screen-paint timestamp.
+
 ## Commands
 
 - `Codex: Manage`
