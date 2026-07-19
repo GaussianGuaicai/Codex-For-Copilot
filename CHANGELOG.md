@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.2.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.1.2...v1.2.0) (2026-07-19)
+
+
+### Features
+
+* align ChatGPT Codex transport with Codex CLI ([#10](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/10)) ([3dd615b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/3dd615b8b9a245353200856b559270d7be839cd3))
+
 ## [1.1.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.1.1...v1.1.2) (2026-07-17)
 
 ### Model metadata and compatibility
