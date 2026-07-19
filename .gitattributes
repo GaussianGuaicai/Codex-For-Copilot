@@ -1,1 +1,13 @@
+# Keep source and CI-relevant text files stable across Windows and Unix checkouts.
+*.ts text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.vscodeignore text eol=lf
+
 src/models.ts whitespace=cr-at-eol
