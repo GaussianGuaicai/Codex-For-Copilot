@@ -183,7 +183,7 @@
         "codexModelProvider.includeHiddenModels": {
           "type": "boolean",
           "default": false,
-          "description": "Include callable models that the upstream catalog marks hidden. Their catalog context metadata is still passed through unchanged.",
+          "description": "Include every otherwise callable model that the upstream catalog marks hidden. API-key compatibility filtering still applies.",
           "tags": [
             "advanced"
           ]
