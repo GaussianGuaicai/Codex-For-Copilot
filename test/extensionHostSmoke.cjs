@@ -227,7 +227,6 @@ async function run() {
       await config.update('includeHiddenModels', originalIncludeHiddenModels, vscode.ConfigurationTarget.Global);
     }
     await closeServer(server);
-    await vscode.commands.executeCommand('workbench.action.closeWindow');
   }
 }
 
