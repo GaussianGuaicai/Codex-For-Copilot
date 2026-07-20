@@ -4,5 +4,6 @@ out/
 .tmp-vsix/
 .vscode-test-user-data*/
 .vscode-test-extensions*/
+.vscode-test/
 *.log
 undefined/**
