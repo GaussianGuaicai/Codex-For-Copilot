@@ -11,7 +11,24 @@ async function run() {
 
   let modelDiscoveryRequestCount = 0;
   let responseRequestCount = 0;
-  const server = createServer(async (request, response) => {
+  let mockServerFailure;
+  const pendingMockRequests = new Set();
+  const server = createServer((request, response) => {
+    const requestTask = handleMockRequest(request, response)
+      .catch((error) => {
+        mockServerFailure ??= error;
+        if (!response.headersSent) {
+          response.writeHead(500, { 'content-type': 'text/plain' });
+        }
+        if (!response.writableEnded) {
+          response.end('Mock server request failed.');
+        }
+      })
+      .finally(() => pendingMockRequests.delete(requestTask));
+    pendingMockRequests.add(requestTask);
+  });
+
+  async function handleMockRequest(request, response) {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       modelDiscoveryRequestCount += 1;
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -138,13 +155,27 @@ async function run() {
     response.write('data: {"type":"response.completed","response":{"id":"resp_mock","object":"response","status":"completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}\n\n');
     response.write('data: [DONE]\n\n');
     response.end();
-  });
+  }
+
+  async function waitForPendingMockRequests() {
+    while (pendingMockRequests.size > 0) {
+      await Promise.all([...pendingMockRequests]);
+    }
+  }
+
+  function throwIfMockServerFailed() {
+    if (mockServerFailure !== undefined) {
+      throw mockServerFailure;
+    }
+  }
 
   let config;
   let originalBaseURL;
   let originalInstructions;
   let originalTransport;
   let originalIncludeHiddenModels;
+  let configCleanupFailure;
+  let serverCleanupFailure;
   try {
     await listen(server);
     const address = server.address();
@@ -226,19 +257,37 @@ async function run() {
     ], { tools: [tool] });
     assert.strictEqual(await collectText(response), 'VS Code tool-loop smoke passed');
     assert.strictEqual(responseRequestCount, 5);
+    await waitForPendingMockRequests();
+    throwIfMockServerFailed();
 
     if (process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH) {
       await writeFile(process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH, JSON.stringify({ passed: true }));
     }
     console.log(`Extension host smoke passed: profiles, token counting, and tool loop completed with ${standardModel.vendor}/${standardModel.id}.`);
   } finally {
-    if (config) {
-      await config.update('baseURL', originalBaseURL, vscode.ConfigurationTarget.Global);
-      await config.update('instructions', originalInstructions, vscode.ConfigurationTarget.Global);
-      await config.update('transport', originalTransport, vscode.ConfigurationTarget.Global);
-      await config.update('includeHiddenModels', originalIncludeHiddenModels, vscode.ConfigurationTarget.Global);
+    try {
+      if (config) {
+        await config.update('baseURL', originalBaseURL, vscode.ConfigurationTarget.Global);
+        await config.update('instructions', originalInstructions, vscode.ConfigurationTarget.Global);
+        await config.update('transport', originalTransport, vscode.ConfigurationTarget.Global);
+        await config.update('includeHiddenModels', originalIncludeHiddenModels, vscode.ConfigurationTarget.Global);
+      }
+    } catch (error) {
+      configCleanupFailure = error;
     }
-    await closeServer(server);
+    try {
+      await closeServer(server);
+      await waitForPendingMockRequests();
+    } catch (error) {
+      serverCleanupFailure = error;
+    }
+  }
+  throwIfMockServerFailed();
+  if (configCleanupFailure !== undefined) {
+    throw configCleanupFailure;
+  }
+  if (serverCleanupFailure !== undefined) {
+    throw serverCleanupFailure;
   }
 }
 
