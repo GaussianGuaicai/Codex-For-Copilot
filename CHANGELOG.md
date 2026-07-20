@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.2.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.2.0...v1.2.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* match IPv6 no_proxy hosts ([47f7856](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/47f78567b5dae52259aa9d45640ad15affd8aeda))
+* match IPv6 no_proxy hosts ([8edd2ad](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/8edd2adb9540b4b06a3f895df6826fa111746aa3))
+
 ## [1.2.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.1.2...v1.2.0) (2026-07-19)
 
 ### Codex protocol compatibility
