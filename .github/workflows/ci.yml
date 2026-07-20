@@ -51,3 +51,6 @@ jobs:
 
       - name: Run smoke tests
         run: npm run test:smoke
+
+      - name: Run Extension Host smoke test
+        run: xvfb-run -a npm run test:extension-host
