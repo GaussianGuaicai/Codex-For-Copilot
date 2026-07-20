@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runTests } from '@vscode/test-electron';
 
 const workspaceRoot = resolve(import.meta.dirname, '..');
 const userDataDir = await mkdtemp(join(resolveTempDirectory(), 'codex-for-copilot-extension-host-'));
+const testHome = join(userDataDir, 'home');
 const extensionTestsPath = join(workspaceRoot, 'test', 'extensionHostSmoke.cjs');
 const resultPath = join(userDataDir, 'extension-host-smoke-result.json');
 const launchArgs = [
@@ -18,14 +19,28 @@ const launchArgs = [
   '--skip-welcome',
   '--disable-gpu'
 ];
-const previousResultPath = process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH;
-process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH = resultPath;
 
 try {
+  await mkdir(join(testHome, '.codex'), { recursive: true });
+  await writeFile(
+    join(testHome, '.codex', 'auth.json'),
+    JSON.stringify({ tokens: { access_token: 'extension-host-smoke-token' } })
+  );
+  await mkdir(join(userDataDir, 'User'), { recursive: true });
+  await writeFile(
+    join(userDataDir, 'User', 'settings.json'),
+    JSON.stringify({ 'codexModelProvider.includeHiddenModels': true })
+  );
+
   const vscodeExecutablePath = resolveLocalCodeExecutable();
   await runTests({
     extensionDevelopmentPath: workspaceRoot,
     extensionTestsPath,
+    extensionTestsEnv: {
+      CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH: resultPath,
+      HOME: testHome,
+      USERPROFILE: testHome
+    },
     launchArgs,
     ...(vscodeExecutablePath
       ? { vscodeExecutablePath }
@@ -36,11 +51,6 @@ try {
     throw new Error('Extension Host smoke did not report successful profile transitions and a complete tool loop.');
   }
 } finally {
-  if (previousResultPath === undefined) {
-    delete process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH;
-  } else {
-    process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH = previousResultPath;
-  }
   await rm(userDataDir, { recursive: true, force: true });
 }
 

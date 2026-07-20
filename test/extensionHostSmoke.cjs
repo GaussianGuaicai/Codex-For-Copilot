@@ -9,12 +9,11 @@ async function run() {
   const extension = vscode.extensions.getExtension(extensionId);
   assert(extension, 'Extension is not registered in VS Code.');
 
-  await extension.activate();
-  assert(extension.isActive, 'Extension did not activate.');
-
+  let modelDiscoveryRequestCount = 0;
   let responseRequestCount = 0;
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      modelDiscoveryRequestCount += 1;
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         models: [
@@ -36,6 +35,14 @@ async function run() {
           }
         ]
       }));
+      return;
+    }
+
+    if (request.method === 'GET' && request.url === '/backend-api/wham/usage') {
+      assert.strictEqual(request.headers.authorization, 'Bearer extension-host-smoke-token');
+      assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot Codex for Copilot');
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{}');
       return;
     }
 
@@ -150,8 +157,13 @@ async function run() {
     await config.update('instructions', 'Extension host smoke instructions', vscode.ConfigurationTarget.Global);
     await config.update('transport', 'http', vscode.ConfigurationTarget.Global);
     await config.update('includeHiddenModels', true, vscode.ConfigurationTarget.Global);
+    assert.strictEqual(config.get('includeHiddenModels'), true, 'Hidden-model opt-in was not effective before activation.');
+
+    await extension.activate();
+    assert(extension.isActive, 'Extension did not activate.');
 
     const models = await vscode.lm.selectChatModels({ vendor: 'codex-for-copilot' });
+    assert(modelDiscoveryRequestCount > 0, 'Model discovery did not reach the mock backend; verify isolated test credentials.');
     const standardModel = models.find((model) => model.id === 'codex::gpt-5.4');
     const longModel = models.find((model) => model.id === 'codex::gpt-5.4::context=1000000');
     assert(standardModel, 'Hidden GPT-5.4 standard profile was not selectable.');
