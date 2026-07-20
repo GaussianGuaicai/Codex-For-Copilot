@@ -2,6 +2,17 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.2.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.2.0...v1.2.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* classify wrapped continuation misses ([80da656](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/80da656fc4fcd1769e9c8aab11cefd11005bca29))
+* invalidate stale continuation branches ([f45a755](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/f45a755f9a84fca70172ea311814ae63d8c7e23d))
+* match IPv6 no_proxy hosts ([47f7856](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/47f78567b5dae52259aa9d45640ad15affd8aeda))
+* match IPv6 no_proxy hosts ([8edd2ad](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/8edd2adb9540b4b06a3f895df6826fa111746aa3))
+* recover wrapped continuation misses ([ed38c37](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/ed38c37363bb37cd15f2e0ef42431987e995c103))
+
 ## [1.2.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.1.2...v1.2.0) (2026-07-19)
 
 ### Codex protocol compatibility
