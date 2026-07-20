@@ -587,6 +587,35 @@ async function runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldB
       true,
       'lowercase no_proxy bypasses proxy when NO_PROXY is also set'
     );
+    for (const noProxy of ['::1', '[::1]', '[::1]:443', 'http://[::1]:443']) {
+      assertEqual(
+        shouldBypassProxy('http://[::1]:8080/backend-api/codex/responses', { NO_PROXY: noProxy }),
+        true,
+        `IPv6 loopback no_proxy form ${noProxy}`
+      );
+    }
+    assertEqual(
+      shouldBypassProxy('http://[::1]:8080/backend-api/codex/responses', {}),
+      true,
+      'IPv6 loopback bypasses proxy by default'
+    );
+    assertEqual(
+      shouldBypassProxy('http://[::1]:8080/backend-api/codex/responses', { NO_PROXY: '[::2]' }),
+      false,
+      'different IPv6 no_proxy host does not bypass'
+    );
+    for (const noProxy of ['[::1]junk', '[::1]:invalid', '[::1]:65536']) {
+      assertEqual(
+        shouldBypassProxy('http://[::1]:8080/backend-api/codex/responses', { NO_PROXY: noProxy }),
+        false,
+        `malformed bracketed no_proxy form ${noProxy}`
+      );
+    }
+    assertEqual(
+      shouldBypassProxy('https://example.com', { NO_PROXY: '[example.com]' }),
+      false,
+      'bracketed DNS name does not bypass proxy'
+    );
 
     await streamResponseText({
       baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,

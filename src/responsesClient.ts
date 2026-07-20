@@ -13,6 +13,7 @@ import type {
   ResponseUsage
 } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
+import { isIP } from 'node:net';
 import * as vscode from 'vscode';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { ResponsesInputMessage } from './convertMessages';
@@ -832,8 +833,9 @@ export function shouldBypassProxy(baseURL: string, environment: NodeJS.ProcessEn
   const noProxy = [environment.NO_PROXY, environment.no_proxy]
     .filter((value): value is string => Boolean(value?.trim()))
     .join(',');
+  const targetHostname = normalizeProxyHostname(url.hostname);
   if (!noProxy) {
-    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+    return targetHostname === 'localhost' || targetHostname === '127.0.0.1' || targetHostname === '::1';
   }
   return noProxy.split(',').some((entry) => {
     const pattern = entry.trim().toLowerCase();
@@ -843,9 +845,52 @@ export function shouldBypassProxy(baseURL: string, environment: NodeJS.ProcessEn
     if (pattern === '*') {
       return true;
     }
-    const hostname = pattern.replace(/^https?:\/\//, '').split(':')[0].replace(/^\./, '');
-    return url.hostname.toLowerCase() === hostname || url.hostname.toLowerCase().endsWith(`.${hostname}`);
+    const hostname = parseNoProxyHostname(pattern);
+    return Boolean(hostname)
+      && (targetHostname === hostname || targetHostname.endsWith(`.${hostname}`));
   });
+}
+
+function parseNoProxyHostname(pattern: string): string | undefined {
+  if (/^https?:\/\//.test(pattern)) {
+    try {
+      return normalizeProxyHostname(new URL(pattern).hostname).replace(/^\./, '');
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (pattern.startsWith('[')) {
+    const closingBracket = pattern.indexOf(']');
+    if (closingBracket <= 1) {
+      return undefined;
+    }
+
+    const hostname = pattern.slice(1, closingBracket);
+    const suffix = pattern.slice(closingBracket + 1);
+    if (isIP(hostname) !== 6 || !isValidNoProxyPortSuffix(suffix)) {
+      return undefined;
+    }
+    return normalizeProxyHostname(hostname);
+  }
+
+  const hostname = pattern.split(':').length > 2 ? pattern : pattern.split(':', 1)[0];
+  return normalizeProxyHostname(hostname).replace(/^\./, '') || undefined;
+}
+
+function isValidNoProxyPortSuffix(suffix: string): boolean {
+  if (!suffix) {
+    return true;
+  }
+  if (!/^:\d+$/.test(suffix)) {
+    return false;
+  }
+  const port = Number(suffix.slice(1));
+  return Number.isInteger(port) && port >= 0 && port <= 65535;
+}
+
+function normalizeProxyHostname(hostname: string): string {
+  return hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
 }
 
 function getManagedConnectionScope(options: StreamResponseTextOptions): CodexConnectionScope | undefined {
