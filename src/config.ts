@@ -11,6 +11,8 @@ export interface ProviderConfig {
   clientVersion: string;
   credentialsSource: 'auto' | 'codexAuth' | 'secretStorage';
   transport: 'auto' | 'http' | 'websocket';
+  websocketPrewarm: 'auto' | 'enabled' | 'disabled';
+  requestCompression: 'auto' | 'enabled' | 'disabled';
   model: string;
   includeHiddenModels: boolean;
   disabledModels: string[];
@@ -30,6 +32,8 @@ export function getProviderConfig(): ProviderConfig {
     clientVersion: config.get('clientVersion', '0.0.0'),
     credentialsSource: config.get('credentialsSource', 'auto'),
     transport: normalizeTransport(config.get('transport', 'auto')),
+    websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
+    requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
     model: config.get('model', 'gpt-5.5'),
     includeHiddenModels: config.get('includeHiddenModels', false),
     disabledModels: normalizeStringList(config.get('disabledModels', [])),
@@ -40,6 +44,10 @@ export function getProviderConfig(): ProviderConfig {
     maxOutputTokens: config.get('maxOutputTokens', 8192),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };
+}
+
+function normalizeTriState(value: string): 'auto' | 'enabled' | 'disabled' {
+  return value === 'enabled' || value === 'disabled' ? value : 'auto';
 }
 
 function normalizeTransport(value: string): ProviderConfig['transport'] {

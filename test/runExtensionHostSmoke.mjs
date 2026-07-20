@@ -35,8 +35,11 @@ try {
     }
     throw error;
   }
+  if (result.code !== 0) {
+    throw new Error(`Extension Host smoke exited with ${result.code ?? result.signal ?? 'an unknown status'}.`);
+  }
   if (resultPayload.passed !== true) {
-    throw new Error('Extension Host smoke did not report a successful provider request.');
+    throw new Error('Extension Host smoke did not report successful profile transitions and a complete tool loop.');
   }
 } finally {
   await rm(userDataDir, { recursive: true, force: true });

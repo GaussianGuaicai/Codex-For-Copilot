@@ -1,11 +1,11 @@
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
-const tempDir = await mkdtemp(join(tmpdir(), 'codex-for-copilot-reuse-'));
+const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-reuse-'));
 const compareBundlePath = join(tempDir, 'convertMessages.cjs');
 const branchStoreBundlePath = join(tempDir, 'responseBranchStore.cjs');
 const providerBundlePath = join(tempDir, 'provider.cjs');
@@ -57,6 +57,9 @@ const vscodeStub = {
   LanguageModelChatMessageRole: {
     User: 1,
     Assistant: 2
+  },
+  LanguageModelChatToolMode: {
+    Required: 2
   }
 };
 
@@ -100,17 +103,21 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const { compareResponsesInputHistory, convertMessagesToResponsesInput, stableSerialize } = require(compareBundlePath);
 const { ResponseBranchStore } = require(branchStoreBundlePath);
-const { buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures } = require(providerBundlePath);
+const { buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, getReasoningEffort } = require(providerBundlePath);
 
 try {
   runStableSerializeSmokeTest(stableSerialize);
+  runReasoningEffortOptionSmokeTest(getReasoningEffort);
   runCompareHistorySmokeTest(compareResponsesInputHistory);
   runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory);
   runBranchStoreSmokeTest(ResponseBranchStore);
+  runInputBudgetReuseSmokeTest(buildResponseBranchReuseEnvelope, ResponseBranchStore);
   runBranchStoreDisableReuseSmokeTest(ResponseBranchStore);
   runBranchStoreToolContinuationSmokeTest(ResponseBranchStore);
   runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, ResponseBranchStore);
   runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore);
+  runDanglingToolCallSteerSmokeTest(convertMessagesToResponsesInput);
+  runNamelessToolCallReplaySmokeTest(convertMessagesToResponsesInput);
   runImageToolResultSmokeTest(convertMessagesToResponsesInput);
   runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
   runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
@@ -127,15 +134,65 @@ function runStableSerializeSmokeTest(stableSerialize) {
   assertEqual(left, right, 'stable serialization');
 }
 
+function runReasoningEffortOptionSmokeTest(getReasoningEffort) {
+  const modelDefault = 'high';
+  const noDefault = undefined;
+
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, { modelOptions: { thinking: 'medium' } }, noDefault),
+    'medium',
+    'modelOptions.thinking',
+    false,
+    'direct thinking option overrides model default'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, { modelOptions: { thinking: { effort: 'low' } } }, noDefault),
+    'low',
+    'modelOptions.thinking.effort',
+    false,
+    'nested thinking option overrides model default'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, { modelOptions: { thinkingEffort: 'medium' } }, noDefault),
+    'medium',
+    'modelOptions.thinkingEffort',
+    false,
+    'thinking effort option overrides model default'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, {
+      modelConfiguration: { reasoningEffort: 'low' },
+      modelOptions: { thinking: 'medium' }
+    }, noDefault),
+    'medium',
+    'modelOptions.thinking',
+    true,
+    'request-level thinking option overrides a stale model configuration'
+  );
+  assertReasoningEffort(
+    getReasoningEffort(modelDefault, {}, 'low'),
+    'low',
+    'default',
+    false,
+    'configured default overrides model default'
+  );
+}
+
+function assertReasoningEffort(actual, effort, source, hasExplicitConflict, label) {
+  assertEqual(actual.effort, effort, `${label} effort`);
+  assertEqual(actual.source, source, `${label} source`);
+  assertEqual(actual.hasExplicitConflict, hasExplicitConflict, `${label} conflict state`);
+}
+
 function runCompareHistorySmokeTest(compareResponsesInputHistory) {
   const previousInput = [
     { type: 'message', role: 'user', content: 'hello' },
-    { type: 'message', role: 'assistant', content: 'hi' }
+    { type: 'message', role: 'assistant', content: 'previous-sensitive-content' }
   ];
   const appendInput = [...previousInput, { type: 'message', role: 'user', content: 'continue' }];
   const forkInput = [
     previousInput[0],
-    { type: 'message', role: 'assistant', content: 'different' }
+    { type: 'message', role: 'assistant', content: 'current-sensitive-content' }
   ];
 
   const appendComparison = compareResponsesInputHistory(previousInput, appendInput);
@@ -146,6 +203,18 @@ function runCompareHistorySmokeTest(compareResponsesInputHistory) {
   const forkComparison = compareResponsesInputHistory(previousInput, forkInput);
   assertEqual(forkComparison.kind, 'fork', 'fork comparison kind');
   assertEqual(forkComparison.matchedPrefixCount, 1, 'fork matched prefix count');
+  assertEqual(
+    JSON.stringify(forkComparison.mismatch).includes('previous-sensitive-content'),
+    false,
+    'fork previous mismatch summary redacts content'
+  );
+  assertEqual(
+    JSON.stringify(forkComparison.mismatch).includes('current-sensitive-content'),
+    false,
+    'fork current mismatch summary redacts content'
+  );
+  assertEqual(JSON.parse(forkComparison.mismatch?.previousItemSummary ?? '{}').type, 'message', 'fork summary item type');
+  assertEqual(JSON.parse(forkComparison.mismatch?.currentItemSummary ?? '{}').role, 'assistant', 'fork summary item role');
 }
 
 function runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory) {
@@ -194,6 +263,46 @@ function runBranchStoreSmokeTest(ResponseBranchStore) {
 
   const forkMatch = store.findReusableBranch(envelope, forkInput);
   assertEqual(forkMatch, undefined, 'fork does not reuse previous branch');
+}
+
+function runInputBudgetReuseSmokeTest(buildResponseBranchReuseEnvelope, ResponseBranchStore) {
+  const baseOptions = {
+    baseURL: 'https://chatgpt.com/backend-api/codex/responses',
+    authIdentity: 'codexAuth:acct-budget',
+    compatibilityEnabled: true,
+    model: 'gpt-5.4',
+    instructions: 'Budget reuse smoke',
+    store: false,
+    omitMaxOutputTokens: true,
+    maxOutputTokens: 1024,
+    textVerbosity: 'medium',
+    includeEncryptedReasoning: true
+  };
+  const standard = buildResponseBranchReuseEnvelope({ ...baseOptions, effectiveInputBudget: 258400 });
+  const long = buildResponseBranchReuseEnvelope({ ...baseOptions, effectiveInputBudget: 950000 });
+  const legacy = buildResponseBranchReuseEnvelope(baseOptions);
+  const previousInput = [{ type: 'message', role: 'user', content: 'hello' }];
+  const appendInput = [...previousInput, { type: 'message', role: 'user', content: 'continue' }];
+
+  assertEqual(standard.requestFingerprint, long.requestFingerprint, 'local budget stays out of request fingerprint');
+  assertEqual(standard.identityKey, long.identityKey, 'local budget stays out of reuse identity');
+
+  const upgradeStore = new ResponseBranchStore();
+  upgradeStore.recordSuccess(standard, previousInput, 'resp_standard');
+  assertEqual(upgradeStore.findReusableBranch(standard, appendInput)?.responseId, 'resp_standard', 'same budget reuses branch');
+  assertEqual(upgradeStore.findReusableBranch(long, appendInput)?.responseId, 'resp_standard', 'larger budget reuses smaller-budget branch');
+
+  const downgradeStore = new ResponseBranchStore();
+  downgradeStore.recordSuccess(long, previousInput, 'resp_long');
+  assertEqual(downgradeStore.findReusableBranch(standard, appendInput), undefined, 'smaller budget rejects larger-budget branch');
+  const downgradeDiagnostic = downgradeStore.explainReuseMiss(standard, appendInput);
+  assertEqual(downgradeDiagnostic?.inputBudgetCompatible, false, 'downgrade diagnostic reports incompatible budget');
+  assertEqual(downgradeDiagnostic?.previousEffectiveInputBudget, 950000, 'downgrade diagnostic reports stored budget');
+  assertEqual(downgradeDiagnostic?.currentEffectiveInputBudget, 258400, 'downgrade diagnostic reports target budget');
+
+  const legacyStore = new ResponseBranchStore();
+  legacyStore.recordSuccess(legacy, previousInput, 'resp_legacy');
+  assertEqual(legacyStore.findReusableBranch(standard, appendInput), undefined, 'missing legacy budget fails closed');
 }
 
 function runBranchStoreDisableReuseSmokeTest(ResponseBranchStore) {
@@ -256,10 +365,17 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
   const baseOptions = {
     baseURL: 'https://chatgpt.com/backend-api/codex/responses',
     authIdentity: 'codexAuth:acct-test',
+    compatibilityEnabled: true,
     model: 'gpt-5.4-mini',
     instructions: 'You are a helpful coding assistant integrated with VS Code.',
-    reasoningEffort: 'high',
-    toolMode: 1
+    reasoning: { effort: 'high' },
+    toolMode: 1,
+    serviceTier: 'default',
+    store: false,
+    omitMaxOutputTokens: false,
+    maxOutputTokens: 1024,
+    textVerbosity: 'medium',
+    includeEncryptedReasoning: true
   };
   const previousInput = [
     { type: 'message', role: 'user', content: 'Inspect the repo.' }
@@ -295,7 +411,7 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
     tools: currentToolsWithAddition
   });
 
-  assertEqual(left.identityKey, right.identityKey, 'tool catalog does not bust reuse identity key');
+  assertEqual(left.identityKey === right.identityKey, false, 'tool catalog busts the semantic request fingerprint');
 
   const store = new ResponseBranchStore();
   store.recordSuccess(left, previousInput, 'resp_tool_catalog_base');
@@ -310,6 +426,21 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
 
   const removedMatch = store.findReusableBranch(reuseEnvelope(left.identityKey, buildResponseBranchToolSignatures(currentToolsWithRemoval)), currentInput);
   assertEqual(removedMatch, undefined, 'removed existing tool busts reuse');
+
+  const changedServiceTier = buildResponseBranchReuseEnvelope({
+    ...baseOptions,
+    tools: previousTools,
+    serviceTier: 'priority'
+  });
+  const changedOutputCap = buildResponseBranchReuseEnvelope({
+    ...baseOptions,
+    tools: previousTools,
+    maxOutputTokens: 2048
+  });
+  assertEqual(left.identityKey === changedServiceTier.identityKey, false, 'service tier changes the semantic request fingerprint');
+  assertEqual(left.identityKey === changedOutputCap.identityKey, false, 'output cap changes the semantic request fingerprint');
+  assertEqual(store.findReusableBranch(changedServiceTier, currentInput), undefined, 'service tier change busts reuse');
+  assertEqual(store.findReusableBranch(changedOutputCap, currentInput), undefined, 'output cap change busts reuse');
 }
 
 function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore) {
@@ -355,6 +486,66 @@ function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, Res
   const reusableMatch = store.findReusableBranch(envelope, currentInput);
   assertEqual(reusableMatch?.responseId, 'resp_cache_control', 'cache_control reuse previous response id');
   assertEqual(reusableMatch?.comparison.kind, 'append', 'cache_control reuse comparison kind');
+}
+
+function runDanglingToolCallSteerSmokeTest(convertMessagesToResponsesInput) {
+  const steeredMessages = [
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscodeStub.LanguageModelTextPart('I will inspect the file.'),
+        new vscodeStub.LanguageModelToolCallPart('call_interrupted', 'read_file', { filePath: 'src/provider.ts' })
+      ]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelTextPart('Actually, ignore that and explain the config first.')]
+    }
+  ];
+
+  const converted = convertMessagesToResponsesInput(steeredMessages);
+  assertEqual(converted.some((item) => item.type === 'function_call'), false, 'dangling tool call is not replayed as a protocol function_call');
+  assertEqual(
+    JSON.stringify(converted),
+    JSON.stringify([
+      { role: 'assistant', content: 'I will inspect the file.', type: 'message' },
+      {
+        role: 'assistant',
+        content: 'The previous assistant turn was interrupted before tool execution. It had prepared a call to read_file with arguments {"filePath":"src/provider.ts"}, but no tool output was produced.',
+        type: 'message'
+      },
+      { role: 'user', content: 'Actually, ignore that and explain the config first.', type: 'message' }
+    ]),
+    'steered transcript preserves interrupted tool intent as assistant context'
+  );
+}
+
+function runNamelessToolCallReplaySmokeTest(convertMessagesToResponsesInput) {
+  const corruptedMessages = [
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+      content: [new vscodeStub.LanguageModelToolCallPart('call_nameless', '', { number: 10 })]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelToolResultPart('call_nameless', [
+        new vscodeStub.LanguageModelTextPart('Pull request details.')
+      ])]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelTextPart('Continue from the available conversation context.')]
+    }
+  ];
+
+  const converted = convertMessagesToResponsesInput(corruptedMessages);
+  assertEqual(JSON.stringify(converted), JSON.stringify([
+    {
+      role: 'user',
+      content: 'Continue from the available conversation context.',
+      type: 'message'
+    }
+  ]), 'nameless tool calls and their outputs are not replayed as invalid protocol items');
 }
 
 function runImageToolResultSmokeTest(convertMessagesToResponsesInput) {
@@ -485,5 +676,5 @@ function assertEqual(actual, expected, label) {
 }
 
 function reuseEnvelope(identityKey, toolSignatures) {
-  return { identityKey, toolSignatures };
+  return { identityKey, effectiveInputBudget: 258400, toolSignatures };
 }

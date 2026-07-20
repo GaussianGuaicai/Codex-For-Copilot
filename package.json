@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -31,11 +31,15 @@
     "test:extension-host": "node test/runExtensionHostSmoke.mjs",
     "package:vsix": "vsce package",
     "test:real-backend": "node test/realBackendProbe.mjs",
-    "test:smoke": "node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
+    "test:benchmark-backend": "node test/benchmarkBackend.mjs",
+    "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",
+    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs",
+    "test:smoke": "npm run test:codex-parity && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {
+    "https-proxy-agent": "^7.0.6",
     "openai": "^6.44.0",
     "ws": "^8.21.0"
   },
@@ -141,6 +145,31 @@
             "Always use the Responses WebSocket path and surface any transport error directly."
           ],
           "description": "Transport policy used for Responses streaming requests."
+        },
+        "codexModelProvider.websocketPrewarm": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "enumDescriptions": [
+            "Skip speculative generate:false requests and rely on idle WebSocket preconnection.",
+            "Experimentally run a bounded generate:false prewarm before a fresh formal WebSocket request.",
+            "Never run generate:false WebSocket prewarming."
+          ],
+          "description": "Controls bounded generate:false WebSocket prewarming for ChatGPT Codex sessions."
+        },
+        "codexModelProvider.requestCompression": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "description": "Controls Zstandard compression for large ChatGPT Codex Responses requests."
         },
         "codexModelProvider.model": {
           "type": "string",
