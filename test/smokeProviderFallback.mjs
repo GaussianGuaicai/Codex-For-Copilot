@@ -175,6 +175,8 @@ try {
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
+  await runStructuredHttpContinuationRecoverySmokeTest();
+  await runContinuationMissAfterVisibleOutputSmokeTest();
   await runRequestEnvelopeReuseInvalidationSmokeTest();
   await runToolOutputFullInputReplaySmokeTest();
   await runModelGeneratedToolLoopFullReplaySmokeTest();
@@ -723,6 +725,324 @@ async function runHttpContinuationRecoverySmokeTest() {
         { role: 'user', content: 'One more request', type: 'message' }
       ]),
       'disabled continuation full input'
+    );
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStructuredHttpContinuationRecoverySmokeTest() {
+  const responseRequests = [];
+  const warnings = [];
+  const infoMessages = [];
+  const failureMessages = [];
+  const remoteErrorMessage = 'Remote secret continuation detail must not be logged.';
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (responseRequests.length === 1) {
+      writeSseResponse(response, 'first structured reply', 'resp_structured_initial');
+      return;
+    }
+
+    if (responseRequests.length === 2 && body.previous_response_id) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          code: 'previous_response_not_found',
+          message: remoteErrorMessage,
+          param: 'previous_response_id'
+        }
+      }));
+      return;
+    }
+
+    if (responseRequests.length === 3) {
+      writeSseResponse(response, 'structured recovered reply', 'resp_structured_recovered');
+      return;
+    }
+
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Unexpected extra continuation recovery request.' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    {
+      debug() {},
+      info(message) {
+        infoMessages.push(message);
+      },
+      warn(message, payload) {
+        warnings.push({ message, payload });
+      },
+      error(message) {
+        failureMessages.push(message);
+      }
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for structured continuation recovery test.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Structured first request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    const recoveredParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Structured first request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first structured reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Structured follow up')] }
+      ],
+      {},
+      { report(part) { recoveredParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 3, 'structured continuation retries once with full history');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_structured_initial', 'structured continuation response id');
+    assertEqual(
+      JSON.stringify(responseRequests[1].input),
+      JSON.stringify([{ role: 'user', content: 'Structured follow up', type: 'message' }]),
+      'structured continuation sends only appended input first'
+    );
+    assertEqual('previous_response_id' in responseRequests[2], false, 'structured recovery omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
+      { role: 'user', content: 'Structured first request', type: 'message' },
+      { role: 'assistant', content: 'first structured reply', type: 'message' },
+      { role: 'user', content: 'Structured follow up', type: 'message' }
+    ]), 'structured recovery replays full input');
+    assertEqual(
+      recoveredParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'structured recovered reply',
+      'structured recovery reports only recovered output'
+    );
+
+    const resetWarnings = warnings.filter((entry) => entry.message === 'response continuation reset');
+    assertEqual(resetWarnings.length, 1, 'structured continuation emits one reset warning');
+    assertEqual(
+      resetWarnings[0].payload.reason,
+      'Responses API could not find previous_response_id.',
+      'structured reset warning uses the fixed classifier message'
+    );
+    assertEqual(JSON.stringify(resetWarnings).includes(remoteErrorMessage), false, 'structured reset warning omits remote error text');
+    assertEqual(infoMessages.filter((message) => message === 'response completed').length, 2, 'seed and recovered requests complete once each');
+    assertEqual(failureMessages.length, 0, 'recovered continuation emits no provider failure');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runContinuationMissAfterVisibleOutputSmokeTest() {
+  const responseRequests = [];
+  const warnings = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (responseRequests.length === 1) {
+      writeSseResponse(response, 'visible first reply', 'resp_visible_initial');
+      return;
+    }
+
+    if (responseRequests.length === 3) {
+      writeSseResponse(response, 'new chain reply', 'resp_visible_new_chain');
+      return;
+    }
+
+    if (responseRequests.length > 3) {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Visible output must prevent replay.' } }));
+      return;
+    }
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'partial visible output' })}\n\n`);
+    response.write(`data: ${JSON.stringify({
+      type: 'response.failed',
+      response: {
+        id: 'resp_visible_failed',
+        status: 'failed',
+        error: {
+          type: 'invalid_request_error',
+          code: 'previous_response_not_found',
+          message: 'Remote failure after visible output.',
+          param: 'previous_response_id'
+        }
+      }
+    })}\n\n`);
+    response.write('data: [DONE]\n\n');
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    {
+      debug() {},
+      info() {},
+      warn(message, payload) {
+        warnings.push({ message, payload });
+      },
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected sol model for visible continuation failure test.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Visible first request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    const visibleParts = [];
+    let capturedError;
+    try {
+      await provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Visible first request')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('visible first reply')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Visible follow up')] }
+        ],
+        {},
+        { report(part) { visibleParts.push(part); } },
+        token
+      );
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(capturedError?.message, 'Responses API could not find previous_response_id.', 'visible continuation miss surfaces once');
+    assertEqual(responseRequests.length, 2, 'visible continuation miss is never replayed');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_visible_initial', 'visible continuation uses prior response');
+    assertEqual(
+      visibleParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'partial visible output',
+      'visible continuation output is emitted once'
+    );
+    assertEqual(
+      warnings.some((entry) => entry.message === 'response continuation reset'),
+      false,
+      'visible continuation miss emits no reset warning'
+    );
+
+    const nextParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Visible first request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('visible first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Visible follow up')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('partial visible output')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Start a new chain')] }
+      ],
+      {},
+      { report(part) { nextParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 3, 'next turn issues one new-chain request');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'next turn does not reuse stale response id');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
+      { role: 'user', content: 'Visible first request', type: 'message' },
+      { role: 'assistant', content: 'visible first reply', type: 'message' },
+      { role: 'user', content: 'Visible follow up', type: 'message' },
+      { role: 'assistant', content: 'partial visible output', type: 'message' },
+      { role: 'user', content: 'Start a new chain', type: 'message' }
+    ]), 'next turn sends full input after stale branch invalidation');
+    assertEqual(
+      nextParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'new chain reply',
+      'next turn reports only new-chain output'
+    );
+    assertEqual(
+      visibleParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'partial visible output',
+      'visible continuation output remains unduplicated after the next turn'
+    );
+    assertEqual(
+      warnings.some((entry) => entry.message === 'response continuation reset'),
+      false,
+      'new-chain request emits no continuation reset warning'
     );
   } finally {
     await closeServer(server);

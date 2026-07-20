@@ -49,6 +49,13 @@ const WEBSOCKET_PREWARM_BUDGET_MS = 400;
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
+const PREVIOUS_RESPONSE_NOT_FOUND_CODE = 'previous_response_not_found';
+const PREVIOUS_RESPONSE_ID_PARAM = 'previous_response_id';
+const CONTINUATION_MISS_MESSAGE = 'Responses API could not find previous_response_id.';
+const MAX_ERROR_TRAVERSAL_NODES = 64;
+const MAX_ERROR_TRAVERSAL_DEPTH = 8;
+const MAX_ERROR_JSON_LENGTH = 16 * 1024;
+const UNREADABLE_ERROR_PROPERTY = Symbol('unreadableErrorProperty');
 
 interface ReusableResponsesWebSocketSession {
   socket: ResponsesWS;
@@ -147,6 +154,25 @@ export function isResponsesContinuationMissError(error: unknown): error is Respo
   return error instanceof ResponsesContinuationMissError;
 }
 
+export function isResponsesContinuationMissPayload(error: unknown): boolean {
+  let matched = false;
+  walkErrorEnvelope(error, (value) => {
+    if (typeof value !== 'object' || value === null) {
+      return true;
+    }
+
+    const code = readOwnErrorProperty(value, 'code');
+    if (code !== PREVIOUS_RESPONSE_NOT_FOUND_CODE) {
+      return true;
+    }
+
+    const param = readOwnErrorProperty(value, 'param');
+    matched = param === undefined || param === null || param === PREVIOUS_RESPONSE_ID_PARAM;
+    return !matched;
+  });
+  return matched;
+}
+
 export function disposeReusableResponsesWebSockets(): void {
   codexConnectionManager.dispose();
   const sessions = new Set(reusableWebSocketSessions.values());
@@ -227,6 +253,14 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
     if (options.previousResponseId) {
       if (error instanceof ResponsesContinuationMissError) {
         throw error;
+      }
+
+      if (isResponsesContinuationMissPayload(error)) {
+        throw new ResponsesContinuationMissError(
+          CONTINUATION_MISS_MESSAGE,
+          options.previousResponseId,
+          { cause: error instanceof Error ? error : undefined }
+        );
       }
 
       if (isOpaqueHttpContinuationRejection(error)) {
@@ -376,11 +410,10 @@ async function streamResponseTextOverWebSocket(
           );
         }
 
-        const responseError = getResponseErrorDetails(streamEvent.error);
-        if (options.previousResponseId && isPreviousResponseNotFoundError(responseError.code, responseError.message)) {
+        if (options.previousResponseId && isResponsesContinuationMissPayload(streamEvent.error)) {
           releaseReusableWebSocketSession(session, undefined, false);
           throw new ResponsesContinuationMissError(
-            typeof responseError.message === 'string' ? responseError.message : streamEvent.error.message,
+            CONTINUATION_MISS_MESSAGE,
             options.previousResponseId,
             { cause: streamEvent.error }
           );
@@ -597,12 +630,13 @@ function reportManagedWebSocketResult(
 }
 
 function classifyManagedWebSocketError(error: unknown, options: StreamResponseTextOptions): Error {
-  const messages = collectErrorMessages(error);
-  if (options.previousResponseId && messages.some((message) => /previous_response_not_found/i.test(message))) {
-    return new ResponsesContinuationMissError(messages[0] ?? 'previous_response_not_found', options.previousResponseId, {
+  if (options.previousResponseId && isResponsesContinuationMissPayload(error)) {
+    return new ResponsesContinuationMissError(CONTINUATION_MISS_MESSAGE, options.previousResponseId, {
       cause: error instanceof Error ? error : undefined
     });
   }
+
+  const messages = collectErrorMessages(error);
   if (messages.some((message) => /connection limit|websocket_connection_limit_reached/i.test(message))) {
     return new WebSocketTransportUnavailableError('Responses WebSocket connection limit reached.', {
       cause: error instanceof Error ? error : undefined
@@ -1032,9 +1066,9 @@ function handleResponsesServerEvent(
       );
     }
 
-    if (options.previousResponseId && isPreviousResponseNotFoundError(error?.code, error?.message)) {
+    if (options.previousResponseId && isResponsesContinuationMissPayload(error)) {
       throw new ResponsesContinuationMissError(
-        error?.message ?? 'Responses API previous_response_id was not found.',
+        CONTINUATION_MISS_MESSAGE,
         options.previousResponseId
       );
     }
@@ -1080,41 +1114,89 @@ function getModelNotFoundName(error: unknown): string | undefined {
 
 function collectErrorMessages(error: unknown): string[] {
   const messages: string[] = [];
-
-  const visit = (value: unknown) => {
-    if (!value) {
-      return;
-    }
-
+  walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
       messages.push(value);
-      return;
     }
-
-    if (value instanceof Error) {
-      messages.push(value.message);
-      visit((value as Error & { cause?: unknown }).cause);
-      return;
-    }
-
-    if (typeof value === 'object') {
-      const record = value as {
-        message?: unknown;
-        error?: unknown;
-        cause?: unknown;
-      };
-
-      if (typeof record.message === 'string') {
-        messages.push(record.message);
-      }
-
-      visit(record.error);
-      visit(record.cause);
-    }
-  };
-
-  visit(error);
+    return true;
+  });
   return messages;
+}
+
+function walkErrorEnvelope(error: unknown, visit: (value: unknown) => boolean): void {
+  const queue: Array<{ value: unknown; depth: number }> = [{ value: error, depth: 0 }];
+  const seenObjects = new WeakSet<object>();
+  let queueIndex = 0;
+  let visitedNodes = 0;
+
+  while (queueIndex < queue.length && visitedNodes < MAX_ERROR_TRAVERSAL_NODES) {
+    const current = queue[queueIndex];
+    queueIndex += 1;
+    visitedNodes += 1;
+
+    if (typeof current.value === 'object' && current.value !== null) {
+      if (seenObjects.has(current.value)) {
+        continue;
+      }
+      seenObjects.add(current.value);
+    }
+
+    if (!visit(current.value)) {
+      return;
+    }
+    if (current.depth >= MAX_ERROR_TRAVERSAL_DEPTH) {
+      continue;
+    }
+
+    if (typeof current.value === 'string') {
+      const parsed = parseBoundedErrorJson(current.value);
+      if (parsed !== undefined) {
+        queue.push({ value: parsed, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (typeof current.value !== 'object' || current.value === null) {
+      continue;
+    }
+
+    for (const property of ['error', 'cause', 'message'] as const) {
+      const nested = readOwnErrorProperty(current.value, property);
+      if (nested !== undefined && nested !== null && nested !== UNREADABLE_ERROR_PROPERTY) {
+        queue.push({ value: nested, depth: current.depth + 1 });
+      }
+    }
+  }
+}
+
+function parseBoundedErrorJson(message: string): unknown | undefined {
+  if (message.length === 0 || message.length > MAX_ERROR_JSON_LENGTH) {
+    return undefined;
+  }
+
+  const trimmed = message.trim();
+  const looksLikeObject = trimmed.startsWith('{') && trimmed.endsWith('}');
+  const looksLikeArray = trimmed.startsWith('[') && trimmed.endsWith(']');
+  if (!looksLikeObject && !looksLikeArray) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+}
+
+function readOwnErrorProperty(value: object, property: string): unknown | typeof UNREADABLE_ERROR_PROPERTY {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, property);
+    if (!descriptor) {
+      return undefined;
+    }
+    return 'value' in descriptor ? descriptor.value : UNREADABLE_ERROR_PROPERTY;
+  } catch {
+    return UNREADABLE_ERROR_PROPERTY;
+  }
 }
 
 interface WebSocketTransportUnavailableErrorOptions extends ErrorOptions {
@@ -1195,47 +1277,6 @@ function parseToolCallInput(argumentsJson: string): object {
   } catch {
     return { _raw: argumentsJson };
   }
-}
-
-function isPreviousResponseNotFoundError(code: unknown, message: unknown): boolean {
-  if (code === 'previous_response_not_found') {
-    return true;
-  }
-
-  return typeof message === 'string' && message.includes('previous_response_not_found');
-}
-
-function getResponseErrorDetails(error: unknown): {
-  code: unknown;
-  message: unknown;
-} {
-  if (typeof error !== 'object' || error === null) {
-    return {
-      code: undefined,
-      message: undefined
-    };
-  }
-
-  const record = error as {
-    code?: unknown;
-    message?: unknown;
-    error?: unknown;
-  };
-  if (record.error && typeof record.error === 'object') {
-    const nested = record.error as {
-      code?: unknown;
-      message?: unknown;
-    };
-    return {
-      code: nested.code,
-      message: nested.message ?? record.message
-    };
-  }
-
-  return {
-    code: record.code,
-    message: record.message
-  };
 }
 
 function isOpaqueHttpContinuationRejection(error: unknown): boolean {

@@ -34,10 +34,18 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { disposeReusableResponsesWebSockets, isResponsesContinuationMissError, shouldBypassProxy, streamResponseText } = require(bundlePath);
+const {
+  disposeReusableResponsesWebSockets,
+  isResponsesContinuationMissError,
+  isResponsesContinuationMissPayload,
+  shouldBypassProxy,
+  streamResponseText
+} = require(bundlePath);
 
 try {
+  runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
   await runHttpTransportSmokeTest(streamResponseText);
+  await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
   await runManagedAutoFallbackVisibilitySmokeTest(streamResponseText);
@@ -46,6 +54,7 @@ try {
   await runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldBypassProxy);
   await runWebSocketContinuationSmokeTest(streamResponseText);
   await runWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
+  await runManagedWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketToolOutputContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketSequentialReuseSmokeTest(streamResponseText);
 
@@ -54,6 +63,103 @@ try {
   disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
+  const exactPayload = {
+    code: 'previous_response_not_found',
+    param: 'previous_response_id'
+  };
+  assertEqual(isContinuationMissPayload(exactPayload), true, 'exact continuation code and param classify');
+  assertEqual(
+    isContinuationMissPayload({ code: 'previous_response_not_found' }),
+    true,
+    'missing continuation param classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload({ code: 'previous_response_not_found', param: 'input' }),
+    false,
+    'conflicting continuation param does not classify'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error('Backend prose mentioned previous_response_not_found during diagnostics.')),
+    false,
+    'unstructured prose does not classify'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error(JSON.stringify({ error: exactPayload }))),
+    true,
+    'bounded JSON Error.message envelope classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error(JSON.stringify({ message: 'previous_response_not_found' }))),
+    false,
+    'JSON prose without an exact code does not classify'
+  );
+
+  const customErrorWrapper = new Error('Generic SDK rejection');
+  customErrorWrapper.error = { error: exactPayload };
+  assertEqual(isContinuationMissPayload(customErrorWrapper), true, 'custom Error.error wrapper classifies');
+
+  const causedError = new Error('Outer SDK rejection', {
+    cause: Object.assign(new Error('APIError-like rejection'), {
+      status: 400,
+      error: exactPayload
+    })
+  });
+  assertEqual(isContinuationMissPayload(causedError), true, 'nested Error.cause APIError-like wrapper classifies');
+
+  const cyclic = {};
+  cyclic.cause = cyclic;
+  assertEqual(isContinuationMissPayload(cyclic), false, 'cyclic wrapper terminates without classifying');
+
+  let getterInvocationCount = 0;
+  const unreadableWrapper = new Error('Unreadable custom wrapper');
+  Object.defineProperty(unreadableWrapper, 'error', {
+    get() {
+      getterInvocationCount += 1;
+      return { error: exactPayload };
+    }
+  });
+  unreadableWrapper.cause = { error: exactPayload };
+  assertEqual(isContinuationMissPayload(unreadableWrapper), true, 'accessor is skipped while data-descriptor cause classifies');
+  assertEqual(getterInvocationCount, 0, 'error envelope getter is never invoked');
+
+  let overlyDeep = exactPayload;
+  for (let depth = 0; depth < 9; depth += 1) {
+    overlyDeep = { cause: overlyDeep };
+  }
+  assertEqual(isContinuationMissPayload(overlyDeep), false, 'payload beyond traversal depth does not classify');
+
+  const overlyWide = createErrorEnvelopeTree(4);
+  let lastLeaf = overlyWide;
+  for (let depth = 0; depth < 4; depth += 1) {
+    lastLeaf = lastLeaf.message;
+  }
+  lastLeaf.code = 'previous_response_not_found';
+  lastLeaf.param = 'previous_response_id';
+  assertEqual(isContinuationMissPayload(overlyWide), false, 'payload beyond traversal node budget does not classify');
+
+  const oversizedMessage = JSON.stringify({
+    error: exactPayload,
+    padding: 'x'.repeat(17 * 1024)
+  });
+  assertEqual(
+    isContinuationMissPayload(new Error(oversizedMessage)),
+    false,
+    'oversized JSON Error.message is not parsed'
+  );
+}
+
+function createErrorEnvelopeTree(depth) {
+  if (depth === 0) {
+    return {};
+  }
+  return {
+    error: createErrorEnvelopeTree(depth - 1),
+    cause: createErrorEnvelopeTree(depth - 1),
+    message: createErrorEnvelopeTree(depth - 1)
+  };
 }
 
 async function runHttpTransportSmokeTest(streamResponseText) {
@@ -98,6 +204,57 @@ async function runHttpTransportSmokeTest(streamResponseText) {
 
     assertHttpRequest(capturedRequest, '/backend-api/codex/responses');
     assertEqual(deltas.join(''), 'hello world', 'HTTP streamed text');
+  } finally {
+    server.close();
+  }
+}
+
+async function runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError) {
+  let requestCount = 0;
+  const server = createServer(async (request, response) => {
+    requestCount += 1;
+    for await (const _chunk of request) {
+      // Consume the request before returning the structured SDK APIError response.
+    }
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({
+      error: {
+        type: 'invalid_request_error',
+        code: 'previous_response_not_found',
+        message: 'Remote continuation details must not control classification.',
+        param: 'previous_response_id'
+      }
+    }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    let capturedError;
+    try {
+      await streamResponseText({
+        baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+        apiKey: 'test-api-key',
+        headers: createHeaders(),
+        transport: 'http',
+        previousResponseId: 'resp_http_missing',
+        omitMaxOutputTokens: true,
+        model: 'gpt-5.5',
+        instructions: 'Smoke test instructions',
+        input: [{ role: 'user', content: 'Continue.' }],
+        maxOutputTokens: 32,
+        token: createCancellationToken(),
+        onTextDelta() {}
+      });
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(isResponsesContinuationMissError(capturedError), true, 'structured HTTP APIError classifies');
+    assertEqual(capturedError.previousResponseId, 'resp_http_missing', 'structured HTTP response id');
+    assertEqual(capturedError.message, 'Responses API could not find previous_response_id.', 'structured HTTP message is fixed');
+    assertEqual(requestCount, 1, 'structured HTTP miss is not retried by the client');
   } finally {
     server.close();
   }
@@ -689,7 +846,16 @@ async function runWebSocketContinuationSmokeTest(streamResponseText) {
 }
 
 async function runWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError) {
-  const server = createServer();
+  let httpRequestCount = 0;
+  const fallbackEvents = [];
+  const server = createServer(async (request, response) => {
+    httpRequestCount += 1;
+    for await (const _chunk of request) {
+      // Consume any unexpected fallback request before failing the test path.
+    }
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'HTTP fallback must not run.' } }));
+  });
   const webSocketServer = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {
@@ -724,7 +890,7 @@ async function runWebSocketContinuationMissSmokeTest(streamResponseText, isRespo
         baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
         apiKey: 'test-api-key',
         headers: createHeaders(),
-        transport: 'websocket',
+        transport: 'auto',
         previousResponseId: 'resp_missing',
         omitMaxOutputTokens: true,
         model: 'gpt-5.5',
@@ -732,7 +898,8 @@ async function runWebSocketContinuationMissSmokeTest(streamResponseText, isRespo
         input: [{ role: 'user', content: 'Continue.' }],
         maxOutputTokens: 32,
         token: createCancellationToken(),
-        onTextDelta() {}
+        onTextDelta() {},
+        onTransportFallback: (event) => fallbackEvents.push(event)
       });
     } catch (error) {
       capturedError = error;
@@ -740,6 +907,117 @@ async function runWebSocketContinuationMissSmokeTest(streamResponseText, isRespo
 
     assertEqual(isResponsesContinuationMissError(capturedError), true, 'continuation miss classification');
     assertEqual(capturedError.previousResponseId, 'resp_missing', 'continuation miss response id');
+    assertEqual(capturedError.cause?.error?.type, 'error', 'continuation miss retains actual SDK WebSocket wrapper');
+    assertEqual(httpRequestCount, 0, 'structured WebSocket API miss never falls back to HTTP');
+    assertEqual(fallbackEvents.length, 0, 'structured WebSocket API miss reports no fallback');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runManagedWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError) {
+  let httpRequestCount = 0;
+  const fallbackEvents = [];
+  const server = createServer(async (request, response) => {
+    httpRequestCount += 1;
+    for await (const _chunk of request) {
+      // Consume any unexpected fallback request before failing the test path.
+    }
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Managed HTTP fallback must not run.' } }));
+  });
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket, request) => {
+    webSocket.once('message', () => {
+      if (request.headers['session-id'] === 'managed-error-event') {
+        webSocket.send(JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            code: 'previous_response_not_found',
+            message: 'Managed WebSocket error event.',
+            param: 'previous_response_id'
+          },
+          status: 400
+        }));
+        return;
+      }
+
+      webSocket.send(JSON.stringify({
+        type: 'response.failed',
+        response: {
+          id: 'resp_managed_missing',
+          status: 'failed',
+          error: {
+            type: 'invalid_request_error',
+            message: JSON.stringify({
+              error: {
+                code: 'previous_response_not_found',
+                param: 'previous_response_id'
+              }
+            })
+          }
+        }
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+    const runManagedRequest = async (sessionId, previousResponseId) => {
+      try {
+        await streamResponseText({
+          baseURL,
+          apiKey: 'test-api-key',
+          headers: createHeaders(),
+          transport: 'auto',
+          compatibilityProfile: { enabled: true, endpointKey: baseURL },
+          authIdentity: 'codexAuth:acct-test',
+          identity: {
+            installationId: '11111111-1111-4111-8111-111111111111',
+            sessionId,
+            threadId: `${sessionId}-thread`,
+            turnId: `${sessionId}-turn`,
+            windowId: '55555555-5555-4555-8555-555555555555'
+          },
+          websocketPrewarm: 'disabled',
+          requestCompression: 'disabled',
+          previousResponseId,
+          omitMaxOutputTokens: true,
+          model: 'gpt-5.5',
+          instructions: 'Smoke test instructions',
+          input: [{ role: 'user', content: 'Continue managed session.' }],
+          maxOutputTokens: 32,
+          token: createCancellationToken(),
+          onTextDelta() {},
+          onTransportFallback: (event) => fallbackEvents.push(event)
+        });
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+
+    const managedErrorEvent = await runManagedRequest('managed-error-event', 'resp_managed_error_previous');
+    const managedFailedEvent = await runManagedRequest('managed-failed-event', 'resp_managed_failed_previous');
+
+    assertEqual(isResponsesContinuationMissError(managedErrorEvent), true, 'managed WebSocket error miss classification');
+    assertEqual(managedErrorEvent.previousResponseId, 'resp_managed_error_previous', 'managed WebSocket error response id');
+    assertEqual(isResponsesContinuationMissError(managedFailedEvent), true, 'managed response.failed miss classification');
+    assertEqual(managedFailedEvent.previousResponseId, 'resp_managed_failed_previous', 'managed response.failed response id');
+    assertEqual(httpRequestCount, 0, 'managed structured API misses never fall back to HTTP');
+    assertEqual(fallbackEvents.length, 0, 'managed structured API misses report no fallback');
   } finally {
     webSocketServer.close();
     server.close();
