@@ -46,6 +46,7 @@
   "devDependencies": {
     "@types/node": "^22.15.30",
     "@types/vscode": "^1.104.0",
+    "@vscode/test-electron": "3.0.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.25.5",
     "typescript": "^5.9.2"
@@ -175,6 +176,14 @@
           "type": "string",
           "default": "gpt-5.5",
           "description": "Fallback model ID used only when upstream model discovery is unavailable.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.includeHiddenModels": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include every otherwise callable model that the upstream catalog marks hidden. API-key compatibility filtering still applies.",
           "tags": [
             "advanced"
           ]

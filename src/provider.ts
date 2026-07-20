@@ -302,6 +302,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       baseURL: normalizeBaseURL(config.baseURL),
       authIdentity,
       toolSignatures: toolSchemas.toolSignatures,
+      effectiveInputBudget: model.maxInputTokens,
       ...requestOptions
     });
     latency.recordContext({ requestBuildMs: Math.max(0, performance.now() - requestBuildStartedAt) });
@@ -445,6 +446,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         mismatchPreviousItem: reuseMissDiagnostic.comparison.mismatch?.previousItemSummary ?? reuseMissDiagnostic.previousNextItemSummary,
         mismatchCurrentItem: reuseMissDiagnostic.comparison.mismatch?.currentItemSummary ?? reuseMissDiagnostic.currentNextItemSummary,
         requestFingerprintMatches: reuseMissDiagnostic.requestFingerprintMatches,
+        previousEffectiveInputBudget: reuseMissDiagnostic.previousEffectiveInputBudget ?? null,
+        currentEffectiveInputBudget: reuseMissDiagnostic.currentEffectiveInputBudget ?? null,
+        inputBudgetCompatible: reuseMissDiagnostic.inputBudgetCompatible,
         toolCompatibility: reuseMissDiagnostic.toolCompatibility ?? null
       });
     }
@@ -1221,7 +1225,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     config: ProviderConfig,
     availableModels: readonly ResolvedProviderModel[]
   ): ParsedModelIdentifier {
-    const requestedModel = parseModelIdentifier(modelId || config.model);
+    const parsedModel = parseModelIdentifier(modelId || config.model);
+    const exactAvailableModel = modelId
+      ? availableModels.find((candidate) => candidate.info.id === modelId)
+      : undefined;
+    const requestedModel = {
+      requestModel: exactAvailableModel?.requestModel ?? parsedModel.requestModel,
+      reasoningEffort: parsedModel.reasoningEffort
+    };
     const availableModelNames = new Set(availableModels.map((candidate) => candidate.requestModel));
 
     const aliasedModel = this.resolveModelAlias(requestedModel.requestModel, config.modelAliases, availableModels);
@@ -1460,6 +1471,7 @@ function buildModelCacheKey(
     config.credentialsSource,
     config.transport,
     config.model,
+    config.includeHiddenModels,
     config.disabledModels.join(','),
     stableSerialize(config.modelAliases),
     config.defaultServiceTier ?? 'auto',
@@ -1597,8 +1609,9 @@ export function buildResponseBranchReuseEnvelope(options: {
   baseURL: string;
   authIdentity: string;
   toolSignatures?: ResponseBranchToolSignatures;
+  effectiveInputBudget?: number;
 } & CodexRequestEnvelopeOptions): ResponseBranchReuseEnvelope {
-  const { baseURL, authIdentity, toolSignatures, ...requestOptions } = options;
+  const { baseURL, authIdentity, toolSignatures, effectiveInputBudget, ...requestOptions } = options;
   const requestFingerprint = fingerprintCodexRequestEnvelope(requestOptions);
   const scopeKey = stableSerialize({ baseURL, authIdentity });
   return {
@@ -1608,6 +1621,7 @@ export function buildResponseBranchReuseEnvelope(options: {
     }),
     scopeKey,
     requestFingerprint,
+    effectiveInputBudget,
     toolSignatures: toolSignatures ?? buildResponseBranchToolSignatures(requestOptions.tools)
   };
 }

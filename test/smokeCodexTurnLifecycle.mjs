@@ -7,7 +7,8 @@ try {
   const envelope = {
     identityKey: 'scope',
     scopeKey: 'scope',
-    requestFingerprint: 'fingerprint-a'
+    requestFingerprint: 'fingerprint-a',
+    effectiveInputBudget: 258400
   };
   const state = {
     identity: {

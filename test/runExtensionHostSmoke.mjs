@@ -1,79 +1,82 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { runTests } from '@vscode/test-electron';
 
 const workspaceRoot = resolve(import.meta.dirname, '..');
 const userDataDir = await mkdtemp(join(resolveTempDirectory(), 'codex-for-copilot-extension-host-'));
+const testHome = join(userDataDir, 'home');
 const extensionTestsPath = join(workspaceRoot, 'test', 'extensionHostSmoke.cjs');
 const resultPath = join(userDataDir, 'extension-host-smoke-result.json');
-const commonArgs = [
-  `--extensionDevelopmentPath=${workspaceRoot}`,
-  `--extensionTestsPath=${extensionTestsPath}`,
+const launchArgs = [
   `--user-data-dir=${userDataDir}`,
+  `--extensions-dir=${join(userDataDir, 'extensions')}`,
   '--new-window',
+  '--disable-extensions',
+  '--disable-updates',
   '--disable-telemetry',
   '--skip-welcome',
   '--disable-gpu'
 ];
 
 try {
-  const result = await runCode(commonArgs, {
-    ...process.env,
-    CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH: resultPath
+  await mkdir(join(testHome, '.codex'), { recursive: true });
+  await writeFile(
+    join(testHome, '.codex', 'auth.json'),
+    JSON.stringify({ tokens: { access_token: 'extension-host-smoke-token' } })
+  );
+  await mkdir(join(userDataDir, 'User'), { recursive: true });
+  await writeFile(
+    join(userDataDir, 'User', 'settings.json'),
+    JSON.stringify({ 'codexModelProvider.includeHiddenModels': true })
+  );
+
+  const vscodeExecutablePath = resolveLocalCodeExecutable();
+  await runTests({
+    extensionDevelopmentPath: workspaceRoot,
+    extensionTestsPath,
+    extensionTestsEnv: {
+      CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH: resultPath,
+      HOME: testHome,
+      USERPROFILE: testHome
+    },
+    launchArgs,
+    ...(vscodeExecutablePath
+      ? { vscodeExecutablePath }
+      : { version: process.env.VSCODE_TEST_VERSION ?? '1.104.3' })
   });
-  if (result.code !== 0) {
-    throw new Error(`Extension Host smoke exited with ${result.code ?? result.signal ?? 'an unknown status'}.`);
-  }
-  const resultPayload = JSON.parse(await waitForResult(resultPath));
+  const resultPayload = JSON.parse(await readFile(resultPath, 'utf8'));
   if (resultPayload.passed !== true) {
-    throw new Error('Extension Host smoke did not report a successful tool loop.');
+    throw new Error('Extension Host smoke did not report successful profile transitions and a complete tool loop.');
   }
 } finally {
   await rm(userDataDir, { recursive: true, force: true });
 }
 
-function runCode(args, env) {
-  const invocation = process.platform === 'win32'
-    ? {
-        command: process.env.ComSpec ?? 'cmd.exe',
-        args: ['/d', '/s', '/c', `call code.cmd ${args.map(quoteForCmd).join(' ')}`]
-      }
-    : { command: 'code', args };
-
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(invocation.command, invocation.args, {
-      cwd: workspaceRoot,
-      env,
-      stdio: 'inherit',
-      windowsHide: true
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => resolvePromise({ code, signal }));
-  });
-}
-
-async function waitForResult(path) {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    try {
-      await stat(path);
-      return await readFile(path, 'utf8');
-    } catch (error) {
-      if (error?.code !== 'ENOENT') {
-        throw error;
-      }
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-    }
+function resolveLocalCodeExecutable() {
+  const configuredExecutable = process.env.VSCODE_EXECUTABLE_PATH?.trim();
+  if (configuredExecutable) {
+    return configuredExecutable;
   }
-  throw new Error('Extension Host smoke did not write its success result within 45 seconds.');
-}
 
-function quoteForCmd(value) {
-  return `"${value.replaceAll('"', '\\"')}"`;
+  if (process.env.CI === 'true') {
+    return undefined;
+  }
+
+  const macOSExecutable = '/Applications/Visual Studio Code.app/Contents/MacOS/Code';
+  if (process.platform === 'darwin' && existsSync(macOSExecutable)) {
+    return macOSExecutable;
+  }
+
+  return undefined;
 }
 
 function resolveTempDirectory() {
+  if (process.platform === 'darwin') {
+    return '/tmp';
+  }
+
   const configured = tmpdir();
   if (configured && !configured.startsWith('undefined')) {
     return configured;

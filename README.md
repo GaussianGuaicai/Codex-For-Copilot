@@ -56,12 +56,23 @@ Common settings:
 - `codexModelProvider.transport`: `auto`, `http`, or `websocket`. `auto` prefers WebSocket and falls back to HTTP only when the WebSocket transport is unavailable; API errors are returned directly.
 - `codexModelProvider.websocketPrewarm`: `auto`, `enabled`, or `disabled`. `auto` skips speculative `generate:false` requests and relies on idle WebSocket preconnection; use `enabled` only when backend measurements show a benefit.
 - `codexModelProvider.model`: fallback model when discovery fails
-- `codexModelProvider.disabledModels`: model IDs to hide when the backend advertises a model that should not appear in the picker
-- `codexModelProvider.modelAliases`: map stale or rejected model IDs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`
+- `codexModelProvider.includeHiddenModels`: opt in to callable models that the upstream catalog marks hidden; defaults to `false`
+- `codexModelProvider.disabledModels`: real backend model slugs to hide when an advertised model should not appear in the picker; one slug hides all of its local profiles
+- `codexModelProvider.modelAliases`: map stale or rejected real backend model slugs to replacements, for example `{ "gpt-5.6-luna": "gpt-5.6-sol" }`; one mapping applies to all local profiles
 - `codexModelProvider.instructions`: top-level Responses API instructions sent with every request
 - `codexModelProvider.defaultServiceTier`: default `service_tier` behavior
 - `codexModelProvider.defaultReasoningEffort`: fallback Thinking Effort setting
 - `codexModelProvider.maxOutputTokens`: maximum output tokens when supported
+
+## Context-window profiles
+
+Each picker profile keeps two local values: the backend's raw context window and the effective input budget advertised to VS Code as `maxInputTokens`. The effective budget is `floor(raw context window * effective_context_window_percent / 100)` when the catalog supplies a finite percentage greater than 0 and at most 100; otherwise it uses the Codex-compatible 95% fallback. This is separate from Codex's 90% auto-compaction threshold, which is not exposed as the request budget.
+
+Standard entries use the catalog's active raw `context_window`. When supported and not already active, the picker also shows a separate **Long context** entry: GPT-5.4 at the discovered 1,000,000-token maximum, and GPT-5.6 Sol/Terra/Luna at the known 372,000-token ceiling for Codex access-token accounts on the canonical ChatGPT Codex backend. Synthetic GPT-5.6 372K entries include an `(Experimental)` parenthetical in their picker name and detail.
+
+Profile suffixes such as `::context=1000000` are local picker IDs only. Standard and long entries send the same real backend model slug, with no context-window, profile, compaction, truncation, or summary field added to Responses requests. The extension does not alter caller-supplied history or perform provider-side compaction. A compatible standard-to-long follow-up may reuse the same Responses branch; a long-to-standard downgrade starts a new chain with the caller's full history because the exact retained branch usage is unavailable.
+
+`codexModelProvider.includeHiddenModels` is a global, intentional visibility opt-in. When enabled, every otherwise structurally valid catalog row marked `hide` or `hidden` is eligible; this is not restricted to an allowlist. API-key credentials still exclude rows with `supported_in_api: false`, and the existing Auto Review visibility exception remains unchanged.
 
 ## Testing VS Code Chat integration
 

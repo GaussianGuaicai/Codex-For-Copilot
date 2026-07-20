@@ -5,8 +5,12 @@ import { normalizeBaseURL } from './responsesClient';
 import { codexFetch } from './auth/codexAuthRequest';
 
 const REASONING_ID_DELIMITER = '::reasoning=';
+const CONTEXT_ID_DELIMITER = '::context=';
 const PROVIDER_MODEL_ID_PREFIX = 'codex::';
 const DEFAULT_FALLBACK_CONTEXT_WINDOW = 272000;
+const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 95;
+const GPT_5_4_LONG_CONTEXT_WINDOW = 1000000;
+const GPT_5_6_LONG_CONTEXT_WINDOW = 372000;
 const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5.5': 272000,
   'gpt-5.4': 272000,
@@ -15,9 +19,9 @@ const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'codex-auto-review': 272000
 };
 const KNOWN_CODEX_RAW_CONTEXT_CEILINGS: Readonly<Record<string, number>> = {
-  'gpt-5.6-sol': 372000,
-  'gpt-5.6-terra': 372000,
-  'gpt-5.6-luna': 372000
+  'gpt-5.6-sol': GPT_5_6_LONG_CONTEXT_WINDOW,
+  'gpt-5.6-terra': GPT_5_6_LONG_CONTEXT_WINDOW,
+  'gpt-5.6-luna': GPT_5_6_LONG_CONTEXT_WINDOW
 };
 
 const MODEL_DESCRIPTION_FALLBACKS: Record<string, string> = {
@@ -72,6 +76,7 @@ interface UpstreamModel {
   description?: unknown;
   context_window?: unknown;
   max_context_window?: unknown;
+  effective_context_window_percent?: unknown;
   input_modalities?: unknown;
   comp_hash?: unknown;
   supported_in_api?: unknown;
@@ -85,6 +90,8 @@ export interface ResolvedProviderModel {
   info: vscode.LanguageModelChatInformation;
   requestModel: string;
   reasoningEffort?: ReasoningEffort;
+  rawContextWindow: number;
+  effectiveInputBudget: number;
 }
 
 type ThinkingEffortSchema = {
@@ -146,7 +153,7 @@ export async function fetchAvailableModels(
 
   return discovered
     .filter(isUpstreamModel)
-    .filter((model) => isModelVisible(model, credentials.kind));
+    .filter((model) => isModelVisible(model, credentials.kind, config.includeHiddenModels));
 }
 
 export function buildProviderModels(
@@ -154,28 +161,42 @@ export function buildProviderModels(
   upstreamModels: UpstreamModel[],
   credentialKind: ApiCredentials['kind']
 ): ResolvedProviderModel[] {
-  const models = upstreamModels.map((model) => buildDiscoveredModel(model, config, credentialKind));
+  const seenModelIds = new Set<string>();
+  const models = upstreamModels
+    .flatMap((model) => buildDiscoveredModels(model, config, credentialKind))
+    .filter((model) => {
+      if (seenModelIds.has(model.info.id)) {
+        return false;
+      }
+
+      seenModelIds.add(model.info.id);
+      return true;
+    });
   return models.length > 0 ? models : [buildFallbackModel(config, credentialKind)];
 }
 
 export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCredentials['kind']): ResolvedProviderModel {
-  const fallbackMaxInputTokens = getFallbackContextWindow(config.model);
+  const rawContextWindow = getFallbackContextWindow(config.model);
+  const effectiveInputBudget = getEffectiveInputBudget(rawContextWindow, DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
   const knownRawContextCeiling = getKnownCodexRawContextCeiling(config.model, config.baseURL, credentialKind);
   const reasoningEffort = getDefaultReasoningEffort(undefined, config.model);
   const reasoningOptions = getReasoningOptions(undefined, config.model);
   return {
     requestModel: config.model,
     reasoningEffort,
+    rawContextWindow,
+    effectiveInputBudget,
     info: {
       id: toProviderModelId(config.model),
       name: formatDisplayName(config.model),
       family: config.model,
       version: '1.0.0',
-      maxInputTokens: fallbackMaxInputTokens,
+      maxInputTokens: effectiveInputBudget,
       maxOutputTokens: config.maxOutputTokens,
       tooltip: getModelDescription(undefined, config.model),
       detail: buildModelDetail(
-        fallbackMaxInputTokens,
+        rawContextWindow,
+        effectiveInputBudget,
         reasoningOptions,
         reasoningEffort,
         config.baseURL,
@@ -193,32 +214,32 @@ export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCr
 export function parseModelIdentifier(modelId: string): ParsedModelIdentifier {
   const normalizedModelId = stripProviderModelIdPrefix(modelId);
   const delimiterIndex = normalizedModelId.indexOf(REASONING_ID_DELIMITER);
-  if (delimiterIndex < 0) {
-    return { requestModel: normalizedModelId };
-  }
-
-  const requestModel = normalizedModelId.slice(0, delimiterIndex);
-  const reasoningEffort = normalizeReasoningEffort(normalizedModelId.slice(delimiterIndex + REASONING_ID_DELIMITER.length));
+  const profiledModel = delimiterIndex < 0 ? normalizedModelId : normalizedModelId.slice(0, delimiterIndex);
+  const contextDelimiterIndex = profiledModel.indexOf(CONTEXT_ID_DELIMITER);
+  const requestModel = contextDelimiterIndex < 0 ? profiledModel : profiledModel.slice(0, contextDelimiterIndex);
+  const reasoningEffort = delimiterIndex < 0
+    ? undefined
+    : normalizeReasoningEffort(normalizedModelId.slice(delimiterIndex + REASONING_ID_DELIMITER.length));
   return { requestModel, reasoningEffort };
 }
 
 export function isProviderModelIdentifier(modelId: string | undefined): modelId is string {
-  return typeof modelId === 'string'
-    && modelId.startsWith(PROVIDER_MODEL_ID_PREFIX)
-    && modelId.length > PROVIDER_MODEL_ID_PREFIX.length;
+  return typeof modelId === 'string' && modelId.startsWith(PROVIDER_MODEL_ID_PREFIX);
 }
 
-function buildDiscoveredModel(
+function buildDiscoveredModels(
   model: UpstreamModel,
   config: ProviderConfig,
   credentialKind: ApiCredentials['kind']
-): ResolvedProviderModel {
+): ResolvedProviderModel[] {
   const slug = typeof model.slug === 'string' && model.slug.trim() ? model.slug.trim() : config.model;
   const displayName = getDiscoveredDisplayName(model, config.model);
   const reasoningOptions = getReasoningOptions(model, slug);
   const reasoningEfforts = reasoningOptions.map((option) => option.effort);
   const defaultReasoningEffort = getDefaultReasoningEffort(model, slug);
-  const activeContextWindow = getModelContextWindow(slug, model.context_window);
+  const activeRawContextWindow = getModelContextWindow(slug, model.context_window);
+  const effectiveContextWindowPercent = getEffectiveContextWindowPercent(model.effective_context_window_percent);
+  const effectiveInputBudget = getEffectiveInputBudget(activeRawContextWindow, effectiveContextWindowPercent);
   const maximumContextWindow = getPositiveInteger(model.max_context_window);
   const knownRawContextCeiling = getKnownCodexRawContextCeiling(slug, config.baseURL, credentialKind);
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
@@ -230,11 +251,12 @@ function buildDiscoveredModel(
     name: displayName,
     family: slug,
     version: versionBase,
-    maxInputTokens: activeContextWindow,
+    maxInputTokens: effectiveInputBudget,
     maxOutputTokens: config.maxOutputTokens,
     tooltip,
     detail: buildModelDetail(
-      activeContextWindow,
+      activeRawContextWindow,
+      effectiveInputBudget,
       reasoningOptions,
       defaultReasoningEffort,
       undefined,
@@ -250,11 +272,44 @@ function buildDiscoveredModel(
       : {})
   };
 
-  return {
+  const standardModel = {
     requestModel: slug,
     reasoningEffort: defaultReasoningEffort ?? reasoningEfforts[0],
+    rawContextWindow: activeRawContextWindow,
+    effectiveInputBudget,
     info
   };
+
+  const longRawContextWindow = getLongContextWindow(slug, activeRawContextWindow, maximumContextWindow, knownRawContextCeiling);
+  if (!longRawContextWindow) {
+    return [standardModel];
+  }
+
+  const longEffectiveInputBudget = getEffectiveInputBudget(longRawContextWindow, effectiveContextWindowPercent);
+  const experimental = isExperimentalLongContextProfile(slug, longRawContextWindow);
+
+  return [
+    standardModel,
+    {
+      requestModel: slug,
+      reasoningEffort: standardModel.reasoningEffort,
+      rawContextWindow: longRawContextWindow,
+      effectiveInputBudget: longEffectiveInputBudget,
+      info: {
+        ...info,
+        id: toLongContextProviderModelId(slug, longRawContextWindow),
+        name: `${displayName} (Long context)${experimental ? ' (Experimental)' : ''}`,
+        maxInputTokens: longEffectiveInputBudget,
+        detail: buildLongContextDetail(
+          longRawContextWindow,
+          longEffectiveInputBudget,
+          experimental,
+          reasoningOptions,
+          defaultReasoningEffort
+        )
+      }
+    }
+  ];
 }
 
 function getReasoningOptions(model: UpstreamModel | undefined, slug: string): ReasoningOption[] {
@@ -335,6 +390,41 @@ function getFallbackContextWindow(model: string): number {
   return FIXED_MODEL_CONTEXT_WINDOWS[model] ?? DEFAULT_FALLBACK_CONTEXT_WINDOW;
 }
 
+function getEffectiveContextWindowPercent(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 100
+    ? value
+    : DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT;
+}
+
+function getEffectiveInputBudget(rawContextWindow: number, percent: number): number {
+  return Math.floor(rawContextWindow * percent / 100);
+}
+
+function getLongContextWindow(
+  model: string,
+  activeContextWindow: number,
+  maximumContextWindow: number | undefined,
+  knownRawContextCeiling: number | undefined
+): number | undefined {
+  if (
+    model === 'gpt-5.4'
+    && maximumContextWindow !== undefined
+    && maximumContextWindow >= GPT_5_4_LONG_CONTEXT_WINDOW
+    && activeContextWindow < GPT_5_4_LONG_CONTEXT_WINDOW
+  ) {
+    return GPT_5_4_LONG_CONTEXT_WINDOW;
+  }
+
+  if (
+    knownRawContextCeiling === GPT_5_6_LONG_CONTEXT_WINDOW
+    && activeContextWindow < GPT_5_6_LONG_CONTEXT_WINDOW
+  ) {
+    return GPT_5_6_LONG_CONTEXT_WINDOW;
+  }
+
+  return undefined;
+}
+
 function getKnownCodexRawContextCeiling(
   model: string,
   baseURL: string,
@@ -345,6 +435,11 @@ function getKnownCodexRawContextCeiling(
   }
 
   return KNOWN_CODEX_RAW_CONTEXT_CEILINGS[model];
+}
+
+function isExperimentalLongContextProfile(model: string, rawContextWindow: number): boolean {
+  return KNOWN_CODEX_RAW_CONTEXT_CEILINGS[model] === GPT_5_6_LONG_CONTEXT_WINDOW
+    && rawContextWindow === GPT_5_6_LONG_CONTEXT_WINDOW;
 }
 
 function isChatGptCodexBackend(baseURL: string): boolean {
@@ -366,6 +461,10 @@ function toProviderModelId(requestModel: string): string {
   return `${PROVIDER_MODEL_ID_PREFIX}${requestModel}`;
 }
 
+function toLongContextProviderModelId(requestModel: string, contextWindow: number): string {
+  return `${toProviderModelId(requestModel)}${CONTEXT_ID_DELIMITER}${contextWindow}`;
+}
+
 function stripProviderModelIdPrefix(modelId: string): string {
   return modelId.startsWith(PROVIDER_MODEL_ID_PREFIX)
     ? modelId.slice(PROVIDER_MODEL_ID_PREFIX.length)
@@ -373,20 +472,22 @@ function stripProviderModelIdPrefix(modelId: string): string {
 }
 
 function buildModelDetail(
-  maxInputTokens: number,
+  activeRawContextWindow: number,
+  effectiveInputBudget: number,
   reasoningOptions?: readonly ReasoningOption[],
   defaultReasoningEffort?: ReasoningEffort,
   sourceHint?: string,
   maximumContextWindow?: number,
   knownRawContextCeiling?: number
 ): string {
-  const hasLargerMaximum = maximumContextWindow !== undefined && maximumContextWindow > maxInputTokens;
+  const hasLargerMaximum = maximumContextWindow !== undefined && maximumContextWindow > activeRawContextWindow;
   const hasLargerKnownCeiling = knownRawContextCeiling !== undefined
-    && knownRawContextCeiling > maxInputTokens
+    && knownRawContextCeiling > activeRawContextWindow
     && (maximumContextWindow === undefined || knownRawContextCeiling > maximumContextWindow);
-  const parts = [hasLargerMaximum
-    ? `Context: ${formatTokenCount(maxInputTokens)} (active)`
-    : `Context: ${formatTokenCount(maxInputTokens)}`];
+  const parts = [
+    `Effective input budget: ${formatTokenCount(effectiveInputBudget)}`,
+    `Raw context window: ${formatTokenCount(activeRawContextWindow)}${hasLargerMaximum ? ' (active)' : ''}`
+  ];
 
   if (hasLargerMaximum) {
     parts.push(`Maximum context: ${formatTokenCount(maximumContextWindow)} (opt-in)`);
@@ -396,20 +497,45 @@ function buildModelDetail(
     parts.push(`Known raw context ceiling: ${formatTokenCount(knownRawContextCeiling)}`);
   }
 
-  if (reasoningOptions && reasoningOptions.length > 0) {
-    const labels = reasoningOptions.map((option) => formatReasoningEffort(option.effort));
-    if (defaultReasoningEffort) {
-      parts.push(`Thinking: ${labels.join(', ')} (default: ${formatReasoningEffort(defaultReasoningEffort)})`);
-    } else {
-      parts.push(`Thinking: ${labels.join(', ')}`);
-    }
-  }
+  appendReasoningDetail(parts, reasoningOptions, defaultReasoningEffort);
 
   if (sourceHint) {
     parts.push(sourceHint);
   }
 
   return parts.join(' | ');
+}
+
+function buildLongContextDetail(
+  rawContextWindow: number,
+  effectiveInputBudget: number,
+  experimental: boolean,
+  reasoningOptions?: readonly ReasoningOption[],
+  defaultReasoningEffort?: ReasoningEffort
+): string {
+  const parts = [
+    `Long context${experimental ? ' (Experimental)' : ''}: ${formatTokenCount(effectiveInputBudget)} effective input budget`,
+    `Raw context window: ${formatTokenCount(rawContextWindow)}`
+  ];
+  appendReasoningDetail(parts, reasoningOptions, defaultReasoningEffort);
+  return parts.join(' | ');
+}
+
+function appendReasoningDetail(
+  parts: string[],
+  reasoningOptions?: readonly ReasoningOption[],
+  defaultReasoningEffort?: ReasoningEffort
+): void {
+  if (!reasoningOptions || reasoningOptions.length === 0) {
+    return;
+  }
+
+  const labels = reasoningOptions.map((option) => formatReasoningEffort(option.effort));
+  if (defaultReasoningEffort) {
+    parts.push(`Thinking: ${labels.join(', ')} (default: ${formatReasoningEffort(defaultReasoningEffort)})`);
+  } else {
+    parts.push(`Thinking: ${labels.join(', ')}`);
+  }
 }
 
 function buildThinkingEffortSchema(reasoningOptions: readonly ReasoningOption[], defaultEffort: ReasoningEffort): ThinkingEffortSchema {
@@ -452,7 +578,11 @@ function isUpstreamModel(value: unknown): value is UpstreamModel {
   return typeof value === 'object' && value !== null;
 }
 
-function isModelVisible(model: UpstreamModel, credentialKind: ApiCredentials['kind']): boolean {
+function isModelVisible(
+  model: UpstreamModel,
+  credentialKind: ApiCredentials['kind'],
+  includeHiddenModels: boolean
+): boolean {
   if (credentialKind === 'openaiApiKey' && model.supported_in_api === false) {
     return false;
   }
@@ -465,7 +595,7 @@ function isModelVisible(model: UpstreamModel, credentialKind: ApiCredentials['ki
   if (typeof model.visibility === 'string') {
     const visibility = model.visibility.trim().toLowerCase();
     if (visibility === 'hidden' || visibility === 'hide') {
-      return false;
+      return includeHiddenModels;
     }
   }
 

@@ -14,6 +14,7 @@ export interface ProviderConfig {
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
   model: string;
+  includeHiddenModels: boolean;
   disabledModels: string[];
   modelAliases: Record<string, string>;
   instructions: string;
@@ -34,6 +35,7 @@ export function getProviderConfig(): ProviderConfig {
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
     model: config.get('model', 'gpt-5.5'),
+    includeHiddenModels: config.get('includeHiddenModels', false),
     disabledModels: normalizeStringList(config.get('disabledModels', [])),
     modelAliases: normalizeModelAliases(config.get('modelAliases', {})),
     instructions: config.get('instructions', 'You are a helpful coding assistant integrated with VS Code.'),

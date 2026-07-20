@@ -111,6 +111,7 @@ try {
   runCompareHistorySmokeTest(compareResponsesInputHistory);
   runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory);
   runBranchStoreSmokeTest(ResponseBranchStore);
+  runInputBudgetReuseSmokeTest(buildResponseBranchReuseEnvelope, ResponseBranchStore);
   runBranchStoreDisableReuseSmokeTest(ResponseBranchStore);
   runBranchStoreToolContinuationSmokeTest(ResponseBranchStore);
   runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, ResponseBranchStore);
@@ -262,6 +263,46 @@ function runBranchStoreSmokeTest(ResponseBranchStore) {
 
   const forkMatch = store.findReusableBranch(envelope, forkInput);
   assertEqual(forkMatch, undefined, 'fork does not reuse previous branch');
+}
+
+function runInputBudgetReuseSmokeTest(buildResponseBranchReuseEnvelope, ResponseBranchStore) {
+  const baseOptions = {
+    baseURL: 'https://chatgpt.com/backend-api/codex/responses',
+    authIdentity: 'codexAuth:acct-budget',
+    compatibilityEnabled: true,
+    model: 'gpt-5.4',
+    instructions: 'Budget reuse smoke',
+    store: false,
+    omitMaxOutputTokens: true,
+    maxOutputTokens: 1024,
+    textVerbosity: 'medium',
+    includeEncryptedReasoning: true
+  };
+  const standard = buildResponseBranchReuseEnvelope({ ...baseOptions, effectiveInputBudget: 258400 });
+  const long = buildResponseBranchReuseEnvelope({ ...baseOptions, effectiveInputBudget: 950000 });
+  const legacy = buildResponseBranchReuseEnvelope(baseOptions);
+  const previousInput = [{ type: 'message', role: 'user', content: 'hello' }];
+  const appendInput = [...previousInput, { type: 'message', role: 'user', content: 'continue' }];
+
+  assertEqual(standard.requestFingerprint, long.requestFingerprint, 'local budget stays out of request fingerprint');
+  assertEqual(standard.identityKey, long.identityKey, 'local budget stays out of reuse identity');
+
+  const upgradeStore = new ResponseBranchStore();
+  upgradeStore.recordSuccess(standard, previousInput, 'resp_standard');
+  assertEqual(upgradeStore.findReusableBranch(standard, appendInput)?.responseId, 'resp_standard', 'same budget reuses branch');
+  assertEqual(upgradeStore.findReusableBranch(long, appendInput)?.responseId, 'resp_standard', 'larger budget reuses smaller-budget branch');
+
+  const downgradeStore = new ResponseBranchStore();
+  downgradeStore.recordSuccess(long, previousInput, 'resp_long');
+  assertEqual(downgradeStore.findReusableBranch(standard, appendInput), undefined, 'smaller budget rejects larger-budget branch');
+  const downgradeDiagnostic = downgradeStore.explainReuseMiss(standard, appendInput);
+  assertEqual(downgradeDiagnostic?.inputBudgetCompatible, false, 'downgrade diagnostic reports incompatible budget');
+  assertEqual(downgradeDiagnostic?.previousEffectiveInputBudget, 950000, 'downgrade diagnostic reports stored budget');
+  assertEqual(downgradeDiagnostic?.currentEffectiveInputBudget, 258400, 'downgrade diagnostic reports target budget');
+
+  const legacyStore = new ResponseBranchStore();
+  legacyStore.recordSuccess(legacy, previousInput, 'resp_legacy');
+  assertEqual(legacyStore.findReusableBranch(standard, appendInput), undefined, 'missing legacy budget fails closed');
 }
 
 function runBranchStoreDisableReuseSmokeTest(ResponseBranchStore) {
@@ -635,5 +676,5 @@ function assertEqual(actual, expected, label) {
 }
 
 function reuseEnvelope(identityKey, toolSignatures) {
-  return { identityKey, toolSignatures };
+  return { identityKey, effectiveInputBudget: 258400, toolSignatures };
 }

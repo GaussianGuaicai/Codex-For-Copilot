@@ -35,6 +35,7 @@ export interface ResponseBranchReuseEnvelope {
   identityKey: string;
   scopeKey: string;
   requestFingerprint: string;
+  effectiveInputBudget?: number;
   toolSignatures?: ResponseBranchToolSignatures;
 }
 
@@ -47,6 +48,9 @@ export interface ResponseBranchReuseMissDiagnostic {
   previousNextItemSummary: string | null;
   currentNextItemSummary: string | null;
   requestFingerprintMatches: boolean;
+  previousEffectiveInputBudget?: number;
+  currentEffectiveInputBudget?: number;
+  inputBudgetCompatible: boolean;
   toolCompatibility?: ResponseBranchToolCompatibility;
   state?: CodexBranchState;
 }
@@ -101,7 +105,8 @@ export class ResponseBranchStore {
 
     for (const branch of this.branches.values()) {
       if (branch.envelope.identityKey !== envelope.identityKey
-        || !hasMatchingRequestFingerprint(branch, envelope)) {
+        || !hasMatchingRequestFingerprint(branch, envelope)
+        || !hasCompatibleInputBudget(branch.envelope.effectiveInputBudget, envelope.effectiveInputBudget)) {
         continue;
       }
 
@@ -158,6 +163,12 @@ export class ResponseBranchStore {
           previousNextItemSummary: summarizeResponsesInputMessageForLog(branch.continuationInput[comparison.matchedPrefixCount]),
           currentNextItemSummary: summarizeResponsesInputMessageForLog(currentContinuationInput[comparison.matchedPrefixCount]),
           requestFingerprintMatches: hasMatchingRequestFingerprint(branch, envelope),
+          previousEffectiveInputBudget: branch.envelope.effectiveInputBudget,
+          currentEffectiveInputBudget: envelope.effectiveInputBudget,
+          inputBudgetCompatible: hasCompatibleInputBudget(
+            branch.envelope.effectiveInputBudget,
+            envelope.effectiveInputBudget
+          ),
           toolCompatibility,
           state: branch.state ? cloneBranchState(branch.state) : undefined
         };
@@ -302,6 +313,16 @@ function hasMatchingRequestFingerprint(
   return branch.envelope.requestFingerprint === envelope.requestFingerprint
     && (branch.state?.continuation?.requestFingerprint === undefined
       || branch.state.continuation.requestFingerprint === envelope.requestFingerprint);
+}
+
+function hasCompatibleInputBudget(previous: number | undefined, current: number | undefined): boolean {
+  return typeof previous === 'number'
+    && Number.isFinite(previous)
+    && previous > 0
+    && typeof current === 'number'
+    && Number.isFinite(current)
+    && current > 0
+    && current >= previous;
 }
 
 function compareToolSignatures(

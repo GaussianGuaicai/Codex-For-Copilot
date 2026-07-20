@@ -20,6 +20,7 @@ const configValues = {
   credentialsSource: 'secretStorage',
   transport: 'http',
   model: 'gpt-5.5',
+  includeHiddenModels: false,
   instructions: 'Smoke test instructions',
   defaultServiceTier: 'auto',
   defaultReasoningEffort: 'auto',
@@ -172,6 +173,7 @@ const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = requir
 
 try {
   await runModelCatalogMetadataSmokeTest();
+  await runProviderLongContextSelectionSmokeTest();
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
@@ -185,7 +187,7 @@ try {
   await runProviderModelDiscoveryPolicySmokeTest();
   await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
   await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
-  console.log('Smoke test passed: provider keeps catalog discovery separate from runtime availability and temporarily disables rejected models without retrying.');
+  console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
@@ -196,7 +198,14 @@ async function runModelCatalogMetadataSmokeTest() {
     createMockModel('gpt-5.4', 'GPT-5.4', {
       context_window: 272000,
       max_context_window: 1000000,
-      input_modalities: ['text', 'image']
+      input_modalities: ['text', 'image'],
+      visibility: 'hide'
+    }),
+    createMockModel('gpt-5.4-mini', 'GPT-5.4-Mini', {
+      context_window: 272000,
+      max_context_window: 272000,
+      input_modalities: ['text', 'image'],
+      visibility: 'hide'
     }),
     createMockModel('gpt-5.3-codex-spark', 'GPT-5.3-Codex-Spark', {
       context_window: 128000,
@@ -209,6 +218,11 @@ async function runModelCatalogMetadataSmokeTest() {
       max_context_window: 1000000,
       input_modalities: ['text', 'image'],
       visibility: 'hide'
+    }),
+    createMockModel('arbitrary-hidden-model', 'Arbitrary Hidden Model', {
+      context_window: 64000,
+      max_context_window: 64000,
+      visibility: 'hidden'
     })
   ];
   let catalogRequestCount = 0;
@@ -239,64 +253,133 @@ async function runModelCatalogMetadataSmokeTest() {
 
   try {
     const token = createCancellationToken();
-    const accountCatalog = await fetchAvailableModels(config, {
+    const defaultAccountCatalog = await fetchAvailableModels(config, {
       ...sharedCredentials,
       kind: 'codexAccessToken'
     }, token);
-    const apiKeyCatalog = await fetchAvailableModels(config, {
+    const includeHiddenConfig = { ...config, includeHiddenModels: true };
+    const accountCatalog = await fetchAvailableModels(includeHiddenConfig, {
+      ...sharedCredentials,
+      kind: 'codexAccessToken'
+    }, token);
+    const apiKeyCatalog = await fetchAvailableModels(includeHiddenConfig, {
       ...sharedCredentials,
       kind: 'openaiApiKey',
       omitMaxOutputTokens: false
     }, token);
 
     assertEqual(
+      defaultAccountCatalog.map((model) => model.slug).join(','),
+      'gpt-5.3-codex-spark,codex-auto-review',
+      'hidden upstream models stay filtered by default while hidden Auto Review remains available'
+    );
+    assertEqual(
       accountCatalog.map((model) => model.slug).join(','),
-      'gpt-5.4,gpt-5.3-codex-spark,codex-auto-review',
-      'Codex account catalog retains API-ineligible account models and hidden Auto Review'
+      'gpt-5.4,gpt-5.4-mini,gpt-5.3-codex-spark,codex-auto-review,arbitrary-hidden-model',
+      'Codex account opt-in retains every structurally valid hidden model and API-ineligible account models'
     );
     assertEqual(
       apiKeyCatalog.map((model) => model.slug).join(','),
-      'gpt-5.4,codex-auto-review',
-      'API-key catalog filters API-ineligible models while retaining Auto Review policy'
+      'gpt-5.4,gpt-5.4-mini,codex-auto-review,arbitrary-hidden-model',
+      'API-key hidden-model opt-in still filters API-ineligible models'
     );
 
     const resolvedModels = buildProviderModels(config, accountCatalog, 'codexAccessToken');
-    const gpt54 = resolvedModels.find((model) => model.requestModel === 'gpt-5.4');
-    const spark = resolvedModels.find((model) => model.requestModel === 'gpt-5.3-codex-spark');
-    const autoReview = resolvedModels.find((model) => model.requestModel === 'codex-auto-review');
-    if (!gpt54 || !spark || !autoReview) {
-      throw new Error('Expected GPT-5.4, Spark, and Auto Review model metadata.');
+    const gpt54 = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4');
+    const gpt54Long = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4::context=1000000');
+    const gpt54Mini = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4-mini');
+    const spark = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.3-codex-spark');
+    const autoReview = resolvedModels.find((model) => model.info.id === 'codex::codex-auto-review');
+    if (!gpt54 || !gpt54Long || !gpt54Mini || !spark || !autoReview) {
+      throw new Error('Expected GPT-5.4 standard/long, GPT-5.4-Mini, Spark, and Auto Review model metadata.');
     }
 
     const formattedActiveContext = (272000).toLocaleString();
     const formattedMaximumContext = (1000000).toLocaleString();
-    assertEqual(gpt54.info.maxInputTokens, 272000, 'GPT-5.4 active context');
+    assertEqual(gpt54.rawContextWindow, 272000, 'GPT-5.4 standard raw context');
+    assertEqual(gpt54.effectiveInputBudget, 258400, 'GPT-5.4 standard internal effective budget');
+    assertEqual(gpt54.info.maxInputTokens, 258400, 'GPT-5.4 standard effective budget');
     assertEqual(
       gpt54.info.detail?.includes(
-        `Context: ${formattedActiveContext} tokens (active) | Maximum context: ${formattedMaximumContext} tokens (opt-in)`
+        `Effective input budget: 258,400 tokens | Raw context window: ${formattedActiveContext} tokens (active) | Maximum context: ${formattedMaximumContext} tokens (opt-in)`
       ),
       true,
-      'GPT-5.4 active and maximum context detail'
+      'GPT-5.4 detail distinguishes active and maximum context'
     );
-    assertEqual(autoReview.info.maxInputTokens, 272000, 'Auto Review active context');
+    assertEqual(gpt54Long.info.name, 'GPT-5.4 (Long context)', 'GPT-5.4 long profile name');
+    assertEqual(gpt54Long.rawContextWindow, 1000000, 'GPT-5.4 long raw context');
+    assertEqual(gpt54Long.effectiveInputBudget, 950000, 'GPT-5.4 long internal effective budget');
+    assertEqual(gpt54Long.info.maxInputTokens, 950000, 'GPT-5.4 long effective budget');
+    assertEqual(gpt54Long.requestModel, 'gpt-5.4', 'GPT-5.4 long profile keeps real request model');
+    assertEqual(
+      gpt54Long.info.detail?.includes('Long context: 950,000 tokens effective input budget | Raw context window: 1,000,000 tokens'),
+      true,
+      'GPT-5.4 long profile detail'
+    );
+    assertEqual(gpt54Long.info.version, gpt54.info.version, 'GPT-5.4 profiles preserve version metadata');
+    assertEqual(gpt54Long.info.tooltip, gpt54.info.tooltip, 'GPT-5.4 profiles preserve tooltip metadata');
+    assertEqual(
+      JSON.stringify(gpt54Long.info.capabilities),
+      JSON.stringify(gpt54.info.capabilities),
+      'GPT-5.4 profiles preserve capabilities'
+    );
+    assertEqual(
+      JSON.stringify(gpt54Long.info.configurationSchema),
+      JSON.stringify(gpt54.info.configurationSchema),
+      'GPT-5.4 profiles preserve reasoning configuration'
+    );
+    assertEqual(gpt54Mini.info.maxInputTokens, 258400, 'GPT-5.4-Mini uses the default effective budget');
+    assertEqual(
+      resolvedModels.some((model) => model.info.id.startsWith('codex::gpt-5.4-mini::context=')),
+      false,
+      'GPT-5.4-Mini omits a redundant long profile'
+    );
+    assertEqual(autoReview.info.maxInputTokens, 258400, 'Auto Review standard effective budget');
     assertEqual(
       autoReview.info.detail?.includes(`Maximum context: ${formattedMaximumContext} tokens (opt-in)`),
       true,
       'Auto Review maximum context detail'
     );
     assertEqual(spark.info.id, 'codex::gpt-5.3-codex-spark', 'Spark provider model id');
-    assertEqual(spark.info.maxInputTokens, 128000, 'Spark active context');
+    assertEqual(spark.info.maxInputTokens, 121600, 'Spark standard effective budget');
     assertEqual(spark.info.capabilities?.imageInput, false, 'Spark text-only capability');
     assertEqual(spark.info.capabilities?.toolCalling, true, 'Spark tool capability');
     assertEqual(spark.info.detail?.includes('Maximum context:'), false, 'Spark omits redundant maximum context');
 
-    const discoveredOverride = buildProviderModels(config, [
+    const duplicateGpt54Models = buildProviderModels(config, [
+      createMockModel('gpt-5.4', 'GPT-5.4 First', {
+        context_window: 272000,
+        max_context_window: 1000000
+      }),
+      createMockModel('gpt-5.4', 'GPT-5.4 Second', {
+        context_window: 272000,
+        max_context_window: 1000000
+      })
+    ], 'codexAccessToken');
+    assertEqual(
+      duplicateGpt54Models.map((model) => model.info.id).join(','),
+      'codex::gpt-5.4,codex::gpt-5.4::context=1000000',
+      'duplicate GPT-5.4 rows yield one standard and one long ID'
+    );
+    assertEqual(
+      duplicateGpt54Models.map((model) => model.info.name).join(','),
+      'GPT-5.4 First,GPT-5.4 First (Long context)',
+      'duplicate GPT-5.4 rows preserve first-seen metadata and order'
+    );
+
+    const discoveredOverrideModels = buildProviderModels(config, [
       createMockModel('gpt-5.4', 'GPT-5.4', {
         context_window: 333000,
         max_context_window: 1000000
       })
-    ], 'codexAccessToken')[0];
-    assertEqual(discoveredOverride.info.maxInputTokens, 333000, 'valid discovered context overrides fixed fallback');
+    ], 'codexAccessToken');
+    const discoveredOverride = discoveredOverrideModels.find((model) => model.info.id === 'codex::gpt-5.4');
+    assertEqual(discoveredOverride?.info.maxInputTokens, 316350, 'valid discovered context uses the default effective percentage');
+    assertEqual(
+      discoveredOverrideModels.some((model) => model.info.id === 'codex::gpt-5.4::context=1000000'),
+      true,
+      'valid GPT-5.4 maximum still adds the long profile'
+    );
 
     const fractionalMetadata = buildProviderModels(config, [
       createMockModel('gpt-5.4', 'GPT-5.4', {
@@ -304,7 +387,7 @@ async function runModelCatalogMetadataSmokeTest() {
         max_context_window: 0.5
       })
     ], 'codexAccessToken')[0];
-    assertEqual(fractionalMetadata.info.maxInputTokens, 272000, 'fractional context below one uses fixed fallback');
+    assertEqual(fractionalMetadata.info.maxInputTokens, 258400, 'fractional context below one uses effective fixed fallback');
     assertEqual(fractionalMetadata.info.detail?.includes('Maximum context:'), false, 'invalid fractional maximum is omitted');
 
     const sparkFallback = buildFallbackModel({
@@ -312,8 +395,17 @@ async function runModelCatalogMetadataSmokeTest() {
       model: 'gpt-5.3-codex-spark'
     }, 'codexAccessToken');
     assertEqual(sparkFallback.requestModel, 'gpt-5.3-codex-spark', 'Spark fallback request model');
-    assertEqual(sparkFallback.info.maxInputTokens, 128000, 'Spark fixed fallback context');
+    assertEqual(sparkFallback.info.maxInputTokens, 121600, 'Spark fixed fallback effective budget');
     assertEqual(sparkFallback.info.capabilities?.imageInput, false, 'Spark fallback text-only capability');
+
+    const defaultFallback = buildFallbackModel(config, 'codexAccessToken');
+    assertEqual(defaultFallback.info.maxInputTokens, 258400, 'default fallback applies the Codex-compatible percentage');
+    assertEqual(
+      defaultFallback.info.detail?.includes(`Effective input budget: 258,400 tokens | Raw context window: ${formattedActiveContext} tokens`),
+      true,
+      'fallback detail reports configured context'
+    );
+    assertEqual(defaultFallback.info.detail?.includes(config.baseURL), true, 'fallback detail retains source URL');
 
     const chatGptConfig = {
       ...config,
@@ -327,23 +419,59 @@ async function runModelCatalogMetadataSmokeTest() {
     ];
     const rollbackModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'codexAccessToken');
     const formattedKnownCeiling = (372000).toLocaleString();
+    assertEqual(rollbackModels.length, 7, 'eligible GPT-5.6 catalog expands three exact long profiles');
     for (const slug of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
-      const model = rollbackModels.find((candidate) => candidate.requestModel === slug);
-      if (!model) {
-        throw new Error(`Expected ${slug} rollback metadata.`);
+      const standardModel = rollbackModels.find((candidate) => candidate.info.id === `codex::${slug}`);
+      const longModel = rollbackModels.find((candidate) => candidate.info.id === `codex::${slug}::context=372000`);
+      if (!standardModel || !longModel) {
+        throw new Error(`Expected ${slug} standard and long metadata.`);
       }
-      assertEqual(model.info.maxInputTokens, 272000, `${slug} keeps authenticated active context`);
+      assertEqual(standardModel.info.maxInputTokens, 258400, `${slug} advertises standard effective budget`);
       assertEqual(
-        model.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
+        standardModel.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
         true,
         `${slug} shows known raw context ceiling`
       );
-      assertEqual(model.info.maxOutputTokens, config.maxOutputTokens, `${slug} output metadata remains configured`);
-      assertEqual(model.info.detail?.includes('500,000'), false, `${slug} does not expose inferred total context`);
+      assertEqual(longModel.rawContextWindow, 372000, `${slug} retains exact long raw context`);
+      assertEqual(longModel.info.maxInputTokens, 353400, `${slug} advertises exact long effective budget`);
+      assertEqual(longModel.requestModel, slug, `${slug} long profile keeps real request model`);
+      assertEqual(longModel.info.name, `${standardModel.info.name} (Long context) (Experimental)`, `${slug} experimental long profile name`);
+      assertEqual(
+        longModel.info.detail?.includes('Long context (Experimental): 353,400 tokens effective input budget | Raw context window: 372,000 tokens'),
+        true,
+        `${slug} long detail is truthful`
+      );
+      assertEqual(longModel.info.maxOutputTokens, config.maxOutputTokens, `${slug} output metadata remains configured`);
+      assertEqual(longModel.info.detail?.includes('500,000'), false, `${slug} does not expose inferred total context`);
     }
+    assertEqual(
+      rollbackModels.some((model) => model.info.id.includes('context=1000000')),
+      false,
+      'GPT-5.6 models never expose a 1M profile'
+    );
 
-    const unrelatedModel = rollbackModels.find((model) => model.requestModel === 'gpt-5.6-nova');
+    const duplicateGpt56Models = buildProviderModels(chatGptConfig, [
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol First', { context_window: 272000, max_context_window: 272000 }),
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol Second', { context_window: 272000, max_context_window: 272000 })
+    ], 'codexAccessToken');
+    assertEqual(
+      duplicateGpt56Models.map((model) => model.info.id).join(','),
+      'codex::gpt-5.6-sol,codex::gpt-5.6-sol::context=372000',
+      'duplicate GPT-5.6 rows yield one standard and one long ID'
+    );
+    assertEqual(
+      duplicateGpt56Models.map((model) => model.info.name).join(','),
+      'GPT-5.6-Sol First,GPT-5.6-Sol First (Long context) (Experimental)',
+      'duplicate GPT-5.6 rows preserve first-seen metadata and order'
+    );
+
+    const unrelatedModel = rollbackModels.find((model) => model.info.id === 'codex::gpt-5.6-nova');
     assertEqual(unrelatedModel?.info.detail?.includes('Known raw context ceiling:'), false, 'unrelated GPT-5.6 model is unchanged');
+    assertEqual(
+      rollbackModels.some((model) => model.info.id === 'codex::gpt-5.6-nova::context=372000'),
+      false,
+      'unlisted GPT-5.6 slug has no long profile'
+    );
 
     const apiKeyModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'openaiApiKey');
     assertEqual(
@@ -351,12 +479,22 @@ async function runModelCatalogMetadataSmokeTest() {
       false,
       'API-key catalog omits Codex account ceilings'
     );
+    assertEqual(
+      apiKeyModels.some((model) => model.info.id.includes('::context=')),
+      false,
+      'API-key catalog omits GPT-5.6 long profiles'
+    );
 
     const customBackendModels = buildProviderModels(config, rollbackCatalog, 'codexAccessToken');
     assertEqual(
       customBackendModels.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
       false,
       'custom backend catalog omits ChatGPT Codex ceilings'
+    );
+    assertEqual(
+      customBackendModels.some((model) => model.info.id.includes('::context=')),
+      false,
+      'custom backend catalog omits GPT-5.6 long profiles'
     );
 
     for (const baseURL of [
@@ -371,25 +509,209 @@ async function runModelCatalogMetadataSmokeTest() {
         false,
         `noncanonical backend ${baseURL} omits known ceilings`
       );
+      assertEqual(
+        models.some((model) => model.info.id.includes('::context=')),
+        false,
+        `noncanonical backend ${baseURL} omits long profiles`
+      );
     }
 
-    const promotedModel = buildProviderModels(chatGptConfig, [
+    const promotedModels = buildProviderModels(chatGptConfig, [
       createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 372000, max_context_window: 372000 })
-    ], 'codexAccessToken')[0];
-    assertEqual(promotedModel.info.maxInputTokens, 372000, 'future 372K catalog value becomes active');
+    ], 'codexAccessToken');
+    const promotedModel = promotedModels[0];
+    assertEqual(promotedModel.info.maxInputTokens, 353400, 'future active 372K catalog value uses effective budget');
+    assertEqual(promotedModel.info.name.includes('(Experimental)'), false, 'active 372K catalog row is not a synthetic experimental profile');
     assertEqual(promotedModel.info.detail?.includes('Known raw context ceiling:'), false, 'active 372K omits redundant known ceiling');
+    assertEqual(promotedModels.length, 1, 'active 372K catalog does not duplicate the long profile');
+
+    const activeMillionModels = buildProviderModels(chatGptConfig, [
+      createMockModel('gpt-5.4', 'GPT-5.4', { context_window: 1000000, max_context_window: 1000000 })
+    ], 'codexAccessToken');
+    assertEqual(activeMillionModels.length, 1, 'active GPT-5.4 1M catalog does not duplicate the long profile');
+    assertEqual(activeMillionModels[0].info.maxInputTokens, 950000, 'active GPT-5.4 1M context uses effective budget');
+
+    const nearMatchModels = buildProviderModels(chatGptConfig, [
+      createMockModel('gpt-5.4-preview', 'GPT-5.4 Preview', { context_window: 272000, max_context_window: 1000000 })
+    ], 'codexAccessToken');
+    assertEqual(nearMatchModels.length, 1, 'non-exact GPT-5.4 slug has no long profile');
 
     const fallbackCeiling = buildFallbackModel({
       ...chatGptConfig,
       model: 'gpt-5.6-sol'
     }, 'codexAccessToken');
-    assertEqual(fallbackCeiling.info.maxInputTokens, 272000, 'fallback keeps conservative active context');
+    assertEqual(fallbackCeiling.info.maxInputTokens, 258400, 'fallback keeps conservative effective budget');
     assertEqual(
       fallbackCeiling.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
       true,
       'fallback shows known raw context ceiling'
     );
-    assertEqual(catalogRequestCount, 2, 'credential-kind catalog request count');
+    const percentageOverride = buildProviderModels(config, [
+      createMockModel('percentage-override', 'Percentage Override', {
+        context_window: 333001,
+        max_context_window: 333001,
+        effective_context_window_percent: 80.5
+      })
+    ], 'codexAccessToken')[0];
+    assertEqual(percentageOverride.rawContextWindow, 333001, 'explicit percentage preserves raw context');
+    assertEqual(percentageOverride.info.maxInputTokens, 268065, 'explicit percentage overrides fallback with exact floor behavior');
+
+    for (const invalidPercent of [0, -1, 100.01, Number.NaN, Number.POSITIVE_INFINITY, '95']) {
+      const invalidPercentageModel = buildProviderModels(config, [
+        createMockModel('invalid-percentage', 'Invalid Percentage', {
+          context_window: 272000,
+          effective_context_window_percent: invalidPercent
+        })
+      ], 'codexAccessToken')[0];
+      assertEqual(invalidPercentageModel.info.maxInputTokens, 258400, `invalid percentage ${String(invalidPercent)} falls back to 95`);
+    }
+
+    assertEqual(catalogRequestCount, 3, 'visibility and credential-kind catalog request count');
+  } finally {
+    server.close();
+  }
+}
+
+async function runProviderLongContextSelectionSmokeTest() {
+  const responseRequests = [];
+  const selectedModels = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [
+          createMockModel('gpt-5.4', 'GPT-5.4', {
+            context_window: 272000,
+            max_context_window: 1000000,
+            input_modalities: ['text', 'image']
+          })
+        ]
+      }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    const replies = [
+      ['first reply', 'resp_standard'],
+      ['long reply', 'resp_long'],
+      ['downgrade reply', 'resp_downgrade']
+    ];
+    const reply = replies[responseRequests.length - 1];
+    if (!reply) {
+      throw new Error('Unexpected extra context-profile request.');
+    }
+    writeSseResponse(response, reply[0], reply[1]);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.disabledModels = [];
+  configValues.modelAliases = {};
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    {
+      setSelectedModel(model) {
+        selectedModels.push(model);
+      }
+    },
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const standardModel = models.find((model) => model.id === 'codex::gpt-5.4');
+    const longModel = models.find((model) => model.id === 'codex::gpt-5.4::context=1000000');
+    if (!standardModel || !longModel) {
+      throw new Error('Expected selectable GPT-5.4 standard and long profiles.');
+    }
+    assertEqual(standardModel.maxInputTokens, 258400, 'standard profile advertises effective budget');
+    assertEqual(longModel.maxInputTokens, 950000, 'long profile advertises effective budget');
+
+    await provider.provideLanguageModelChatResponse(
+      standardModel,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      longModel,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      standardModel,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('long reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Downgrade')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 3, 'profile transition request count');
+    assertEqual(selectedModels.join(','), 'gpt-5.4,gpt-5.4,gpt-5.4', 'all profiles resolve to the real selected model');
+    assertEqual(responseRequests[0].model, 'gpt-5.4', 'standard profile sends real backend model');
+    assertEqual(responseRequests[1].model, 'gpt-5.4', 'long profile sends real backend model');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_standard', 'long profile reuses the standard profile branch');
+    assertEqual(
+      JSON.stringify(responseRequests[1].input),
+      JSON.stringify([{ role: 'user', content: 'Follow up', type: 'message' }]),
+      'long profile continuation sends only appended input'
+    );
+    assertEqual(responseRequests[2].model, 'gpt-5.4', 'downgraded standard profile sends real backend model');
+    assertEqual(responseRequests[2].previous_response_id, undefined, 'long-to-standard downgrade starts a new response chain');
+    assertEqual(
+      JSON.stringify(responseRequests[2].input),
+      JSON.stringify([
+        { role: 'user', content: 'First request', type: 'message' },
+        { role: 'assistant', content: 'first reply', type: 'message' },
+        { role: 'user', content: 'Follow up', type: 'message' },
+        { role: 'assistant', content: 'long reply', type: 'message' },
+        { role: 'user', content: 'Downgrade', type: 'message' }
+      ]),
+      'long-to-standard downgrade replays full caller history'
+    );
+    for (const body of responseRequests) {
+      assertEqual(
+        Object.keys(body).some((key) => key.toLowerCase().includes('context')),
+        false,
+        'profile request has no context-window field'
+      );
+      assertEqual(JSON.stringify(body).includes('::context='), false, 'profile request has no synthetic identifier');
+    }
   } finally {
     server.close();
   }
@@ -1553,7 +1875,9 @@ async function runProviderUnavailableScopeSmokeTest() {
         { report() {} },
         token
       );
-    } catch {}
+    } catch (error) {
+      assertEqual(error instanceof Error, true, 'scoped unavailability request throws an Error');
+    }
 
     const httpModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(httpModels.some((item) => item.id === 'codex::gpt-5.6-luna'), false, 'same transport hides temporarily unavailable model');
@@ -1603,19 +1927,22 @@ function assertEqual(actual, expected, label) {
 
 async function runProviderModelDiscoveryPolicySmokeTest() {
   const requestedModels = [];
+  const requestedReasoningEfforts = [];
   const selectedModels = [];
 
-  configValues.disabledModels = ['gpt-5.6-terra'];
-  configValues.modelAliases = { 'gpt-5.6-luna': 'gpt-5.6-sol' };
+  configValues.disabledModels = ['gpt-5.4'];
+  configValues.modelAliases = {};
 
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         models: [
-          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { multi_agent_version: 'v2' }),
-          createMockModel('gpt-5.6-terra', 'GPT-5.6-Terra', { multi_agent_version: 'v2' }),
-          createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { multi_agent_version: 'v2' })
+          createMockModel('gpt-5.4', 'GPT-5.4', {
+            context_window: 272000,
+            max_context_window: 1000000
+          }),
+          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { multi_agent_version: 'v2' })
         ]
       }));
       return;
@@ -1628,6 +1955,7 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
 
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     requestedModels.push(body.model);
+    requestedReasoningEfforts.push(body.reasoning?.effort ?? 'none');
     response.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -1665,19 +1993,39 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
 
   try {
     const token = createCancellationToken();
-    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    assertEqual(models.map((model) => model.id).join(','), 'codex::gpt-5.6-sol', 'model discovery policy filters disabled and aliased source models');
+    const disabledModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      disabledModels.map((model) => model.id).join(','),
+      'codex::gpt-5.6-sol',
+      'disabling a real slug filters both standard and long profiles'
+    );
+
+    configValues.disabledModels = [];
+    configValues.modelAliases = { 'gpt-5.4': 'gpt-5.6-sol' };
+    const aliasedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      aliasedModels.map((model) => model.id).join(','),
+      'codex::gpt-5.6-sol',
+      'aliasing a real slug filters both standard and long source profiles'
+    );
 
     await provider.provideLanguageModelChatResponse(
-      { id: 'codex::gpt-5.6-luna', name: 'GPT-5.6-Luna', family: 'gpt-5.6-luna', version: 'mock', maxInputTokens: 372000 },
+      {
+        id: 'codex::gpt-5.4::context=999999::reasoning=high',
+        name: 'GPT-5.4 (Stale long context)',
+        family: 'gpt-5.4',
+        version: 'mock',
+        maxInputTokens: 949999
+      },
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
       {},
       { report() {} },
       token
     );
 
-    assertEqual(requestedModels.join(','), 'gpt-5.6-sol', 'configured alias avoids rejected model request');
-    assertEqual(selectedModels.join(','), 'gpt-5.6-sol', 'configured alias updates selected model');
+    assertEqual(requestedModels.join(','), 'gpt-5.6-sol', 'stale profile suffix is never sent and alias applies to the real slug');
+    assertEqual(selectedModels.join(','), 'gpt-5.6-sol', 'profile alias updates selected model to the real slug');
+    assertEqual(requestedReasoningEfforts.join(','), 'high', 'profile alias preserves parsed reasoning effort');
   } finally {
     configValues.disabledModels = [];
     configValues.modelAliases = {};
