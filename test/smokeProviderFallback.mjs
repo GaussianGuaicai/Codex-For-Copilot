@@ -173,6 +173,7 @@ const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = requir
 
 try {
   await runModelCatalogMetadataSmokeTest();
+  await runProviderMalformedCatalogFallbackSmokeTest();
   await runProviderLongContextSelectionSmokeTest();
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
@@ -185,6 +186,7 @@ try {
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
+  await runProviderNestedAliasPolicySmokeTest();
   await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
   await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
   console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
@@ -225,12 +227,13 @@ async function runModelCatalogMetadataSmokeTest() {
       visibility: 'hidden'
     })
   ];
+  let catalogPayload = { models: catalog };
   let catalogRequestCount = 0;
   const server = createServer((request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       catalogRequestCount += 1;
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: catalog }));
+      response.end(JSON.stringify(catalogPayload));
       return;
     }
 
@@ -267,6 +270,45 @@ async function runModelCatalogMetadataSmokeTest() {
       kind: 'openaiApiKey',
       omitMaxOutputTokens: false
     }, token);
+
+    catalogPayload = { models: [] };
+    const emptyCatalog = await fetchAvailableModels(config, {
+      ...sharedCredentials,
+      kind: 'codexAccessToken'
+    }, token);
+    assertEqual(emptyCatalog.length, 0, 'successful empty catalog remains empty');
+    assertEqual(
+      buildProviderModels(config, emptyCatalog, 'codexAccessToken').length,
+      0,
+      'successful empty catalog does not synthesize the configured fallback model'
+    );
+
+    catalogPayload = { unexpected: [] };
+    let invalidCatalogMessage = '';
+    try {
+      await fetchAvailableModels(config, {
+        ...sharedCredentials,
+        kind: 'codexAccessToken'
+      }, token);
+    } catch (error) {
+      invalidCatalogMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(invalidCatalogMessage, 'Model discovery returned an invalid catalog.', 'malformed catalog is treated as discovery failure');
+
+    for (const malformedModels of [[null], [catalog[0], {}]]) {
+      catalogPayload = { models: malformedModels };
+      let malformedRowMessage = '';
+      try {
+        await fetchAvailableModels(config, {
+          ...sharedCredentials,
+          kind: 'codexAccessToken'
+        }, token);
+      } catch (error) {
+        malformedRowMessage = error instanceof Error ? error.message : String(error);
+      }
+      assertEqual(malformedRowMessage, 'Model discovery returned an invalid catalog.', 'malformed catalog row is treated as discovery failure');
+    }
+    catalogPayload = { models: catalog };
 
     assertEqual(
       defaultAccountCatalog.map((model) => model.slug).join(','),
@@ -566,9 +608,56 @@ async function runModelCatalogMetadataSmokeTest() {
       assertEqual(invalidPercentageModel.info.maxInputTokens, 258400, `invalid percentage ${String(invalidPercent)} falls back to 95`);
     }
 
-    assertEqual(catalogRequestCount, 3, 'visibility and credential-kind catalog request count');
+    assertEqual(catalogRequestCount, 7, 'visibility, credential-kind, and catalog validation request count');
   } finally {
     server.close();
+  }
+}
+
+async function runProviderMalformedCatalogFallbackSmokeTest() {
+  const server = createServer((request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [{}] }));
+      return;
+    }
+
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'unexpected request' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.model = 'gpt-5.5';
+  configValues.disabledModels = [];
+  configValues.modelAliases = {};
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, createCancellationToken());
+    assertEqual(
+      models.map((model) => model.id).join(','),
+      'codex::gpt-5.5',
+      'malformed non-empty catalog uses the explicit discovery-failure fallback'
+    );
+  } finally {
+    await closeServer(server);
   }
 }
 
@@ -1926,6 +2015,7 @@ function assertEqual(actual, expected, label) {
 }
 
 async function runProviderModelDiscoveryPolicySmokeTest() {
+  const responseRequests = [];
   const requestedModels = [];
   const requestedReasoningEfforts = [];
   const selectedModels = [];
@@ -1954,6 +2044,7 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
     }
 
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
     requestedModels.push(body.model);
     requestedReasoningEfforts.push(body.reasoning?.effort ?? 'none');
     response.writeHead(200, {
@@ -2000,6 +2091,35 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
       'disabling a real slug filters both standard and long profiles'
     );
 
+    configValues.disabledModels = ['gpt-5.4', 'gpt-5.6-sol'];
+    const allDisabledModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(allDisabledModels.length, 0, 'disabling every discovered slug returns an empty picker catalog');
+
+    let allDisabledResponseMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        {
+          id: 'codex::gpt-5.4',
+          name: 'GPT-5.4',
+          family: 'gpt-5.4',
+          version: 'mock',
+          maxInputTokens: 258400
+        },
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Disabled')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      allDisabledResponseMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      allDisabledResponseMessage,
+      'No Codex models are available after applying the configured discovery policy.',
+      'stale selection cannot bypass an all-disabled catalog'
+    );
+    assertEqual(requestedModels.length, 0, 'all-disabled stale selection never reaches Responses');
+
     configValues.disabledModels = [];
     configValues.modelAliases = { 'gpt-5.4': 'gpt-5.6-sol' };
     const aliasedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
@@ -2011,11 +2131,11 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
 
     await provider.provideLanguageModelChatResponse(
       {
-        id: 'codex::gpt-5.4::context=999999::reasoning=high',
-        name: 'GPT-5.4 (Stale long context)',
+        id: 'codex::gpt-5.4::reasoning=high',
+        name: 'GPT-5.4 (Stale alias source)',
         family: 'gpt-5.4',
         version: 'mock',
-        maxInputTokens: 949999
+        maxInputTokens: 258400
       },
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
       {},
@@ -2026,6 +2146,180 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
     assertEqual(requestedModels.join(','), 'gpt-5.6-sol', 'stale profile suffix is never sent and alias applies to the real slug');
     assertEqual(selectedModels.join(','), 'gpt-5.6-sol', 'profile alias updates selected model to the real slug');
     assertEqual(requestedReasoningEfforts.join(','), 'high', 'profile alias preserves parsed reasoning effort');
+
+    const aliasTargetModel = aliasedModels.find((model) => model.id === 'codex::gpt-5.6-sol');
+    if (!aliasTargetModel) {
+      throw new Error('Expected the alias target model in the filtered catalog.');
+    }
+    await provider.provideLanguageModelChatResponse(
+      { ...aliasTargetModel, id: `${aliasTargetModel.id}::reasoning=high` },
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('alias ok')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+    assertEqual(requestedModels.join(','), 'gpt-5.6-sol,gpt-5.6-sol', 'alias target handles the follow-up request');
+    assertEqual(selectedModels.join(','), 'gpt-5.6-sol,gpt-5.6-sol', 'alias target remains selected for follow-up');
+    assertEqual(
+      responseRequests[1].previous_response_id,
+      undefined,
+      'stale aliased selection with unknown target budget starts a new response chain'
+    );
+    assertEqual(
+      JSON.stringify(responseRequests[1].input),
+      JSON.stringify([
+        { role: 'user', content: 'Ping', type: 'message' },
+        { role: 'assistant', content: 'alias ok', type: 'message' },
+        { role: 'user', content: 'Follow up', type: 'message' }
+      ]),
+      'unknown alias target budget replays the full caller history'
+    );
+  } finally {
+    configValues.disabledModels = [];
+    configValues.modelAliases = {};
+    await closeServer(server);
+  }
+}
+
+async function runProviderNestedAliasPolicySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [
+          createMockModel('alias-a', 'Alias A'),
+          createMockModel('alias-b', 'Alias B'),
+          createMockModel('alias-d', 'Alias D'),
+          createMockModel('alias-c', 'Alias C')
+        ]
+      }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    writeSseResponse(response, 'nested alias ok', `resp_nested_${responseRequests.length}`);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.disabledModels = [];
+  configValues.modelAliases = {
+    'alias-a': 'alias-b',
+    'alias-b': 'alias-c'
+  };
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const chainedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      chainedModels.map((model) => model.id).join(','),
+      'codex::alias-d,codex::alias-c',
+      'nested aliases hide their sources while retaining unrelated and final target models'
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      {
+        id: 'codex::alias-a',
+        name: 'Alias A (Stale)',
+        family: 'alias-a',
+        version: 'mock',
+        maxInputTokens: 258400
+      },
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Resolve nested alias')] }],
+      {},
+      { report() {} },
+      token
+    );
+    assertEqual(responseRequests[0]?.model, 'alias-c', 'stale nested alias resolves through the post-policy catalog');
+
+    configValues.modelAliases = {
+      'alias-a': 'alias-b',
+      'alias-b': 'alias-a'
+    };
+    const cyclicModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      cyclicModels.map((model) => model.id).join(','),
+      'codex::alias-d,codex::alias-c',
+      'cyclic alias sources are hidden while unrelated models remain available'
+    );
+
+    let cyclicAliasMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        {
+          id: 'codex::alias-a',
+          name: 'Alias A (Stale cycle)',
+          family: 'alias-a',
+          version: 'mock',
+          maxInputTokens: 258400
+        },
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject alias cycle')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      cyclicAliasMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      cyclicAliasMessage,
+      'Model alias cycle detected for "alias-a".',
+      'stale cyclic alias is rejected instead of falling back to an unrelated model'
+    );
+    assertEqual(responseRequests.length, 1, 'cyclic alias never reaches Responses');
+
+    configValues.modelAliases = {
+      'alias-a': 'alias-missing',
+      'alias-missing': 'alias-external'
+    };
+    const undiscoveredTargetModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      undiscoveredTargetModels.map((model) => model.id).join(','),
+      'codex::alias-a,codex::alias-b,codex::alias-d,codex::alias-c',
+      'alias source remains visible when its terminal target is not in discovery'
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      {
+        id: 'codex::alias-a',
+        name: 'Alias A (External target)',
+        family: 'alias-a',
+        version: 'mock',
+        maxInputTokens: 258400
+      },
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Resolve external alias')] }],
+      {},
+      { report() {} },
+      token
+    );
+    assertEqual(responseRequests[1]?.model, 'alias-external', 'nested alias preserves an undiscovered terminal target');
   } finally {
     configValues.disabledModels = [];
     configValues.modelAliases = {};
