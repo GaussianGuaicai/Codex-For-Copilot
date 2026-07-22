@@ -41,6 +41,7 @@ async function runStaleWhileRevalidateSmokeTest(CodexModelCache) {
   assertEqual(first.state, 'cold', 'cold cache state');
   assertEqual(first.value.join(','), 'gpt-first', 'cold cache value');
   assertEqual(loadCount, 1, 'cold cache load count');
+  assertEqual(cache.peek('scope').join(','), 'gpt-first', 'peek returns the cached value');
 
   now += 50;
   const fresh = await cache.get('scope', async () => {
@@ -105,10 +106,48 @@ async function runStaleWhileRevalidateSmokeTest(CodexModelCache) {
   });
   await Promise.resolve();
   assertEqual(coldSettled, false, 'expired cache waits for a cold refresh');
+  assertEqual(cache.peek('scope').join(','), 'gpt-refreshed', 'peek retains an expired value during cold refresh');
   resolveCold(['gpt-cold']);
   const coldResult = await cold;
   assertEqual(coldResult.state, 'cold', 'expired cache returns cold state');
   assertEqual(coldResult.value.join(','), 'gpt-cold', 'expired cache returns refreshed value');
+
+  cache.invalidate('scope');
+  assertEqual(cache.peek('scope'), undefined, 'invalidating a key removes its peek value');
+
+  const versionedCache = new CodexModelCache({
+    freshTtlMs: 100,
+    staleTtlMs: 1_000,
+    now: () => now
+  });
+  versionedCache.set('scope', ['gpt-original']);
+  now += 101;
+  let resolveSupersededRefresh;
+  const supersededRefreshValue = new Promise((resolve) => {
+    resolveSupersededRefresh = resolve;
+  });
+  const supersededRefresh = await versionedCache.get('scope', async () => supersededRefreshValue);
+  versionedCache.invalidate('scope');
+  versionedCache.set('scope', ['gpt-filtered']);
+  resolveSupersededRefresh(['gpt-original']);
+  await supersededRefresh.refresh;
+  assertEqual(
+    versionedCache.peek('scope').join(','),
+    'gpt-filtered',
+    'invalidated in-flight refresh cannot overwrite a replacement value'
+  );
+
+  const boundedCache = new CodexModelCache({
+    freshTtlMs: 100,
+    staleTtlMs: 1_000,
+    maxEntries: 1,
+    now: () => now
+  });
+  boundedCache.set('first', ['gpt-first']);
+  now += 1;
+  boundedCache.set('second', ['gpt-second']);
+  assertEqual(boundedCache.peek('first'), undefined, 'eviction removes the oldest peek value');
+  assertEqual(boundedCache.peek('second').join(','), 'gpt-second', 'peek retains the bounded cache entry');
 }
 
 async function assertRejects(promise, label) {

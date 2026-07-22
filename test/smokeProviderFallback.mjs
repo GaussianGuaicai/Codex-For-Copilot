@@ -173,6 +173,7 @@ const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = requir
 
 try {
   await runModelCatalogMetadataSmokeTest();
+  await runProviderMalformedCatalogFallbackSmokeTest();
   await runProviderLongContextSelectionSmokeTest();
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
@@ -185,6 +186,8 @@ try {
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
+  await runProviderNestedAliasPolicySmokeTest();
+  await runProviderAuthoritativeCatalogSmokeTest();
   await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
   await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
   console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
@@ -225,12 +228,13 @@ async function runModelCatalogMetadataSmokeTest() {
       visibility: 'hidden'
     })
   ];
+  let catalogPayload = { models: catalog };
   let catalogRequestCount = 0;
   const server = createServer((request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       catalogRequestCount += 1;
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: catalog }));
+      response.end(JSON.stringify(catalogPayload));
       return;
     }
 
@@ -267,6 +271,45 @@ async function runModelCatalogMetadataSmokeTest() {
       kind: 'openaiApiKey',
       omitMaxOutputTokens: false
     }, token);
+
+    catalogPayload = { models: [] };
+    const emptyCatalog = await fetchAvailableModels(config, {
+      ...sharedCredentials,
+      kind: 'codexAccessToken'
+    }, token);
+    assertEqual(emptyCatalog.length, 0, 'successful empty catalog remains empty');
+    assertEqual(
+      buildProviderModels(config, emptyCatalog, 'codexAccessToken').length,
+      0,
+      'successful empty catalog does not synthesize the configured fallback model'
+    );
+
+    catalogPayload = { unexpected: [] };
+    let invalidCatalogMessage = '';
+    try {
+      await fetchAvailableModels(config, {
+        ...sharedCredentials,
+        kind: 'codexAccessToken'
+      }, token);
+    } catch (error) {
+      invalidCatalogMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(invalidCatalogMessage, 'Model discovery returned an invalid catalog.', 'malformed catalog is treated as discovery failure');
+
+    for (const malformedModels of [[null], [catalog[0], {}]]) {
+      catalogPayload = { models: malformedModels };
+      let malformedRowMessage = '';
+      try {
+        await fetchAvailableModels(config, {
+          ...sharedCredentials,
+          kind: 'codexAccessToken'
+        }, token);
+      } catch (error) {
+        malformedRowMessage = error instanceof Error ? error.message : String(error);
+      }
+      assertEqual(malformedRowMessage, 'Model discovery returned an invalid catalog.', 'malformed catalog row is treated as discovery failure');
+    }
+    catalogPayload = { models: catalog };
 
     assertEqual(
       defaultAccountCatalog.map((model) => model.slug).join(','),
@@ -566,9 +609,56 @@ async function runModelCatalogMetadataSmokeTest() {
       assertEqual(invalidPercentageModel.info.maxInputTokens, 258400, `invalid percentage ${String(invalidPercent)} falls back to 95`);
     }
 
-    assertEqual(catalogRequestCount, 3, 'visibility and credential-kind catalog request count');
+    assertEqual(catalogRequestCount, 7, 'visibility, credential-kind, and catalog validation request count');
   } finally {
     server.close();
+  }
+}
+
+async function runProviderMalformedCatalogFallbackSmokeTest() {
+  const server = createServer((request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [{}] }));
+      return;
+    }
+
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'unexpected request' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.model = 'gpt-5.5';
+  configValues.disabledModels = [];
+  configValues.modelAliases = {};
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, createCancellationToken());
+    assertEqual(
+      models.map((model) => model.id).join(','),
+      'codex::gpt-5.5',
+      'malformed non-empty catalog uses the explicit discovery-failure fallback'
+    );
+  } finally {
+    await closeServer(server);
   }
 }
 
@@ -722,9 +812,40 @@ async function runProviderFallbackSmokeTest() {
   const selectedModels = [];
   const warnings = [];
   let thrownMessage = '';
+  let failModelRefresh = false;
+  let stallPreRejectionRefresh = false;
+  let modelRequestCount = 0;
+  let discoverySuccessCount = 0;
+  let releasePreRejectionRefresh;
+  let resolvePreRejectionRefreshStarted;
+  let resolvePreRejectionRefreshCompleted;
+  let resolvePostRejectionCacheLookup;
+  let staleCacheLookupCount = 0;
+  const preRejectionRefreshStarted = new Promise((resolve) => {
+    resolvePreRejectionRefreshStarted = resolve;
+  });
+  const preRejectionRefreshCompleted = new Promise((resolve) => {
+    resolvePreRejectionRefreshCompleted = resolve;
+  });
+  const postRejectionCacheLookup = new Promise((resolve) => {
+    resolvePostRejectionCacheLookup = resolve;
+  });
 
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      modelRequestCount += 1;
+      const isPreRejectionRefresh = stallPreRejectionRefresh && modelRequestCount === 2;
+      if (isPreRejectionRefresh) {
+        resolvePreRejectionRefreshStarted();
+        await new Promise((resolve) => {
+          releasePreRejectionRefresh = resolve;
+        });
+      }
+      if (failModelRefresh && !isPreRejectionRefresh) {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'models unavailable' } }));
+        return;
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         models: [
@@ -744,6 +865,7 @@ async function runProviderFallbackSmokeTest() {
     requestedModels.push(body.model);
 
     if (body.model === 'gpt-5.6-nova') {
+      failModelRefresh = true;
       response.writeHead(404, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         error: {
@@ -763,10 +885,27 @@ async function runProviderFallbackSmokeTest() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  const originalDateNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
 
   const outputChannel = {
-    debug() {},
-    info() {},
+    debug(message, payload) {
+      if (message === 'getAvailableModels cache result' && payload?.modelDiscoveryCacheState === 'stale') {
+        staleCacheLookupCount += 1;
+        if (staleCacheLookupCount === 2) {
+          resolvePostRejectionCacheLookup(payload);
+        }
+      }
+    },
+    info(message) {
+      if (message === 'getAvailableModels discovery success') {
+        discoverySuccessCount += 1;
+        if (discoverySuccessCount === 2) {
+          resolvePreRejectionRefreshCompleted();
+        }
+      }
+    },
     warn(message, payload) {
       warnings.push({ message, payload });
     },
@@ -806,25 +945,40 @@ async function runProviderFallbackSmokeTest() {
       throw new Error('Expected nova model to be discoverable before temporary disable.');
     }
 
+    now += 10 * 60 * 1000 + 1;
+    stallPreRejectionRefresh = true;
+    const responseAttempt = provider.provideLanguageModelChatResponse(
+      novaModel,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
+      {},
+      { report() {} },
+      token
+    );
+    await preRejectionRefreshStarted;
     try {
-      await provider.provideLanguageModelChatResponse(
-        novaModel,
-        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
-        {},
-        { report() {} },
-        token
-      );
+      await responseAttempt;
     } catch (error) {
       thrownMessage = error instanceof Error ? error.message : String(error);
     }
 
+    const rejectionRefreshLookup = await postRejectionCacheLookup;
+    assertEqual(rejectionRefreshLookup.refreshStarted, true, 'model rejection starts a versioned refresh instead of joining stale work');
+    releasePreRejectionRefresh?.();
+    await preRejectionRefreshCompleted;
+    await new Promise((resolve) => setImmediate(resolve));
     const refreshedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(requestedModels.join(','), 'gpt-5.6-nova', 'request order without retry');
     assertEqual(selectedModels.join(','), 'gpt-5.6-nova', 'selected model does not silently change');
-    assertEqual(refreshedModels.some((item) => item.id === 'codex::gpt-5.6-nova'), false, 'rejected model hidden after temporary disable');
+    assertEqual(
+      refreshedModels.map((item) => item.id).join(','),
+      'codex::gpt-5.6-sol',
+      'failed refresh retains the authoritative catalog without the rejected model'
+    );
     assertEqual(warnings.some((entry) => entry.message === 'response model unavailable'), true, 'unavailable warning emitted');
     assertEqual(thrownMessage.includes('hidden temporarily from the model picker'), true, 'clear unavailable-model error');
   } finally {
+    releasePreRejectionRefresh?.();
+    Date.now = originalDateNow;
     await closeServer(server);
   }
 }
@@ -1901,6 +2055,29 @@ function createCancellationToken() {
   };
 }
 
+function createMutableCancellationToken() {
+  let canceled = false;
+  const listeners = new Set();
+  return {
+    get isCancellationRequested() {
+      return canceled;
+    },
+    onCancellationRequested(listener) {
+      listeners.add(listener);
+      return { dispose: () => listeners.delete(listener) };
+    },
+    cancel() {
+      if (canceled) {
+        return;
+      }
+      canceled = true;
+      for (const listener of listeners) {
+        listener();
+      }
+    }
+  };
+}
+
 function writeSseResponse(response, text, responseId) {
   response.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -1926,6 +2103,7 @@ function assertEqual(actual, expected, label) {
 }
 
 async function runProviderModelDiscoveryPolicySmokeTest() {
+  const responseRequests = [];
   const requestedModels = [];
   const requestedReasoningEfforts = [];
   const selectedModels = [];
@@ -1954,6 +2132,7 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
     }
 
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
     requestedModels.push(body.model);
     requestedReasoningEfforts.push(body.reasoning?.effort ?? 'none');
     response.writeHead(200, {
@@ -2000,6 +2179,35 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
       'disabling a real slug filters both standard and long profiles'
     );
 
+    configValues.disabledModels = ['gpt-5.4', 'gpt-5.6-sol'];
+    const allDisabledModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(allDisabledModels.length, 0, 'disabling every discovered slug returns an empty picker catalog');
+
+    let allDisabledResponseMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        {
+          id: 'codex::gpt-5.4',
+          name: 'GPT-5.4',
+          family: 'gpt-5.4',
+          version: 'mock',
+          maxInputTokens: 258400
+        },
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Disabled')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      allDisabledResponseMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      allDisabledResponseMessage,
+      'No Codex models are available after applying the configured discovery policy.',
+      'stale selection cannot bypass an all-disabled catalog'
+    );
+    assertEqual(requestedModels.length, 0, 'all-disabled stale selection never reaches Responses');
+
     configValues.disabledModels = [];
     configValues.modelAliases = { 'gpt-5.4': 'gpt-5.6-sol' };
     const aliasedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
@@ -2011,11 +2219,11 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
 
     await provider.provideLanguageModelChatResponse(
       {
-        id: 'codex::gpt-5.4::context=999999::reasoning=high',
-        name: 'GPT-5.4 (Stale long context)',
+        id: 'codex::gpt-5.4::reasoning=high',
+        name: 'GPT-5.4 (Stale alias source)',
         family: 'gpt-5.4',
         version: 'mock',
-        maxInputTokens: 949999
+        maxInputTokens: 258400
       },
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
       {},
@@ -2026,7 +2234,464 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
     assertEqual(requestedModels.join(','), 'gpt-5.6-sol', 'stale profile suffix is never sent and alias applies to the real slug');
     assertEqual(selectedModels.join(','), 'gpt-5.6-sol', 'profile alias updates selected model to the real slug');
     assertEqual(requestedReasoningEfforts.join(','), 'high', 'profile alias preserves parsed reasoning effort');
+
+    const aliasTargetModel = aliasedModels.find((model) => model.id === 'codex::gpt-5.6-sol');
+    if (!aliasTargetModel) {
+      throw new Error('Expected the alias target model in the filtered catalog.');
+    }
+    await provider.provideLanguageModelChatResponse(
+      { ...aliasTargetModel, id: `${aliasTargetModel.id}::reasoning=high` },
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('alias ok')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+    assertEqual(requestedModels.join(','), 'gpt-5.6-sol,gpt-5.6-sol', 'alias target handles the follow-up request');
+    assertEqual(selectedModels.join(','), 'gpt-5.6-sol,gpt-5.6-sol', 'alias target remains selected for follow-up');
+    assertEqual(
+      responseRequests[1].previous_response_id,
+      'resp_alias',
+      'authoritative catalog supplies the alias target budget for compatible reuse'
+    );
+    assertEqual(
+      JSON.stringify(responseRequests[1].input),
+      JSON.stringify([{ role: 'user', content: 'Follow up', type: 'message' }]),
+      'authoritative alias target budget keeps the compatible follow-up incremental'
+    );
   } finally {
+    configValues.disabledModels = [];
+    configValues.modelAliases = {};
+    await closeServer(server);
+  }
+}
+
+async function runProviderNestedAliasPolicySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [
+          createMockModel('alias-a', 'Alias A'),
+          createMockModel('alias-b', 'Alias B'),
+          createMockModel('alias-d', 'Alias D'),
+          createMockModel('alias-c', 'Alias C')
+        ]
+      }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    writeSseResponse(response, 'nested alias ok', `resp_nested_${responseRequests.length}`);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.disabledModels = [];
+  configValues.modelAliases = {
+    'alias-a': 'alias-b',
+    'alias-b': 'alias-c'
+  };
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const chainedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      chainedModels.map((model) => model.id).join(','),
+      'codex::alias-d,codex::alias-c',
+      'nested aliases hide their sources while retaining unrelated and final target models'
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      {
+        id: 'codex::alias-a',
+        name: 'Alias A (Stale)',
+        family: 'alias-a',
+        version: 'mock',
+        maxInputTokens: 258400
+      },
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Resolve nested alias')] }],
+      {},
+      { report() {} },
+      token
+    );
+    assertEqual(responseRequests[0]?.model, 'alias-c', 'stale nested alias resolves through the post-policy catalog');
+
+    configValues.modelAliases = {
+      'alias-a': 'alias-b',
+      'alias-b': 'alias-a'
+    };
+    const cyclicModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      cyclicModels.map((model) => model.id).join(','),
+      'codex::alias-d,codex::alias-c',
+      'cyclic alias sources are hidden while unrelated models remain available'
+    );
+
+    let cyclicAliasMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        {
+          id: 'codex::alias-a',
+          name: 'Alias A (Stale cycle)',
+          family: 'alias-a',
+          version: 'mock',
+          maxInputTokens: 258400
+        },
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject alias cycle')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      cyclicAliasMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      cyclicAliasMessage,
+      'Model alias cycle detected for "alias-a".',
+      'stale cyclic alias is rejected instead of falling back to an unrelated model'
+    );
+    assertEqual(responseRequests.length, 1, 'cyclic alias never reaches Responses');
+
+    configValues.modelAliases = {
+      'alias-a': 'alias-missing',
+      'alias-missing': 'alias-external'
+    };
+    const undiscoveredTargetModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      undiscoveredTargetModels.map((model) => model.id).join(','),
+      'codex::alias-a,codex::alias-b,codex::alias-d,codex::alias-c',
+      'alias source remains visible when its terminal target is not in discovery'
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      {
+        id: 'codex::alias-a',
+        name: 'Alias A (External target)',
+        family: 'alias-a',
+        version: 'mock',
+        maxInputTokens: 258400
+      },
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Resolve external alias')] }],
+      {},
+      { report() {} },
+      token
+    );
+    assertEqual(
+      responseRequests[1]?.model,
+      'alias-a',
+      'authoritative catalog keeps the discovered source when the terminal alias target is unavailable'
+    );
+  } finally {
+    configValues.disabledModels = [];
+    configValues.modelAliases = {};
+    await closeServer(server);
+  }
+}
+
+async function runProviderAuthoritativeCatalogSmokeTest() {
+  let catalog = [];
+  let failDiscovery = false;
+  let stallDiscovery = false;
+  let notifyStalledDiscoveryStarted;
+  let releaseStalledDiscovery;
+  let modelRequestCount = 0;
+  let responseRequestCount = 0;
+  let tokenCountRequestCount = 0;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      modelRequestCount += 1;
+      if (failDiscovery) {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'models unavailable' } }));
+        return;
+      }
+      if (stallDiscovery) {
+        notifyStalledDiscoveryStarted?.();
+        await new Promise((resolve) => {
+          releaseStalledDiscovery = resolve;
+        });
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: catalog }));
+      return;
+    }
+
+    for await (const _chunk of request) {
+      // Consume the request before returning the deterministic response.
+    }
+    if (request.url?.endsWith('/responses/input_tokens')) {
+      tokenCountRequestCount += 1;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ input_tokens: 999 }));
+      return;
+    }
+
+    responseRequestCount += 1;
+    writeSseResponse(response, 'unexpected stale response', 'resp_unexpected_stale');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.disabledModels = [];
+  configValues.modelAliases = {};
+  const originalDateNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  const staleModel = {
+    id: 'codex::gpt-5.4',
+    name: 'GPT-5.4 (Stale)',
+    family: 'gpt-5.4',
+    version: 'mock',
+    maxInputTokens: 258400
+  };
+
+  try {
+    const token = createCancellationToken();
+    const emptyModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(emptyModels.length, 0, 'successful empty catalog is authoritative');
+
+    let staleResponseMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        staleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Do not send')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      staleResponseMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      staleResponseMessage,
+      'No Codex models are available after applying the configured discovery policy.',
+      'authoritative empty catalog rejects a stale provider model id'
+    );
+    assertEqual(responseRequestCount, 0, 'authoritative empty catalog never reaches Responses');
+
+    const emptyCatalogTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(emptyCatalogTokenCount, 2, 'empty catalog token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'empty catalog token count skips the official endpoint');
+
+    catalog = [createMockModel('gpt-5.4', 'GPT-5.4')];
+    configValues.disabledModels = ['gpt-5.4'];
+    const allFilteredModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(allFilteredModels.length, 0, 'all-filtered catalog is authoritative');
+
+    const allFilteredTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(allFilteredTokenCount, 2, 'all-filtered token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'all-filtered token count skips the official endpoint');
+
+    catalog = [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')];
+    configValues.disabledModels = [];
+    configValues.clientVersion = 'non-empty-test';
+    const nonEmptyModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(nonEmptyModels.map((model) => model.id).join(','), 'codex::gpt-5.6-sol', 'non-empty authoritative catalog');
+
+    let missingModelMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        staleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject missing stale model')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      missingModelMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      missingModelMessage,
+      'Selected Codex model "gpt-5.4" is not available in the authoritative model catalog.',
+      'non-empty authoritative catalog rejects a missing stale model'
+    );
+    assertEqual(responseRequestCount, 0, 'missing stale model never reaches Responses');
+
+    const missingModelTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(missingModelTokenCount, 2, 'missing authoritative model token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'missing authoritative model token count skips the official endpoint');
+
+    const prefixStaleModel = {
+      ...staleModel,
+      id: 'codex::gpt-5.6-sol-preview',
+      family: 'gpt-5.6-sol-preview'
+    };
+    let prefixModelMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        prefixStaleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject prefix-like stale model')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      prefixModelMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      prefixModelMessage,
+      'Selected Codex model "gpt-5.6-sol-preview" is not available in the authoritative model catalog.',
+      'authoritative catalog rejects implicit prefix remapping'
+    );
+    assertEqual(responseRequestCount, 0, 'prefix-like stale model never reaches Responses');
+
+    const prefixModelTokenCount = await provider.provideTokenCount(prefixStaleModel, '12345678', token);
+    assertEqual(prefixModelTokenCount, 2, 'prefix-like stale model token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'prefix-like stale model token count skips the official endpoint');
+
+    const modelRequestsBeforeFailedRefresh = modelRequestCount;
+    now += 60 * 60 * 1000 + 1;
+    failDiscovery = true;
+    const expiredCatalogTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(expiredCatalogTokenCount, 2, 'failed refresh retains the expired authoritative catalog');
+    assertEqual(modelRequestCount, modelRequestsBeforeFailedRefresh + 1, 'expired authoritative catalog attempts one refresh');
+    assertEqual(tokenCountRequestCount, 0, 'failed authoritative refresh skips the official endpoint for a missing model');
+
+    let expiredCatalogResponseMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        staleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Still reject missing stale model')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      expiredCatalogResponseMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      expiredCatalogResponseMessage,
+      'Selected Codex model "gpt-5.4" is not available in the authoritative model catalog.',
+      'failed refresh does not replace authoritative catalog with fallback'
+    );
+    assertEqual(responseRequestCount, 0, 'failed authoritative refresh never enables stale Responses requests');
+
+    failDiscovery = false;
+    configValues.clientVersion = 'cancel-test';
+    const canceledToken = {
+      isCancellationRequested: true,
+      onCancellationRequested() {
+        return { dispose() {} };
+      }
+    };
+    let cancellationRejected = false;
+    try {
+      await provider.provideTokenCount(staleModel, '12345678', canceledToken);
+    } catch {
+      cancellationRejected = true;
+    }
+    assertEqual(cancellationRejected, true, 'canceled discovery rejects instead of returning an estimate');
+
+    const postCancellationModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      postCancellationModels.map((model) => model.id).join(','),
+      'codex::gpt-5.6-sol',
+      'canceled discovery does not cache a synthetic fallback catalog'
+    );
+
+    configValues.clientVersion = 'concurrent-cancel-test';
+    stallDiscovery = true;
+    const stalledDiscoveryStarted = new Promise((resolve) => {
+      notifyStalledDiscoveryStarted = resolve;
+    });
+    const leaderToken = createMutableCancellationToken();
+    const canceledLeader = provider.provideTokenCount(staleModel, '12345678', leaderToken);
+    await stalledDiscoveryStarted;
+    const uncanceledFollower = provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await Promise.resolve();
+    leaderToken.cancel();
+    releaseStalledDiscovery?.();
+
+    const concurrentResults = await Promise.allSettled([canceledLeader, uncanceledFollower]);
+    assertEqual(concurrentResults[0].status, 'rejected', 'canceled discovery leader rejects');
+    assertEqual(concurrentResults[1].status, 'fulfilled', 'uncanceled discovery follower survives leader cancellation');
+    assertEqual(
+      concurrentResults[1].status === 'fulfilled'
+        ? concurrentResults[1].value.map((model) => model.id).join(',')
+        : '',
+      'codex::gpt-5.6-sol',
+      'uncanceled discovery follower receives the shared catalog'
+    );
+
+    stallDiscovery = false;
+    notifyStalledDiscoveryStarted = undefined;
+    releaseStalledDiscovery = undefined;
+    const postConcurrentCancellationModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      postConcurrentCancellationModels.map((model) => model.id).join(','),
+      'codex::gpt-5.6-sol',
+      'independent cancellation leaves the shared catalog cached'
+    );
+
+    configValues.clientVersion = 'concurrent-follower-cancel-test';
+    stallDiscovery = true;
+    const followerCancellationDiscoveryStarted = new Promise((resolve) => {
+      notifyStalledDiscoveryStarted = resolve;
+    });
+    const uncanceledLeader = provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await followerCancellationDiscoveryStarted;
+    const followerToken = createMutableCancellationToken();
+    const canceledFollower = provider.provideTokenCount(staleModel, '12345678', followerToken);
+    await Promise.resolve();
+    followerToken.cancel();
+    releaseStalledDiscovery?.();
+
+    const followerCancellationResults = await Promise.allSettled([uncanceledLeader, canceledFollower]);
+    assertEqual(followerCancellationResults[0].status, 'fulfilled', 'uncanceled discovery leader survives follower cancellation');
+    assertEqual(followerCancellationResults[1].status, 'rejected', 'canceled discovery follower stops waiting independently');
+
+    stallDiscovery = false;
+    notifyStalledDiscoveryStarted = undefined;
+    releaseStalledDiscovery = undefined;
+  } finally {
+    releaseStalledDiscovery?.();
+    Date.now = originalDateNow;
+    configValues.clientVersion = '0.0.0';
     configValues.disabledModels = [];
     configValues.modelAliases = {};
     await closeServer(server);

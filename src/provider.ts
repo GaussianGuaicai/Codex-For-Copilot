@@ -61,12 +61,27 @@ interface ReasoningEffortResolution {
   hasExplicitConflict: boolean;
 }
 
+interface ResolvedRequestModel extends ParsedModelIdentifier {
+  effectiveInputBudget?: number;
+}
+
+interface ProviderModelCatalog {
+  models: ResolvedProviderModel[];
+  authoritative: boolean;
+}
+
+type ModelAliasResolution =
+  | { kind: 'none' }
+  | { kind: 'target'; targetModel: string }
+  | { kind: 'cycle' };
+
 type VSCodeWithThinkingPart = typeof vscode & {
   LanguageModelThinkingPart?: new (value: string | string[], id?: string, metadata?: { readonly [key: string]: any }) => unknown;
 };
 
 const USAGE_DATA_PART_MIME = 'usage';
 const MODEL_DISCOVERY_FALLBACK_TTL_MS = 60_000;
+const TEMPORARILY_UNAVAILABLE_MODEL_TTL_MS = 10 * 60_000;
 const REPORTED_TOOL_CALL_TTL_MS = 10 * 60_000;
 const MAX_PENDING_REPORTED_TOOL_CALLS = 200;
 const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
@@ -145,7 +160,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private readonly identityManager: CodexIdentityManager;
   private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
   private readonly toolOutputContinuationCapabilities = new Map<string, ToolOutputContinuationCapability>();
-  private readonly modelCache = new CodexModelCache<ResolvedProviderModel[]>({
+  private readonly modelCache = new CodexModelCache<ProviderModelCatalog>({
     freshTtlMs: MODEL_CACHE_FRESH_TTL_MS,
     staleTtlMs: MODEL_CACHE_STALE_TTL_MS
   });
@@ -213,7 +228,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       return [];
     }
 
-    const models = await this.getAvailableModels(config, credentials, token);
+    const { models } = await this.getAvailableModelCatalog(config, credentials, token);
     this.scheduleWebSocketPreconnection(config, credentials, getCredentialIdentity(credentials));
     this.outputChannel.info('provideLanguageModelChatInformation complete', {
       modelCount: models.length,
@@ -246,8 +261,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const authIdentity = getCredentialIdentity(credentials);
     this.handleConnectionConfiguration(config, authIdentity);
     const compatibilityProfile = getCodexCompatibilityProfile(config.baseURL, credentials);
-    const directModel = this.resolveDirectRequestModel(model.id, config, authIdentity);
-    let selectedModel: ParsedModelIdentifier;
+    const modelCacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
+    const cachedCatalog = this.modelCache.peek(modelCacheKey);
+    const directModel = cachedCatalog?.authoritative
+      ? undefined
+      : this.resolveDirectRequestModel(model, config, authIdentity);
+    let selectedModel: ResolvedRequestModel;
     if (directModel) {
       selectedModel = directModel;
       latency.recordContext({ modelDiscoveryCacheState: 'direct' });
@@ -256,10 +275,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         requestModel: selectedModel.requestModel
       });
     } else {
-      const availableModels = await this.getAvailableModels(config, credentials, token, (state) => {
+      const catalog = await this.getAvailableModelCatalog(config, credentials, token, (state) => {
         latency.recordContext({ modelDiscoveryCacheState: state });
       });
-      selectedModel = this.resolveRequestModel(model.id, config, availableModels);
+      selectedModel = this.resolveRequestModel(model.id, config, catalog.models, catalog.authoritative);
     }
     this.scheduleWebSocketPreconnection(config, credentials, authIdentity);
     latency.mark('modelResolved');
@@ -302,7 +321,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       baseURL: normalizeBaseURL(config.baseURL),
       authIdentity,
       toolSignatures: toolSchemas.toolSignatures,
-      effectiveInputBudget: model.maxInputTokens,
+      effectiveInputBudget: selectedModel.effectiveInputBudget,
       ...requestOptions
     });
     latency.recordContext({ requestBuildMs: Math.max(0, performance.now() - requestBuildStartedAt) });
@@ -1013,12 +1032,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       return estimated;
     }
 
-    const availableModels = await this.getAvailableModels(config, credentials, token);
-    const selectedModel = this.resolveRequestModel(model.id, config, availableModels);
-    const input = typeof text === 'string' ? text : convertMessagesToResponsesInput([text]);
     const startedAt = Date.now();
 
     try {
+      const catalog = await this.getAvailableModelCatalog(config, credentials, token);
+      const selectedModel = this.resolveRequestModel(model.id, config, catalog.models, catalog.authoritative);
+      const input = typeof text === 'string' ? text : convertMessagesToResponsesInput([text]);
       const count = await countInputTokens({
         baseURL: config.baseURL,
         apiKey: credentials.apiKey,
@@ -1035,11 +1054,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         durationMs: Date.now() - startedAt
       });
       return count;
-    } catch {
+    } catch (error) {
+      if (token.isCancellationRequested || isAbortError(error)) {
+        throw error;
+      }
       const estimated = estimateTokenCount(text);
+      const requestModel = parseModelIdentifier(model.id || config.model).requestModel;
       this.outputChannel.warn('provideTokenCount fallback to local estimate', {
         modelId: model.id,
-        requestModel: selectedModel.requestModel,
+        requestModel,
         count: estimated,
         durationMs: Date.now() - startedAt
       });
@@ -1047,22 +1070,28 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
   }
 
-  private async getAvailableModels(
+  private async getAvailableModelCatalog(
     config: ReturnType<typeof getProviderConfig>,
     credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>,
     token: vscode.CancellationToken,
     onCacheState?: (state: CodexModelCacheState | 'fallback') => void
-  ): Promise<ResolvedProviderModel[]> {
+  ): Promise<ProviderModelCatalog> {
     const authIdentity = getCredentialIdentity(credentials);
     const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
     try {
-      const lookup = await this.modelCache.get(
-        cacheKey,
-        () => this.discoverAvailableModels(config, credentials, token, authIdentity)
+      if (token.isCancellationRequested) {
+        throw createAbortError();
+      }
+      const lookup = await waitForPromiseWithCancellation(
+        this.modelCache.get(
+          cacheKey,
+          () => this.discoverAvailableModels(config, credentials, NON_CANCELLABLE_TOKEN, authIdentity)
+        ),
+        token
       );
       this.outputChannel.debug('getAvailableModels cache result', {
         modelDiscoveryCacheState: lookup.state,
-        modelCount: lookup.value.length,
+        modelCount: lookup.value.models.length,
         refreshStarted: lookup.refreshStarted
       });
       onCacheState?.(lookup.state);
@@ -1075,9 +1104,27 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         );
       }
       return lookup.value;
-    } catch {
+    } catch (error) {
+      if (token.isCancellationRequested || isAbortError(error)) {
+        throw error;
+      }
+
+      const cachedCatalog = this.modelCache.peek(cacheKey);
+      if (cachedCatalog?.authoritative) {
+        this.modelCache.set(cacheKey, cachedCatalog, {
+          freshTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS,
+          staleTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS
+        });
+        this.outputChannel.warn('getAvailableModels discovery failed, retaining authoritative catalog', {
+          modelCount: cachedCatalog.models.length
+        });
+        onCacheState?.('fallback');
+        return cachedCatalog;
+      }
+
       const fallbackModels = this.applyModelDiscoveryPolicy([buildFallbackModel(config, credentials.kind)], config, authIdentity);
-      this.modelCache.set(cacheKey, fallbackModels, {
+      const fallbackCatalog = { models: fallbackModels, authoritative: false };
+      this.modelCache.set(cacheKey, fallbackCatalog, {
         freshTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS,
         staleTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS
       });
@@ -1085,7 +1132,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         fallbackModel: config.model
       });
       onCacheState?.('fallback');
-      return fallbackModels;
+      return fallbackCatalog;
     }
   }
 
@@ -1094,7 +1141,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     credentials: NonNullable<Awaited<ReturnType<typeof getApiCredentials>>>,
     token: vscode.CancellationToken,
     authIdentity: string
-  ): Promise<ResolvedProviderModel[]> {
+  ): Promise<ProviderModelCatalog> {
     const upstreamModels = await fetchAvailableModels(config, credentials, token);
     const models = this.applyModelDiscoveryPolicy(buildProviderModels(config, upstreamModels, credentials.kind), config, authIdentity);
     this.outputChannel.info('getAvailableModels discovery success', {
@@ -1102,7 +1149,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       returnedCount: models.length,
       requestModels: models.map((model) => model.requestModel)
     });
-    return models;
+    return { models, authoritative: true };
   }
 
   private markModelUnavailable(
@@ -1113,7 +1160,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   ): void {
     this.runtimeAvailability.markTemporarilyUnavailable(model, config, authIdentity);
     const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
-    this.modelCache.invalidate(cacheKey);
+    const cachedCatalog = this.modelCache.peek(cacheKey);
+    if (cachedCatalog?.authoritative) {
+      this.modelCache.invalidate(cacheKey);
+      this.modelCache.set(cacheKey, {
+        models: cachedCatalog.models.filter((candidate) => candidate.requestModel !== model),
+        authoritative: true
+      }, {
+        freshTtlMs: 0,
+        staleTtlMs: TEMPORARILY_UNAVAILABLE_MODEL_TTL_MS
+      });
+    } else {
+      this.modelCache.invalidate(cacheKey);
+    }
     this.modelInfoChangedEmitter.fire();
     this.outputChannel.warn('model marked unavailable after responses rejection', {
       model,
@@ -1121,7 +1180,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       authIdentity,
       baseURL: normalizeBaseURL(config.baseURL)
     });
-    void this.getAvailableModels(config, credentials, NON_CANCELLABLE_TOKEN).then(
+    void this.getAvailableModelCatalog(config, credentials, NON_CANCELLABLE_TOKEN).then(
       () => this.modelInfoChangedEmitter.fire(),
       () => this.outputChannel.warn('model refresh failed after responses model rejection', { model })
     );
@@ -1223,8 +1282,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private resolveRequestModel(
     modelId: string | undefined,
     config: ProviderConfig,
-    availableModels: readonly ResolvedProviderModel[]
-  ): ParsedModelIdentifier {
+    availableModels: readonly ResolvedProviderModel[],
+    authoritative = false
+  ): ResolvedRequestModel {
+    if (availableModels.length === 0) {
+      throw new Error('No Codex models are available after applying the configured discovery policy.');
+    }
+
     const parsedModel = parseModelIdentifier(modelId || config.model);
     const exactAvailableModel = modelId
       ? availableModels.find((candidate) => candidate.info.id === modelId)
@@ -1233,9 +1297,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       requestModel: exactAvailableModel?.requestModel ?? parsedModel.requestModel,
       reasoningEffort: parsedModel.reasoningEffort
     };
-    const availableModelNames = new Set(availableModels.map((candidate) => candidate.requestModel));
-
-    const aliasedModel = this.resolveModelAlias(requestedModel.requestModel, config.modelAliases, availableModels);
+    const aliasResolution = resolveModelAliasTarget(requestedModel.requestModel, config.modelAliases);
+    if (aliasResolution.kind === 'cycle') {
+      throw new Error(`Model alias cycle detected for "${requestedModel.requestModel}".`);
+    }
+    const aliasedModel = aliasResolution.kind === 'target'
+      ? availableModels.find((candidate) => candidate.requestModel === aliasResolution.targetModel)
+      : undefined;
     if (aliasedModel) {
       this.outputChannel.warn('request model remapped from configured model alias', {
         requestedModelId: modelId ?? null,
@@ -1244,32 +1312,43 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       return {
         requestModel: aliasedModel.requestModel,
-        reasoningEffort: requestedModel.reasoningEffort
+        reasoningEffort: requestedModel.reasoningEffort,
+        effectiveInputBudget: aliasedModel.effectiveInputBudget
       };
     }
 
-    if (availableModelNames.has(requestedModel.requestModel)) {
-      return requestedModel;
+    const requestedAvailableModel = exactAvailableModel
+      ?? availableModels.find((candidate) => candidate.requestModel === requestedModel.requestModel);
+    if (requestedAvailableModel) {
+      return {
+        ...requestedModel,
+        effectiveInputBudget: requestedAvailableModel.effectiveInputBudget
+      };
+    }
+
+    if (authoritative) {
+      throw new Error(`Selected Codex model "${requestedModel.requestModel}" is not available in the authoritative model catalog.`);
     }
 
     const prefixMatch = availableModels
-      .map((candidate) => candidate.requestModel)
-      .filter((candidate) => requestedModel.requestModel.startsWith(`${candidate}-`))
-      .sort((left, right) => right.length - left.length)[0];
+      .filter((candidate) => requestedModel.requestModel.startsWith(`${candidate.requestModel}-`))
+      .sort((left, right) => right.requestModel.length - left.requestModel.length)[0];
 
     if (prefixMatch) {
       this.outputChannel.warn('request model remapped from stale model identifier', {
         requestedModelId: modelId ?? null,
         requestedModel: requestedModel.requestModel,
-        resolvedModel: prefixMatch
+        resolvedModel: prefixMatch.requestModel
       });
       return {
-        requestModel: prefixMatch,
-        reasoningEffort: requestedModel.reasoningEffort
+        requestModel: prefixMatch.requestModel,
+        reasoningEffort: requestedModel.reasoningEffort,
+        effectiveInputBudget: prefixMatch.effectiveInputBudget
       };
     }
 
-    if (availableModelNames.has(config.model)) {
+    const configuredModel = availableModels.find((candidate) => candidate.requestModel === config.model);
+    if (configuredModel) {
       this.outputChannel.warn('request model fell back to configured model', {
         requestedModelId: modelId ?? null,
         requestedModel: requestedModel.requestModel,
@@ -1277,33 +1356,39 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       return {
         requestModel: config.model,
-        reasoningEffort: requestedModel.reasoningEffort
+        reasoningEffort: requestedModel.reasoningEffort,
+        effectiveInputBudget: configuredModel.effectiveInputBudget
       };
     }
 
-    const fallbackModel = availableModels[0]?.requestModel ?? config.model;
+    const fallbackModel = availableModels[0];
     this.outputChannel.warn('request model fell back to first available model', {
       requestedModelId: modelId ?? null,
       requestedModel: requestedModel.requestModel,
-      resolvedModel: fallbackModel
+      resolvedModel: fallbackModel.requestModel
     });
     return {
-      requestModel: fallbackModel,
-      reasoningEffort: requestedModel.reasoningEffort
+      requestModel: fallbackModel.requestModel,
+      reasoningEffort: requestedModel.reasoningEffort,
+      effectiveInputBudget: fallbackModel.effectiveInputBudget
     };
   }
 
   private resolveDirectRequestModel(
-    modelId: string | undefined,
+    model: vscode.LanguageModelChatInformation,
     config: ProviderConfig,
     authIdentity: string
-  ): ParsedModelIdentifier | undefined {
-    if (!isProviderModelIdentifier(modelId)) {
+  ): ResolvedRequestModel | undefined {
+    if (!isProviderModelIdentifier(model.id)) {
       return undefined;
     }
 
-    const requestedModel = parseModelIdentifier(modelId);
-    const alias = config.modelAliases[requestedModel.requestModel];
+    const requestedModel = parseModelIdentifier(model.id);
+    const aliasResolution = resolveModelAliasTarget(requestedModel.requestModel, config.modelAliases);
+    if (aliasResolution.kind === 'cycle') {
+      throw new Error(`Model alias cycle detected for "${requestedModel.requestModel}".`);
+    }
+    const alias = aliasResolution.kind === 'target' ? aliasResolution.targetModel : undefined;
     const resolvedModel = alias
       ? { ...requestedModel, requestModel: alias }
       : requestedModel;
@@ -1317,12 +1402,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     if (alias) {
       this.outputChannel.warn('request model remapped from configured model alias', {
-        requestedModelId: modelId,
+        requestedModelId: model.id,
         requestedModel: requestedModel.requestModel,
         resolvedModel: alias
       });
     }
-    return resolvedModel;
+    const effectiveInputBudget = alias ? undefined : model.maxInputTokens;
+    return { ...resolvedModel, effectiveInputBudget };
   }
 
   private applyModelDiscoveryPolicy(models: ResolvedProviderModel[], config: ProviderConfig, authIdentity: string): ResolvedProviderModel[] {
@@ -1332,18 +1418,20 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     ]);
     const availableModelNames = new Set(models.map((model) => model.requestModel));
     const aliasedSources = new Set(
-      Object.entries(config.modelAliases)
-        .filter(([, target]) => availableModelNames.has(target))
-        .map(([source]) => source)
+      Object.keys(config.modelAliases)
+        .filter((source) => {
+          const resolution = resolveModelAliasTarget(source, config.modelAliases);
+          return resolution.kind === 'cycle'
+            || (resolution.kind === 'target' && availableModelNames.has(resolution.targetModel));
+        })
     );
     const filteredModels = models.filter((model) => !disabledModels.has(model.requestModel) && !aliasedSources.has(model.requestModel));
 
-    if (filteredModels.length === 0) {
-      this.outputChannel.warn('model discovery policy kept original models because every discovered model was filtered', {
+    if (models.length > 0 && filteredModels.length === 0) {
+      this.outputChannel.warn('model discovery policy filtered every discovered model', {
         disabledModels: [...disabledModels],
         modelAliases: config.modelAliases
       });
-      return models;
     }
 
     if (filteredModels.length !== models.length) {
@@ -1357,18 +1445,27 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     return filteredModels;
   }
+}
 
-  private resolveModelAlias(
-    model: string,
-    modelAliases: Record<string, string>,
-    availableModels: readonly ResolvedProviderModel[]
-  ): ResolvedProviderModel | undefined {
-    const targetModel = modelAliases[model];
-    if (!targetModel) {
-      return undefined;
+function resolveModelAliasTarget(model: string, modelAliases: Record<string, string>): ModelAliasResolution {
+  const firstTarget = modelAliases[model];
+  if (!firstTarget) {
+    return { kind: 'none' };
+  }
+
+  const visitedModels = new Set([model]);
+  let targetModel = firstTarget;
+  while (true) {
+    if (visitedModels.has(targetModel)) {
+      return { kind: 'cycle' };
     }
+    visitedModels.add(targetModel);
 
-    return availableModels.find((candidate) => candidate.requestModel === targetModel);
+    const nextTarget = modelAliases[targetModel];
+    if (!nextTarget) {
+      return { kind: 'target', targetModel };
+    }
+    targetModel = nextTarget;
   }
 }
 
@@ -1377,7 +1474,10 @@ class RuntimeModelAvailability {
 
   markTemporarilyUnavailable(model: string, config: ProviderConfig, authIdentity: string): void {
     this.evictExpiredEntries();
-    this.temporarilyUnavailableModels.set(this.getScopeKey(model, config, authIdentity), Date.now() + 10 * 60 * 1000);
+    this.temporarilyUnavailableModels.set(
+      this.getScopeKey(model, config, authIdentity),
+      Date.now() + TEMPORARILY_UNAVAILABLE_MODEL_TTL_MS
+    );
   }
 
   getTemporarilyUnavailableModels(config: ProviderConfig, authIdentity: string): string[] {
@@ -1567,6 +1667,47 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
 function supportsOfficialTokenCounting(baseURL: string): boolean {
   const normalizedBaseURL = normalizeBaseURL(baseURL).toLowerCase();
   return !normalizedBaseURL.includes('chatgpt.com/backend-api/codex');
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function waitForPromiseWithCancellation<T>(promise: Promise<T>, token: vscode.CancellationToken): Promise<T> {
+  if (token.isCancellationRequested) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let cancellation: vscode.Disposable | undefined;
+    const settle = (action: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cancellation?.dispose();
+      action();
+    };
+
+    cancellation = token.onCancellationRequested(() => {
+      settle(() => reject(createAbortError()));
+    });
+    if (settled) {
+      cancellation.dispose();
+    }
+
+    void promise.then(
+      (value) => settle(() => resolve(value)),
+      (error: unknown) => settle(() => reject(error))
+    );
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error('Operation canceled.');
+  error.name = 'AbortError';
+  return error;
 }
 
 function createThinkingPart(text: string, id?: string): vscode.LanguageModelResponsePart | undefined {

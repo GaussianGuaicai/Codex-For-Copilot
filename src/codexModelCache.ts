@@ -79,6 +79,11 @@ export class CodexModelCache<T> {
     };
   }
 
+  peek(key: string): T | undefined {
+    const entry = this.entries.get(key);
+    return entry?.version === this.versionFor(key) ? entry.value : undefined;
+  }
+
   invalidate(key: string): void {
     this.entries.delete(key);
     this.invalidationVersions.set(key, (this.invalidationVersions.get(key) ?? 0) + 1);

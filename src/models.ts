@@ -144,15 +144,20 @@ export async function fetchAvailableModels(
     throw new Error(`Model discovery failed with ${response.status} ${response.statusText}`);
   }
 
-  const payload = (await response.json()) as { models?: unknown; data?: unknown };
-  const discovered = Array.isArray(payload.models)
+  const payload = (await response.json()) as { models?: unknown; data?: unknown } | null;
+  const discovered = Array.isArray(payload?.models)
     ? payload.models
-    : Array.isArray(payload.data)
+    : Array.isArray(payload?.data)
       ? payload.data
-      : [];
+      : undefined;
+  if (!discovered) {
+    throw new Error('Model discovery returned an invalid catalog.');
+  }
+  if (!discovered.every(isUpstreamModel)) {
+    throw new Error('Model discovery returned an invalid catalog.');
+  }
 
   return discovered
-    .filter(isUpstreamModel)
     .filter((model) => isModelVisible(model, credentials.kind, config.includeHiddenModels));
 }
 
@@ -172,7 +177,7 @@ export function buildProviderModels(
       seenModelIds.add(model.info.id);
       return true;
     });
-  return models.length > 0 ? models : [buildFallbackModel(config, credentialKind)];
+  return models;
 }
 
 export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCredentials['kind']): ResolvedProviderModel {
@@ -575,7 +580,12 @@ function normalizeSentence(value: string): string {
 }
 
 function isUpstreamModel(value: unknown): value is UpstreamModel {
-  return typeof value === 'object' && value !== null;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const slug = (value as UpstreamModel).slug;
+  return typeof slug === 'string' && slug.trim().length > 0;
 }
 
 function isModelVisible(
