@@ -819,11 +819,16 @@ async function runProviderFallbackSmokeTest() {
   let releasePreRejectionRefresh;
   let resolvePreRejectionRefreshStarted;
   let resolvePreRejectionRefreshCompleted;
+  let resolvePostRejectionCacheLookup;
+  let staleCacheLookupCount = 0;
   const preRejectionRefreshStarted = new Promise((resolve) => {
     resolvePreRejectionRefreshStarted = resolve;
   });
   const preRejectionRefreshCompleted = new Promise((resolve) => {
     resolvePreRejectionRefreshCompleted = resolve;
+  });
+  const postRejectionCacheLookup = new Promise((resolve) => {
+    resolvePostRejectionCacheLookup = resolve;
   });
 
   const server = createServer(async (request, response) => {
@@ -885,7 +890,14 @@ async function runProviderFallbackSmokeTest() {
   Date.now = () => now;
 
   const outputChannel = {
-    debug() {},
+    debug(message, payload) {
+      if (message === 'getAvailableModels cache result' && payload?.modelDiscoveryCacheState === 'stale') {
+        staleCacheLookupCount += 1;
+        if (staleCacheLookupCount === 2) {
+          resolvePostRejectionCacheLookup(payload);
+        }
+      }
+    },
     info(message) {
       if (message === 'getAvailableModels discovery success') {
         discoverySuccessCount += 1;
@@ -949,6 +961,8 @@ async function runProviderFallbackSmokeTest() {
       thrownMessage = error instanceof Error ? error.message : String(error);
     }
 
+    const rejectionRefreshLookup = await postRejectionCacheLookup;
+    assertEqual(rejectionRefreshLookup.refreshStarted, true, 'model rejection starts a versioned refresh instead of joining stale work');
     releasePreRejectionRefresh?.();
     await preRejectionRefreshCompleted;
     await new Promise((resolve) => setImmediate(resolve));
@@ -960,7 +974,6 @@ async function runProviderFallbackSmokeTest() {
       'codex::gpt-5.6-sol',
       'failed refresh retains the authoritative catalog without the rejected model'
     );
-    assertEqual(modelRequestCount >= 3, true, 'model rejection forces a versioned refresh');
     assertEqual(warnings.some((entry) => entry.message === 'response model unavailable'), true, 'unavailable warning emitted');
     assertEqual(thrownMessage.includes('hidden temporarily from the model picker'), true, 'clear unavailable-model error');
   } finally {
