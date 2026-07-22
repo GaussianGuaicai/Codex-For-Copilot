@@ -230,6 +230,49 @@ try {
   }, Date.now(), 'gpt-5.5');
   assertEqual(buildCodexAccountUsageDisplay(incompleteBudgetSnapshot, 'gpt-5.5').compactText, 'Codex: 5h 75%', 'invalid budget fallback');
 
+  const businessSpendControlSnapshot = parseCodexAccountUsage({
+    plan_type: 'business',
+    rate_limit: null,
+    additional_rate_limits: [
+      {
+        limit_name: 'GPT-5.3-Codex-Spark-Preview',
+        metered_feature: 'codex_bengalfox',
+        rate_limit: {
+          primary_window: {
+            used_percent: 0,
+            limit_window_seconds: 18000
+          },
+          secondary_window: {
+            used_percent: 0,
+            limit_window_seconds: 604800
+          }
+        }
+      }
+    ],
+    credits: {
+      has_credits: true,
+      unlimited: false,
+      balance: null
+    },
+    spend_control: {
+      reached: false,
+      individual_limit: {
+        source: 'group_based_spend_controls',
+        limit: 15000,
+        used: 9025.19190955162,
+        remaining: 5974.8080904483795,
+        used_percent: 60,
+        remaining_percent: 40,
+        reset_after_seconds: 838515,
+        reset_at: 1800000000
+      }
+    }
+  }, Date.now(), 'gpt-5.5');
+  const businessSpendControlDisplay = buildCodexAccountUsageDisplay(businessSpendControlSnapshot, 'gpt-5.5');
+  assertEqual(businessSpendControlDisplay.compactText, 'Codex: Credits 40% · 5974.8/15000', 'root spend-control budget priority');
+  assertIncludes(businessSpendControlDisplay.tooltip, 'Other rate limits:', 'root spend-control keeps model limits in details');
+  assertIncludes(businessSpendControlDisplay.tooltip, 'GPT-5.3-Codex-Spark-Preview', 'root spend-control identifies additional model limit');
+
   await assertRejects(
     fetchCodexAccountUsage({
       baseURL,

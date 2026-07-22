@@ -115,6 +115,9 @@ export function parseCodexAccountUsage(payload: unknown, fetchedAt: number, sele
   limits.push(...parseRateLimitSnapshots(mainLimit, fetchedAt, { limitId: 'codex' }));
   creditBudgets.push(...parseCreditBudgetSnapshots(mainLimit, fetchedAt, { limitId: 'codex' }));
 
+  const spendControl = root.spend_control ?? root.spendControl;
+  creditBudgets.push(...parseSpendControlCreditBudgetSnapshots(spendControl, fetchedAt));
+
   const byLimitId = root.rate_limits_by_limit_id ?? root.rateLimitsByLimitId;
   if (isObjectRecord(byLimitId)) {
     for (const [limitId, limit] of Object.entries(byLimitId)) {
@@ -279,6 +282,22 @@ function parseAdditionalCreditBudgetSnapshots(value: unknown, fetchedAt: number)
   const limitId = parseOptionalString(value.metered_feature ?? value.meteredFeature ?? value.limitId ?? value.limit_id ?? value.id);
   const limitName = parseOptionalString(value.limit_name ?? value.limitName ?? value.name ?? value.display_name);
   return parseCreditBudgetSnapshots(value.rate_limit ?? value.rateLimit ?? value, fetchedAt, { limitId, limitName });
+}
+
+function parseSpendControlCreditBudgetSnapshots(value: unknown, fetchedAt: number): CreditBudgetSnapshot[] {
+  if (!isObjectRecord(value)) {
+    return [];
+  }
+
+  const individualLimit = value.individual_limit ?? value.individualLimit;
+  const limitName = isObjectRecord(individualLimit)
+    ? parseOptionalString(individualLimit.source)
+    : undefined;
+  const creditBudget = parseCreditBudget(individualLimit, fetchedAt, {
+    limitId: 'workspace-spend-control',
+    limitName
+  });
+  return creditBudget ? [creditBudget] : [];
 }
 
 function parseRateLimit(
@@ -570,7 +589,9 @@ function compareUsageBucketPreference(left: UsageBucketSource, right: UsageBucke
 
 function scoreUsageBucket(limit: UsageBucketSource, selectedModel: string): number {
   let score = 0;
-  if (normalizeComparable(limit.limitId) === 'codex') {
+  if (normalizeComparable(limit.limitId) === 'workspace-spend-control') {
+    score += 8;
+  } else if (normalizeComparable(limit.limitId) === 'codex') {
     score += 4;
   }
 

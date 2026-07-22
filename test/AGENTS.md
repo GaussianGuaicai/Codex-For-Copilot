@@ -50,4 +50,4 @@
 - Preconnection tests must prove a single upgrade, no synthetic identity in the handshake, and identity only on the formal `response.create` request.
 - The `provider-websocket-preconnected` benchmark must wait for the idle handshake and assert a `preconnected` formal connection origin before recording the timed request.
 - Continuation state tests must prove snapshot mutation cannot leak back into the stored branch state.
-- Account-usage smoke tests must cover Credit-budget precedence, dynamic server-provided rate-window labels, legacy balance fallback, and malformed Credit-budget fallback without a real account request.
+- Account-usage smoke tests must cover root `spend_control.individual_limit` precedence over additional model windows, rate-limit-bucket Credit budgets, dynamic server-provided rate-window labels, legacy balance fallback, and malformed Credit-budget fallback without a real account request.
