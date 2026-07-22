@@ -187,6 +187,7 @@ try {
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
   await runProviderNestedAliasPolicySmokeTest();
+  await runProviderAuthoritativeCatalogSmokeTest();
   await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
   await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
   console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
@@ -1990,6 +1991,29 @@ function createCancellationToken() {
   };
 }
 
+function createMutableCancellationToken() {
+  let canceled = false;
+  const listeners = new Set();
+  return {
+    get isCancellationRequested() {
+      return canceled;
+    },
+    onCancellationRequested(listener) {
+      listeners.add(listener);
+      return { dispose: () => listeners.delete(listener) };
+    },
+    cancel() {
+      if (canceled) {
+        return;
+      }
+      canceled = true;
+      for (const listener of listeners) {
+        listener();
+      }
+    }
+  };
+}
+
 function writeSseResponse(response, text, responseId) {
   response.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -2166,17 +2190,13 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
     assertEqual(selectedModels.join(','), 'gpt-5.6-sol,gpt-5.6-sol', 'alias target remains selected for follow-up');
     assertEqual(
       responseRequests[1].previous_response_id,
-      undefined,
-      'stale aliased selection with unknown target budget starts a new response chain'
+      'resp_alias',
+      'authoritative catalog supplies the alias target budget for compatible reuse'
     );
     assertEqual(
       JSON.stringify(responseRequests[1].input),
-      JSON.stringify([
-        { role: 'user', content: 'Ping', type: 'message' },
-        { role: 'assistant', content: 'alias ok', type: 'message' },
-        { role: 'user', content: 'Follow up', type: 'message' }
-      ]),
-      'unknown alias target budget replays the full caller history'
+      JSON.stringify([{ role: 'user', content: 'Follow up', type: 'message' }]),
+      'authoritative alias target budget keeps the compatible follow-up incremental'
     );
   } finally {
     configValues.disabledModels = [];
@@ -2319,8 +2339,239 @@ async function runProviderNestedAliasPolicySmokeTest() {
       { report() {} },
       token
     );
-    assertEqual(responseRequests[1]?.model, 'alias-external', 'nested alias preserves an undiscovered terminal target');
+    assertEqual(
+      responseRequests[1]?.model,
+      'alias-a',
+      'authoritative catalog keeps the discovered source when the terminal alias target is unavailable'
+    );
   } finally {
+    configValues.disabledModels = [];
+    configValues.modelAliases = {};
+    await closeServer(server);
+  }
+}
+
+async function runProviderAuthoritativeCatalogSmokeTest() {
+  let catalog = [];
+  let failDiscovery = false;
+  let stallDiscovery = false;
+  let notifyStalledDiscoveryStarted;
+  let releaseStalledDiscovery;
+  let modelRequestCount = 0;
+  let responseRequestCount = 0;
+  let tokenCountRequestCount = 0;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      modelRequestCount += 1;
+      if (failDiscovery) {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'models unavailable' } }));
+        return;
+      }
+      if (stallDiscovery) {
+        notifyStalledDiscoveryStarted?.();
+        await new Promise((resolve) => {
+          releaseStalledDiscovery = resolve;
+        });
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: catalog }));
+      return;
+    }
+
+    for await (const _chunk of request) {
+      // Consume the request before returning the deterministic response.
+    }
+    if (request.url?.endsWith('/responses/input_tokens')) {
+      tokenCountRequestCount += 1;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ input_tokens: 999 }));
+      return;
+    }
+
+    responseRequestCount += 1;
+    writeSseResponse(response, 'unexpected stale response', 'resp_unexpected_stale');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  configValues.disabledModels = [];
+  configValues.modelAliases = {};
+  const originalDateNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  const staleModel = {
+    id: 'codex::gpt-5.4',
+    name: 'GPT-5.4 (Stale)',
+    family: 'gpt-5.4',
+    version: 'mock',
+    maxInputTokens: 258400
+  };
+
+  try {
+    const token = createCancellationToken();
+    const emptyModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(emptyModels.length, 0, 'successful empty catalog is authoritative');
+
+    let staleResponseMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        staleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Do not send')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      staleResponseMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      staleResponseMessage,
+      'No Codex models are available after applying the configured discovery policy.',
+      'authoritative empty catalog rejects a stale provider model id'
+    );
+    assertEqual(responseRequestCount, 0, 'authoritative empty catalog never reaches Responses');
+
+    const emptyCatalogTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(emptyCatalogTokenCount, 2, 'empty catalog token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'empty catalog token count skips the official endpoint');
+
+    catalog = [createMockModel('gpt-5.4', 'GPT-5.4')];
+    configValues.disabledModels = ['gpt-5.4'];
+    const allFilteredModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(allFilteredModels.length, 0, 'all-filtered catalog is authoritative');
+
+    const allFilteredTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(allFilteredTokenCount, 2, 'all-filtered token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'all-filtered token count skips the official endpoint');
+
+    catalog = [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')];
+    configValues.disabledModels = [];
+    configValues.clientVersion = 'non-empty-test';
+    const nonEmptyModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(nonEmptyModels.map((model) => model.id).join(','), 'codex::gpt-5.6-sol', 'non-empty authoritative catalog');
+
+    let missingModelMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        staleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject missing stale model')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      missingModelMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      missingModelMessage,
+      'Selected Codex model "gpt-5.4" is not available in the authoritative model catalog.',
+      'non-empty authoritative catalog rejects a missing stale model'
+    );
+    assertEqual(responseRequestCount, 0, 'missing stale model never reaches Responses');
+
+    const missingModelTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(missingModelTokenCount, 2, 'missing authoritative model token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'missing authoritative model token count skips the official endpoint');
+
+    const modelRequestsBeforeFailedRefresh = modelRequestCount;
+    now += 60 * 60 * 1000 + 1;
+    failDiscovery = true;
+    const expiredCatalogTokenCount = await provider.provideTokenCount(staleModel, '12345678', token);
+    assertEqual(expiredCatalogTokenCount, 2, 'failed refresh retains the expired authoritative catalog');
+    assertEqual(modelRequestCount, modelRequestsBeforeFailedRefresh + 1, 'expired authoritative catalog attempts one refresh');
+    assertEqual(tokenCountRequestCount, 0, 'failed authoritative refresh skips the official endpoint for a missing model');
+
+    let expiredCatalogResponseMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        staleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Still reject missing stale model')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      expiredCatalogResponseMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      expiredCatalogResponseMessage,
+      'Selected Codex model "gpt-5.4" is not available in the authoritative model catalog.',
+      'failed refresh does not replace authoritative catalog with fallback'
+    );
+    assertEqual(responseRequestCount, 0, 'failed authoritative refresh never enables stale Responses requests');
+
+    failDiscovery = false;
+    configValues.clientVersion = 'cancel-test';
+    const canceledToken = {
+      isCancellationRequested: true,
+      onCancellationRequested() {
+        return { dispose() {} };
+      }
+    };
+    let cancellationRejected = false;
+    try {
+      await provider.provideTokenCount(staleModel, '12345678', canceledToken);
+    } catch {
+      cancellationRejected = true;
+    }
+    assertEqual(cancellationRejected, true, 'canceled discovery rejects instead of returning an estimate');
+
+    const postCancellationModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      postCancellationModels.map((model) => model.id).join(','),
+      'codex::gpt-5.6-sol',
+      'canceled discovery does not cache a synthetic fallback catalog'
+    );
+
+    configValues.clientVersion = 'concurrent-cancel-test';
+    stallDiscovery = true;
+    const stalledDiscoveryStarted = new Promise((resolve) => {
+      notifyStalledDiscoveryStarted = resolve;
+    });
+    const leaderToken = createMutableCancellationToken();
+    const canceledLeader = provider.provideTokenCount(staleModel, '12345678', leaderToken);
+    await stalledDiscoveryStarted;
+    const uncanceledFollower = provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await Promise.resolve();
+    leaderToken.cancel();
+    releaseStalledDiscovery?.();
+
+    const concurrentResults = await Promise.allSettled([canceledLeader, uncanceledFollower]);
+    assertEqual(concurrentResults[0].status, 'rejected', 'canceled discovery leader rejects');
+    assertEqual(concurrentResults[1].status, 'rejected', 'uncanceled discovery follower observes the shared abort');
+
+    stallDiscovery = false;
+    notifyStalledDiscoveryStarted = undefined;
+    releaseStalledDiscovery = undefined;
+    const postConcurrentCancellationModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(
+      postConcurrentCancellationModels.map((model) => model.id).join(','),
+      'codex::gpt-5.6-sol',
+      'shared cancellation does not cache fallback for an uncanceled follower'
+    );
+  } finally {
+    releaseStalledDiscovery?.();
+    Date.now = originalDateNow;
+    configValues.clientVersion = '0.0.0';
     configValues.disabledModels = [];
     configValues.modelAliases = {};
     await closeServer(server);
