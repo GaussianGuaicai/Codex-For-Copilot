@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.3.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.2.1...v1.3.0) (2026-07-22)
+
+
+### Features
+
+* add selectable context window profiles ([#23](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/23)) ([06db8ad](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/06db8adb3c4852c5d130fd43cca7ec5a2d8980c9)), closes [#21](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/21)
+
 ## [1.2.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.2.0...v1.2.1) (2026-07-20)
 
 
