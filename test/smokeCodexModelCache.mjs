@@ -115,6 +115,28 @@ async function runStaleWhileRevalidateSmokeTest(CodexModelCache) {
   cache.invalidate('scope');
   assertEqual(cache.peek('scope'), undefined, 'invalidating a key removes its peek value');
 
+  const versionedCache = new CodexModelCache({
+    freshTtlMs: 100,
+    staleTtlMs: 1_000,
+    now: () => now
+  });
+  versionedCache.set('scope', ['gpt-original']);
+  now += 101;
+  let resolveSupersededRefresh;
+  const supersededRefreshValue = new Promise((resolve) => {
+    resolveSupersededRefresh = resolve;
+  });
+  const supersededRefresh = await versionedCache.get('scope', async () => supersededRefreshValue);
+  versionedCache.invalidate('scope');
+  versionedCache.set('scope', ['gpt-filtered']);
+  resolveSupersededRefresh(['gpt-original']);
+  await supersededRefresh.refresh;
+  assertEqual(
+    versionedCache.peek('scope').join(','),
+    'gpt-filtered',
+    'invalidated in-flight refresh cannot overwrite a replacement value'
+  );
+
   const boundedCache = new CodexModelCache({
     freshTtlMs: 100,
     staleTtlMs: 1_000,

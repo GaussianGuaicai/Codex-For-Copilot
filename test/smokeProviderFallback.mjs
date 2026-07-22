@@ -812,9 +812,35 @@ async function runProviderFallbackSmokeTest() {
   const selectedModels = [];
   const warnings = [];
   let thrownMessage = '';
+  let failModelRefresh = false;
+  let stallPreRejectionRefresh = false;
+  let modelRequestCount = 0;
+  let discoverySuccessCount = 0;
+  let releasePreRejectionRefresh;
+  let resolvePreRejectionRefreshStarted;
+  let resolvePreRejectionRefreshCompleted;
+  const preRejectionRefreshStarted = new Promise((resolve) => {
+    resolvePreRejectionRefreshStarted = resolve;
+  });
+  const preRejectionRefreshCompleted = new Promise((resolve) => {
+    resolvePreRejectionRefreshCompleted = resolve;
+  });
 
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      modelRequestCount += 1;
+      const isPreRejectionRefresh = stallPreRejectionRefresh && modelRequestCount === 2;
+      if (isPreRejectionRefresh) {
+        resolvePreRejectionRefreshStarted();
+        await new Promise((resolve) => {
+          releasePreRejectionRefresh = resolve;
+        });
+      }
+      if (failModelRefresh && !isPreRejectionRefresh) {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'models unavailable' } }));
+        return;
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         models: [
@@ -834,6 +860,7 @@ async function runProviderFallbackSmokeTest() {
     requestedModels.push(body.model);
 
     if (body.model === 'gpt-5.6-nova') {
+      failModelRefresh = true;
       response.writeHead(404, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         error: {
@@ -853,10 +880,20 @@ async function runProviderFallbackSmokeTest() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  const originalDateNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
 
   const outputChannel = {
     debug() {},
-    info() {},
+    info(message) {
+      if (message === 'getAvailableModels discovery success') {
+        discoverySuccessCount += 1;
+        if (discoverySuccessCount === 2) {
+          resolvePreRejectionRefreshCompleted();
+        }
+      }
+    },
     warn(message, payload) {
       warnings.push({ message, payload });
     },
@@ -896,25 +933,39 @@ async function runProviderFallbackSmokeTest() {
       throw new Error('Expected nova model to be discoverable before temporary disable.');
     }
 
+    now += 10 * 60 * 1000 + 1;
+    stallPreRejectionRefresh = true;
+    const responseAttempt = provider.provideLanguageModelChatResponse(
+      novaModel,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
+      {},
+      { report() {} },
+      token
+    );
+    await preRejectionRefreshStarted;
     try {
-      await provider.provideLanguageModelChatResponse(
-        novaModel,
-        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Ping')] }],
-        {},
-        { report() {} },
-        token
-      );
+      await responseAttempt;
     } catch (error) {
       thrownMessage = error instanceof Error ? error.message : String(error);
     }
 
+    releasePreRejectionRefresh?.();
+    await preRejectionRefreshCompleted;
+    await new Promise((resolve) => setImmediate(resolve));
     const refreshedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(requestedModels.join(','), 'gpt-5.6-nova', 'request order without retry');
     assertEqual(selectedModels.join(','), 'gpt-5.6-nova', 'selected model does not silently change');
-    assertEqual(refreshedModels.some((item) => item.id === 'codex::gpt-5.6-nova'), false, 'rejected model hidden after temporary disable');
+    assertEqual(
+      refreshedModels.map((item) => item.id).join(','),
+      'codex::gpt-5.6-sol',
+      'failed refresh retains the authoritative catalog without the rejected model'
+    );
+    assertEqual(modelRequestCount >= 3, true, 'model rejection forces a versioned refresh');
     assertEqual(warnings.some((entry) => entry.message === 'response model unavailable'), true, 'unavailable warning emitted');
     assertEqual(thrownMessage.includes('hidden temporarily from the model picker'), true, 'clear unavailable-model error');
   } finally {
+    releasePreRejectionRefresh?.();
+    Date.now = originalDateNow;
     await closeServer(server);
   }
 }
@@ -2492,6 +2543,34 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
     assertEqual(missingModelTokenCount, 2, 'missing authoritative model token count uses the local estimate');
     assertEqual(tokenCountRequestCount, 0, 'missing authoritative model token count skips the official endpoint');
 
+    const prefixStaleModel = {
+      ...staleModel,
+      id: 'codex::gpt-5.6-sol-preview',
+      family: 'gpt-5.6-sol-preview'
+    };
+    let prefixModelMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        prefixStaleModel,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject prefix-like stale model')] }],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      prefixModelMessage = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(
+      prefixModelMessage,
+      'Selected Codex model "gpt-5.6-sol-preview" is not available in the authoritative model catalog.',
+      'authoritative catalog rejects implicit prefix remapping'
+    );
+    assertEqual(responseRequestCount, 0, 'prefix-like stale model never reaches Responses');
+
+    const prefixModelTokenCount = await provider.provideTokenCount(prefixStaleModel, '12345678', token);
+    assertEqual(prefixModelTokenCount, 2, 'prefix-like stale model token count uses the local estimate');
+    assertEqual(tokenCountRequestCount, 0, 'prefix-like stale model token count skips the official endpoint');
+
     const modelRequestsBeforeFailedRefresh = modelRequestCount;
     now += 60 * 60 * 1000 + 1;
     failDiscovery = true;
@@ -2557,7 +2636,14 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
 
     const concurrentResults = await Promise.allSettled([canceledLeader, uncanceledFollower]);
     assertEqual(concurrentResults[0].status, 'rejected', 'canceled discovery leader rejects');
-    assertEqual(concurrentResults[1].status, 'rejected', 'uncanceled discovery follower observes the shared abort');
+    assertEqual(concurrentResults[1].status, 'fulfilled', 'uncanceled discovery follower survives leader cancellation');
+    assertEqual(
+      concurrentResults[1].status === 'fulfilled'
+        ? concurrentResults[1].value.map((model) => model.id).join(',')
+        : '',
+      'codex::gpt-5.6-sol',
+      'uncanceled discovery follower receives the shared catalog'
+    );
 
     stallDiscovery = false;
     notifyStalledDiscoveryStarted = undefined;
@@ -2566,8 +2652,29 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
     assertEqual(
       postConcurrentCancellationModels.map((model) => model.id).join(','),
       'codex::gpt-5.6-sol',
-      'shared cancellation does not cache fallback for an uncanceled follower'
+      'independent cancellation leaves the shared catalog cached'
     );
+
+    configValues.clientVersion = 'concurrent-follower-cancel-test';
+    stallDiscovery = true;
+    const followerCancellationDiscoveryStarted = new Promise((resolve) => {
+      notifyStalledDiscoveryStarted = resolve;
+    });
+    const uncanceledLeader = provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await followerCancellationDiscoveryStarted;
+    const followerToken = createMutableCancellationToken();
+    const canceledFollower = provider.provideTokenCount(staleModel, '12345678', followerToken);
+    await Promise.resolve();
+    followerToken.cancel();
+    releaseStalledDiscovery?.();
+
+    const followerCancellationResults = await Promise.allSettled([uncanceledLeader, canceledFollower]);
+    assertEqual(followerCancellationResults[0].status, 'fulfilled', 'uncanceled discovery leader survives follower cancellation');
+    assertEqual(followerCancellationResults[1].status, 'rejected', 'canceled discovery follower stops waiting independently');
+
+    stallDiscovery = false;
+    notifyStalledDiscoveryStarted = undefined;
+    releaseStalledDiscovery = undefined;
   } finally {
     releaseStalledDiscovery?.();
     Date.now = originalDateNow;

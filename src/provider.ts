@@ -81,6 +81,7 @@ type VSCodeWithThinkingPart = typeof vscode & {
 
 const USAGE_DATA_PART_MIME = 'usage';
 const MODEL_DISCOVERY_FALLBACK_TTL_MS = 60_000;
+const TEMPORARILY_UNAVAILABLE_MODEL_TTL_MS = 10 * 60_000;
 const REPORTED_TOOL_CALL_TTL_MS = 10 * 60_000;
 const MAX_PENDING_REPORTED_TOOL_CALLS = 200;
 const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
@@ -1078,9 +1079,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const authIdentity = getCredentialIdentity(credentials);
     const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
     try {
-      const lookup = await this.modelCache.get(
-        cacheKey,
-        () => this.discoverAvailableModels(config, credentials, token, authIdentity)
+      if (token.isCancellationRequested) {
+        throw createAbortError();
+      }
+      const lookup = await waitForPromiseWithCancellation(
+        this.modelCache.get(
+          cacheKey,
+          () => this.discoverAvailableModels(config, credentials, NON_CANCELLABLE_TOKEN, authIdentity)
+        ),
+        token
       );
       this.outputChannel.debug('getAvailableModels cache result', {
         modelDiscoveryCacheState: lookup.state,
@@ -1153,7 +1160,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   ): void {
     this.runtimeAvailability.markTemporarilyUnavailable(model, config, authIdentity);
     const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
-    this.modelCache.invalidate(cacheKey);
+    const cachedCatalog = this.modelCache.peek(cacheKey);
+    if (cachedCatalog?.authoritative) {
+      this.modelCache.invalidate(cacheKey);
+      this.modelCache.set(cacheKey, {
+        models: cachedCatalog.models.filter((candidate) => candidate.requestModel !== model),
+        authoritative: true
+      }, {
+        freshTtlMs: 0,
+        staleTtlMs: TEMPORARILY_UNAVAILABLE_MODEL_TTL_MS
+      });
+    } else {
+      this.modelCache.invalidate(cacheKey);
+    }
     this.modelInfoChangedEmitter.fire();
     this.outputChannel.warn('model marked unavailable after responses rejection', {
       model,
@@ -1307,6 +1326,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       };
     }
 
+    if (authoritative) {
+      throw new Error(`Selected Codex model "${requestedModel.requestModel}" is not available in the authoritative model catalog.`);
+    }
+
     const prefixMatch = availableModels
       .filter((candidate) => requestedModel.requestModel.startsWith(`${candidate.requestModel}-`))
       .sort((left, right) => right.requestModel.length - left.requestModel.length)[0];
@@ -1322,10 +1345,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         reasoningEffort: requestedModel.reasoningEffort,
         effectiveInputBudget: prefixMatch.effectiveInputBudget
       };
-    }
-
-    if (authoritative) {
-      throw new Error(`Selected Codex model "${requestedModel.requestModel}" is not available in the authoritative model catalog.`);
     }
 
     const configuredModel = availableModels.find((candidate) => candidate.requestModel === config.model);
@@ -1455,7 +1474,10 @@ class RuntimeModelAvailability {
 
   markTemporarilyUnavailable(model: string, config: ProviderConfig, authIdentity: string): void {
     this.evictExpiredEntries();
-    this.temporarilyUnavailableModels.set(this.getScopeKey(model, config, authIdentity), Date.now() + 10 * 60 * 1000);
+    this.temporarilyUnavailableModels.set(
+      this.getScopeKey(model, config, authIdentity),
+      Date.now() + TEMPORARILY_UNAVAILABLE_MODEL_TTL_MS
+    );
   }
 
   getTemporarilyUnavailableModels(config: ProviderConfig, authIdentity: string): string[] {
@@ -1649,6 +1671,43 @@ function supportsOfficialTokenCounting(baseURL: string): boolean {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function waitForPromiseWithCancellation<T>(promise: Promise<T>, token: vscode.CancellationToken): Promise<T> {
+  if (token.isCancellationRequested) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let cancellation: vscode.Disposable | undefined;
+    const settle = (action: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cancellation?.dispose();
+      action();
+    };
+
+    cancellation = token.onCancellationRequested(() => {
+      settle(() => reject(createAbortError()));
+    });
+    if (settled) {
+      cancellation.dispose();
+    }
+
+    void promise.then(
+      (value) => settle(() => resolve(value)),
+      (error: unknown) => settle(() => reject(error))
+    );
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error('Operation canceled.');
+  error.name = 'AbortError';
+  return error;
 }
 
 function createThinkingPart(text: string, id?: string): vscode.LanguageModelResponsePart | undefined {
