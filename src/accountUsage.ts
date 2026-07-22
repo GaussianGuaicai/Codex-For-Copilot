@@ -356,7 +356,9 @@ function parseCreditBudget(
       return undefined;
     }
 
-    remainingPercent = reportedRemainingPercent ?? calculatedRemainingPercent;
+    remainingPercent = calculatedRemainingPercent === 0
+      ? 0
+      : reportedRemainingPercent ?? calculatedRemainingPercent;
   } else if (reportedRemainingPercent !== undefined) {
     remainingPercent = reportedRemainingPercent;
     used = total * (1 - remainingPercent / 100);

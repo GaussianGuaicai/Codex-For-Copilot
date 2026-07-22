@@ -282,7 +282,7 @@ try {
         limit: 100,
         used: 101,
         remaining: 0,
-        remaining_percent: 0
+        remaining_percent: 1
       }
     }
   }, Date.now(), 'gpt-5.5');
