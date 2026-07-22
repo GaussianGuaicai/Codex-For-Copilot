@@ -120,9 +120,10 @@ try {
   assertEqual(capturedRequest.authorization, 'Bearer test-access-token', 'authorization header');
   assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot Codex for Copilot', 'user agent');
   assertEqual(capturedRequest.accountId, 'acct-test', 'ChatGPT account id header');
-  assertEqual(display.compactText, 'Codex: 5h 64% · weekly 82% · 25 credits', 'compact display priority');
+  assertEqual(display.compactText, 'Codex: 5h 64% · Weekly 82%', 'rate windows compact display');
   assertIncludes(display.tooltip, 'Plan: Pro', 'plan tooltip');
-  assertIncludes(display.tooltip, 'Other limits:', 'other limits tooltip');
+  assertIncludes(display.tooltip, 'Credits balance: 25 credits', 'credits balance tooltip');
+  assertIncludes(display.tooltip, 'Other rate limits:', 'other rate limits tooltip');
 
   const authManager = {
     accessTokenCalls: 0,
@@ -166,6 +167,68 @@ try {
     }
   }, Date.now(), 'gpt-5.5');
   assertEqual(buildCodexAccountUsageDisplay(onePercentSnapshot, 'gpt-5.5').compactText, 'Codex: 5h 99%', 'integer one percent parsing');
+
+  const workspaceCreditsSnapshot = parseCodexAccountUsage({
+    plan_type: 'self_serve_business_usage_based',
+    rate_limits_by_limit_id: {
+      codex: {
+        primary_window: {
+          used_percent: 36,
+          limit_window_seconds: 18000
+        },
+        secondary_window: {
+          used_percent: 18,
+          limit_window_seconds: 604800
+        },
+        individual_limit: {
+          limit: '900',
+          used: '580',
+          remaining_percent: 35.5555555556,
+          resets_at: 1800000000
+        }
+      },
+      other: {
+        individualLimit: {
+          limit: '1000',
+          used: '100',
+          remainingPercent: 90,
+          resetsAt: 1800000000000
+        }
+      }
+    }
+  }, Date.now(), 'gpt-5.5');
+  const workspaceCreditsDisplay = buildCodexAccountUsageDisplay(workspaceCreditsSnapshot, 'gpt-5.5');
+  assertEqual(workspaceCreditsDisplay.compactText, 'Codex: Credits 36% · 320/900', 'credit budget compact display');
+  assertIncludes(workspaceCreditsDisplay.tooltip, 'Credit budget: 320 / 900 credits remaining', 'credit budget tooltip');
+  assertIncludes(workspaceCreditsDisplay.tooltip, 'resets ', 'credit budget reset tooltip');
+  assertIncludes(workspaceCreditsDisplay.tooltip, 'Other credit budgets:', 'other credit budgets tooltip');
+  assertIncludes(workspaceCreditsDisplay.tooltip, 'Other rate limits:', 'credit budget keeps rate limits in details');
+  assertIncludes(workspaceCreditsDisplay.tooltip, '- 5h:', 'credit budget keeps five-hour limit in details');
+  assertIncludes(workspaceCreditsDisplay.tooltip, '- Weekly:', 'credit budget keeps weekly limit in details');
+
+  const dailyOnlySnapshot = parseCodexAccountUsage({
+    rate_limit: {
+      primary_window: {
+        used_percent: 50,
+        limit_window_seconds: 86400
+      }
+    }
+  }, Date.now(), 'gpt-5.5');
+  assertEqual(buildCodexAccountUsageDisplay(dailyOnlySnapshot, 'gpt-5.5').compactText, 'Codex: Daily 50%', 'daily window compact display');
+
+  const incompleteBudgetSnapshot = parseCodexAccountUsage({
+    rate_limit: {
+      primary_window: {
+        used_percent: 25,
+        limit_window_seconds: 18000
+      },
+      individual_limit: {
+        limit: '0',
+        used: '0'
+      }
+    }
+  }, Date.now(), 'gpt-5.5');
+  assertEqual(buildCodexAccountUsageDisplay(incompleteBudgetSnapshot, 'gpt-5.5').compactText, 'Codex: 5h 75%', 'invalid budget fallback');
 
   await assertRejects(
     fetchCodexAccountUsage({

@@ -13,7 +13,7 @@ It makes Codex appear in the VS Code model picker, discovers upstream models whe
 - Streams text, reasoning, and tool-call output over WebSocket or HTTP with matching behavior.
 - Reuses WebSocket sessions and compatible Responses branches for efficient follow-up turns.
 - Reads Codex credentials from the built-in Codex auth manager, with a legacy fallback to `~/.codex/auth.json`, or VS Code SecretStorage.
-- Shows last-response usage in the status bar and supports account-limit refresh.
+- Shows response-driven account usage in the status bar and supports account-limit refresh. When the backend supplies a complete workspace Credit budget, the status bar shows its remaining percentage and remaining/total Credits; otherwise it shows the returned rate-limit windows or a standalone Credit balance.
 
 ## Requirements
 
