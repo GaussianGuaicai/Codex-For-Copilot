@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.3.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.0...v1.3.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* enforce model discovery policy ([#31](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/31)) ([a4e4cbe](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/a4e4cbeb35774bccbc836bbefe66ae8a6c27b086))
+* keep exhausted credit budgets visible ([#35](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/35)) ([556af22](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/556af22a52b273a3dbf8f9a8d107130038762e5b))
+
 ## [1.3.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.2.1...v1.3.0) (2026-07-22)
 
 
