@@ -8,11 +8,22 @@ const STALE_AFTER_MS = 15 * 60 * 1000;
 
 export type RateLimitWindowKind = '5h' | 'weekly' | 'daily' | 'monthly' | 'annual' | 'other';
 
-export interface RateLimitSnapshot {
+interface UsageBucketSource {
   limitId?: string;
   limitName?: string;
+}
+
+export interface RateLimitSnapshot extends UsageBucketSource {
   windowMinutes: number;
   usedPercent: number;
+  remainingPercent: number;
+  resetAt?: number;
+}
+
+export interface CreditBudgetSnapshot extends UsageBucketSource {
+  total: number;
+  used: number;
+  remaining: number;
   remainingPercent: number;
   resetAt?: number;
 }
@@ -21,6 +32,7 @@ export interface CodexAccountUsageSnapshot {
   fetchedAt: number;
   planType?: string;
   creditsBalance?: number;
+  creditBudgets: CreditBudgetSnapshot[];
   limits: RateLimitSnapshot[];
 }
 
@@ -29,6 +41,12 @@ export interface AccountUsageDisplay {
   tooltip: string;
   isStale: boolean;
 }
+
+type AccountUsageDisplayMetric =
+  | { kind: 'creditBudget'; creditBudget: CreditBudgetSnapshot }
+  | { kind: 'rateWindows'; limits: RateLimitSnapshot[] }
+  | { kind: 'creditBalance'; creditsBalance: number }
+  | { kind: 'none' };
 
 export async function fetchCodexAccountUsage(options: {
   baseURL: string;
@@ -91,25 +109,33 @@ export function getCodexAccountUsageURLs(baseURL: string): string[] {
 export function parseCodexAccountUsage(payload: unknown, fetchedAt: number, selectedModel: string): CodexAccountUsageSnapshot {
   const root = getUsageRoot(payload);
   const limits: RateLimitSnapshot[] = [];
+  const creditBudgets: CreditBudgetSnapshot[] = [];
 
   const mainLimit = root.rate_limits ?? root.rateLimits ?? root.rate_limit ?? root.rateLimit;
   limits.push(...parseRateLimitSnapshots(mainLimit, fetchedAt, { limitId: 'codex' }));
+  creditBudgets.push(...parseCreditBudgetSnapshots(mainLimit, fetchedAt, { limitId: 'codex' }));
+
+  const spendControl = root.spend_control ?? root.spendControl;
+  creditBudgets.push(...parseSpendControlCreditBudgetSnapshots(spendControl, fetchedAt));
 
   const byLimitId = root.rate_limits_by_limit_id ?? root.rateLimitsByLimitId;
   if (isObjectRecord(byLimitId)) {
     for (const [limitId, limit] of Object.entries(byLimitId)) {
       limits.push(...parseRateLimitSnapshots(limit, fetchedAt, { limitId }));
+      creditBudgets.push(...parseCreditBudgetSnapshots(limit, fetchedAt, { limitId }));
     }
   }
 
   for (const additionalLimit of getRateLimitCollection(root.additional_rate_limits ?? root.additionalRateLimits)) {
     limits.push(...parseAdditionalRateLimitSnapshots(additionalLimit, fetchedAt));
+    creditBudgets.push(...parseAdditionalCreditBudgetSnapshots(additionalLimit, fetchedAt));
   }
 
   return {
     fetchedAt,
     planType: parsePlanType(root),
     creditsBalance: parseCreditsBalance(root),
+    creditBudgets: sortCreditBudgetsForDisplay(dedupeCreditBudgets(creditBudgets), selectedModel),
     limits: sortLimitsForDisplay(dedupeLimits(limits), selectedModel)
   };
 }
@@ -119,27 +145,34 @@ export function buildCodexAccountUsageDisplay(
   selectedModel: string,
   now = Date.now()
 ): AccountUsageDisplay {
-  const fiveHour = selectPreferredLimit(snapshot.limits, '5h', selectedModel);
-  const weekly = selectPreferredLimit(snapshot.limits, 'weekly', selectedModel);
-  const compactParts: string[] = [];
-
-  if (fiveHour) {
-    compactParts.push(`5h ${formatPercent(fiveHour.remainingPercent)}`);
-  }
-
-  if (weekly) {
-    compactParts.push(`weekly ${formatPercent(weekly.remainingPercent)}`);
-  }
-
-  if (snapshot.creditsBalance !== undefined && (compactParts.length > 0 || (!fiveHour && !weekly))) {
-    compactParts.push(formatCredits(snapshot.creditsBalance));
-  }
+  const metric = selectAccountUsageDisplayMetric(snapshot, selectedModel);
 
   return {
-    compactText: compactParts.length > 0 ? `Codex: ${compactParts.join(' · ')}` : undefined,
-    tooltip: buildTooltip(snapshot, selectedModel, fiveHour, weekly, now),
+    compactText: formatCompactText(metric),
+    tooltip: buildTooltip(snapshot, metric, now),
     isStale: now - snapshot.fetchedAt > STALE_AFTER_MS
   };
+}
+
+export function selectAccountUsageDisplayMetric(
+  snapshot: CodexAccountUsageSnapshot,
+  selectedModel: string
+): AccountUsageDisplayMetric {
+  const creditBudget = selectPreferredCreditBudget(snapshot.creditBudgets, selectedModel);
+  if (creditBudget) {
+    return { kind: 'creditBudget', creditBudget };
+  }
+
+  const limits = selectDisplayRateWindows(snapshot.limits, selectedModel);
+  if (limits.length > 0) {
+    return { kind: 'rateWindows', limits };
+  }
+
+  if (snapshot.creditsBalance !== undefined) {
+    return { kind: 'creditBalance', creditsBalance: snapshot.creditsBalance };
+  }
+
+  return { kind: 'none' };
 }
 
 export function classifyWindow(windowMinutes: number): RateLimitWindowKind {
@@ -222,6 +255,51 @@ function parseAdditionalRateLimitSnapshots(value: unknown, fetchedAt: number): R
   return parseRateLimitSnapshots(value.rate_limit ?? value.rateLimit ?? value, fetchedAt, { limitId, limitName });
 }
 
+function parseCreditBudgetSnapshots(
+  value: unknown,
+  fetchedAt: number,
+  defaults: UsageBucketSource = {}
+): CreditBudgetSnapshot[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => parseCreditBudgetSnapshots(entry, fetchedAt, defaults));
+  }
+
+  if (!isObjectRecord(value)) {
+    return [];
+  }
+
+  const limitId = parseOptionalString(value.limitId ?? value.limit_id ?? value.id ?? value.key) ?? defaults.limitId;
+  const limitName = parseOptionalString(value.limitName ?? value.limit_name ?? value.name ?? value.display_name ?? value.model ?? value.model_slug) ?? defaults.limitName;
+  const creditBudget = parseCreditBudget(value.individual_limit ?? value.individualLimit, fetchedAt, { limitId, limitName });
+  return creditBudget ? [creditBudget] : [];
+}
+
+function parseAdditionalCreditBudgetSnapshots(value: unknown, fetchedAt: number): CreditBudgetSnapshot[] {
+  if (!isObjectRecord(value)) {
+    return [];
+  }
+
+  const limitId = parseOptionalString(value.metered_feature ?? value.meteredFeature ?? value.limitId ?? value.limit_id ?? value.id);
+  const limitName = parseOptionalString(value.limit_name ?? value.limitName ?? value.name ?? value.display_name);
+  return parseCreditBudgetSnapshots(value.rate_limit ?? value.rateLimit ?? value, fetchedAt, { limitId, limitName });
+}
+
+function parseSpendControlCreditBudgetSnapshots(value: unknown, fetchedAt: number): CreditBudgetSnapshot[] {
+  if (!isObjectRecord(value)) {
+    return [];
+  }
+
+  const individualLimit = value.individual_limit ?? value.individualLimit;
+  const limitName = isObjectRecord(individualLimit)
+    ? parseOptionalString(individualLimit.source)
+    : undefined;
+  const creditBudget = parseCreditBudget(individualLimit, fetchedAt, {
+    limitId: 'workspace-spend-control',
+    limitName
+  });
+  return creditBudget ? [creditBudget] : [];
+}
+
 function parseRateLimit(
   value: unknown,
   fetchedAt: number,
@@ -244,6 +322,55 @@ function parseRateLimit(
     windowMinutes,
     usedPercent,
     remainingPercent: clamp(100 - usedPercent, 0, 100),
+    resetAt: parseResetAt(value, fetchedAt)
+  };
+}
+
+function parseCreditBudget(
+  value: unknown,
+  fetchedAt: number,
+  defaults: UsageBucketSource = {}
+): CreditBudgetSnapshot | undefined {
+  if (!isObjectRecord(value)) {
+    return undefined;
+  }
+
+  const total = parseFiniteNumber(value.limit ?? value.total ?? value.quota ?? value.max);
+  if (total === undefined || total <= 0) {
+    return undefined;
+  }
+
+  const reportedUsed = parseFiniteNumber(value.used ?? value.usage ?? value.consumed);
+  const reportedRemainingPercent = parsePercentNumber(value.remainingPercent ?? value.remaining_percent);
+  let used: number;
+  let remainingPercent: number;
+
+  if (reportedUsed !== undefined) {
+    if (reportedUsed < 0 || reportedUsed > total) {
+      return undefined;
+    }
+
+    used = reportedUsed;
+    const calculatedRemainingPercent = (total - used) / total * 100;
+    if (reportedRemainingPercent !== undefined && Math.abs(reportedRemainingPercent - calculatedRemainingPercent) > 1) {
+      return undefined;
+    }
+
+    remainingPercent = reportedRemainingPercent ?? calculatedRemainingPercent;
+  } else if (reportedRemainingPercent !== undefined) {
+    remainingPercent = reportedRemainingPercent;
+    used = total * (1 - remainingPercent / 100);
+  } else {
+    return undefined;
+  }
+
+  return {
+    limitId: defaults.limitId,
+    limitName: defaults.limitName,
+    total,
+    used,
+    remaining: total - used,
+    remainingPercent,
     resetAt: parseResetAt(value, fetchedAt)
   };
 }
@@ -383,24 +510,88 @@ function dedupeLimits(limits: RateLimitSnapshot[]): RateLimitSnapshot[] {
   return deduped;
 }
 
-function selectPreferredLimit(
-  limits: readonly RateLimitSnapshot[],
-  kind: '5h' | 'weekly',
+function dedupeCreditBudgets(creditBudgets: CreditBudgetSnapshot[]): CreditBudgetSnapshot[] {
+  const seen = new Set<string>();
+  const deduped: CreditBudgetSnapshot[] = [];
+
+  for (const creditBudget of creditBudgets) {
+    const key = [
+      creditBudget.limitId ?? '',
+      creditBudget.limitName ?? '',
+      creditBudget.total,
+      creditBudget.used,
+      creditBudget.remainingPercent,
+      creditBudget.resetAt ?? ''
+    ].join('|');
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(creditBudget);
+  }
+
+  return deduped;
+}
+
+function selectPreferredCreditBudget(
+  creditBudgets: readonly CreditBudgetSnapshot[],
   selectedModel: string
-): RateLimitSnapshot | undefined {
-  return limits
-    .filter((limit) => classifyWindow(limit.windowMinutes) === kind)
-    .sort((left, right) => compareLimitPreference(left, right, selectedModel))[0];
+): CreditBudgetSnapshot | undefined {
+  return [...creditBudgets].sort((left, right) => compareCreditBudgetPreference(left, right, selectedModel))[0];
+}
+
+function selectDisplayRateWindows(
+  limits: readonly RateLimitSnapshot[],
+  selectedModel: string
+): RateLimitSnapshot[] {
+  const seenWindowMinutes = new Set<number>();
+  const selected: RateLimitSnapshot[] = [];
+  const rankedLimits = [...limits].sort((left, right) => {
+    return compareUsageBucketPreference(left, right, selectedModel)
+      || left.windowMinutes - right.windowMinutes
+      || right.usedPercent - left.usedPercent;
+  });
+
+  for (const limit of rankedLimits) {
+    const windowMinutes = Math.round(limit.windowMinutes);
+    if (seenWindowMinutes.has(windowMinutes)) {
+      continue;
+    }
+
+    seenWindowMinutes.add(windowMinutes);
+    selected.push(limit);
+    if (selected.length === 2) {
+      break;
+    }
+  }
+
+  return selected;
 }
 
 function compareLimitPreference(left: RateLimitSnapshot, right: RateLimitSnapshot, selectedModel: string): number {
-  return scoreLimit(right, selectedModel) - scoreLimit(left, selectedModel)
+  return compareUsageBucketPreference(left, right, selectedModel)
     || right.usedPercent - left.usedPercent;
 }
 
-function scoreLimit(limit: RateLimitSnapshot, selectedModel: string): number {
+function compareCreditBudgetPreference(
+  left: CreditBudgetSnapshot,
+  right: CreditBudgetSnapshot,
+  selectedModel: string
+): number {
+  return compareUsageBucketPreference(left, right, selectedModel)
+    || Number(Boolean(right.resetAt)) - Number(Boolean(left.resetAt));
+}
+
+function compareUsageBucketPreference(left: UsageBucketSource, right: UsageBucketSource, selectedModel: string): number {
+  return scoreUsageBucket(right, selectedModel) - scoreUsageBucket(left, selectedModel);
+}
+
+function scoreUsageBucket(limit: UsageBucketSource, selectedModel: string): number {
   let score = 0;
-  if (normalizeComparable(limit.limitId) === 'codex') {
+  if (normalizeComparable(limit.limitId) === 'workspace-spend-control') {
+    score += 8;
+  } else if (normalizeComparable(limit.limitId) === 'codex') {
     score += 4;
   }
 
@@ -411,10 +602,14 @@ function scoreLimit(limit: RateLimitSnapshot, selectedModel: string): number {
   return score;
 }
 
-function isLimitRelatedToModel(limit: RateLimitSnapshot, selectedModel: string): boolean {
+function isLimitRelatedToModel(limit: UsageBucketSource, selectedModel: string): boolean {
   const normalizedModel = normalizeComparable(selectedModel);
   const normalizedName = normalizeComparable(limit.limitName);
   return Boolean(normalizedModel && normalizedName && (normalizedName.includes(normalizedModel) || normalizedModel.includes(normalizedName)));
+}
+
+function sortCreditBudgetsForDisplay(creditBudgets: CreditBudgetSnapshot[], selectedModel: string): CreditBudgetSnapshot[] {
+  return [...creditBudgets].sort((left, right) => compareCreditBudgetPreference(left, right, selectedModel));
 }
 
 function sortLimitsForDisplay(limits: RateLimitSnapshot[], selectedModel: string): RateLimitSnapshot[] {
@@ -425,11 +620,22 @@ function sortLimitsForDisplay(limits: RateLimitSnapshot[], selectedModel: string
   });
 }
 
+function formatCompactText(metric: AccountUsageDisplayMetric): string | undefined {
+  switch (metric.kind) {
+    case 'creditBudget':
+      return `Codex: Credits ${formatPercent(metric.creditBudget.remainingPercent)} · ${formatCreditAmount(metric.creditBudget.remaining)}/${formatCreditAmount(metric.creditBudget.total)}`;
+    case 'rateWindows':
+      return `Codex: ${metric.limits.map((limit) => `${formatWindowLabel(limit.windowMinutes)} ${formatPercent(limit.remainingPercent)}`).join(' · ')}`;
+    case 'creditBalance':
+      return `Codex: ${formatCredits(metric.creditsBalance)}`;
+    case 'none':
+      return undefined;
+  }
+}
+
 function buildTooltip(
   snapshot: CodexAccountUsageSnapshot,
-  selectedModel: string,
-  fiveHour: RateLimitSnapshot | undefined,
-  weekly: RateLimitSnapshot | undefined,
+  metric: AccountUsageDisplayMetric,
   now: number
 ): string {
   const lines = ['Codex account limits'];
@@ -441,24 +647,39 @@ function buildTooltip(
     lines.push('Warning: usage data is older than 15 minutes.');
   }
 
-  if (fiveHour) {
-    lines.push(`5h: ${formatLimitDetail(fiveHour)}`);
+  if (metric.kind === 'creditBudget') {
+    lines.push(`Credit budget: ${formatCreditBudgetDetail(metric.creditBudget)}`);
+  } else if (metric.kind === 'rateWindows') {
+    for (const limit of metric.limits) {
+      lines.push(`${formatWindowLabel(limit.windowMinutes)}: ${formatLimitDetail(limit)}`);
+    }
+  } else if (metric.kind === 'creditBalance') {
+    lines.push(`Credits balance: ${formatCredits(metric.creditsBalance)}`);
   }
 
-  if (weekly) {
-    lines.push(`Weekly: ${formatLimitDetail(weekly)}`);
+  if (snapshot.creditsBalance !== undefined && metric.kind !== 'creditBalance') {
+    lines.push(`Credits balance: ${formatCredits(snapshot.creditsBalance)}`);
   }
 
-  if (snapshot.creditsBalance !== undefined) {
-    lines.push(`Credits: ${formatCredits(snapshot.creditsBalance)}`);
+  const selectedCreditBudgets = metric.kind === 'creditBudget'
+    ? new Set([metric.creditBudget])
+    : new Set<CreditBudgetSnapshot>();
+  const otherCreditBudgets = snapshot.creditBudgets.filter((creditBudget) => !selectedCreditBudgets.has(creditBudget));
+  if (otherCreditBudgets.length > 0) {
+    lines.push('Other credit budgets:');
+    for (const creditBudget of otherCreditBudgets) {
+      lines.push(`- ${formatCreditBudgetDetail(creditBudget)}`);
+    }
   }
 
-  const selectedLimits = new Set([fiveHour, weekly].filter((limit): limit is RateLimitSnapshot => Boolean(limit)));
+  const selectedLimits = metric.kind === 'rateWindows'
+    ? new Set(metric.limits)
+    : new Set<RateLimitSnapshot>();
   const otherLimits = snapshot.limits.filter((limit) => !selectedLimits.has(limit));
   if (otherLimits.length > 0) {
-    lines.push('Other limits:');
+    lines.push('Other rate limits:');
     for (const limit of otherLimits) {
-      lines.push(`- ${formatWindowKind(classifyWindow(limit.windowMinutes))}: ${formatLimitDetail(limit)}`);
+      lines.push(`- ${formatWindowLabel(limit.windowMinutes)}: ${formatLimitDetail(limit)}`);
     }
   }
 
@@ -483,20 +704,36 @@ function formatLimitDetail(limit: RateLimitSnapshot): string {
   return parts.join(' · ');
 }
 
-function formatWindowKind(kind: RateLimitWindowKind): string {
-  switch (kind) {
+function formatCreditBudgetDetail(creditBudget: CreditBudgetSnapshot): string {
+  const parts = [
+    `${formatCreditAmount(creditBudget.remaining)} / ${formatCreditAmount(creditBudget.total)} credits remaining`,
+    `${formatCreditAmount(creditBudget.used)} credits used`,
+    `${formatPercent(creditBudget.remainingPercent)} remaining`
+  ];
+
+  if (creditBudget.resetAt) {
+    parts.push(`resets ${new Date(creditBudget.resetAt).toLocaleString()}`);
+  }
+
+  if (creditBudget.limitName) {
+    parts.push(creditBudget.limitName);
+  }
+
+  return parts.join(' · ');
+}
+
+function formatWindowLabel(windowMinutes: number): string {
+  switch (classifyWindow(windowMinutes)) {
     case '5h':
       return '5h';
     case 'weekly':
       return 'Weekly';
     case 'daily':
       return 'Daily';
-    case 'monthly':
-      return 'Monthly';
     case 'annual':
       return 'Annual';
     default:
-      return 'Other';
+      return formatDuration(windowMinutes);
   }
 }
 
@@ -505,8 +742,24 @@ function formatPercent(value: number): string {
 }
 
 function formatCredits(value: number): string {
-  const rounded = Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, '');
-  return `${rounded} credits`;
+  return `${formatCreditAmount(value)} credits`;
+}
+
+function formatCreditAmount(value: number): string {
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, '');
+}
+
+function formatDuration(windowMinutes: number): string {
+  const roundedMinutes = Math.round(windowMinutes);
+  if (roundedMinutes >= 1440 && roundedMinutes % 1440 === 0) {
+    return `${roundedMinutes / 1440}d`;
+  }
+
+  if (roundedMinutes >= 60 && roundedMinutes % 60 === 0) {
+    return `${roundedMinutes / 60}h`;
+  }
+
+  return `${roundedMinutes}m`;
 }
 
 function parsePercentNumber(value: unknown): number | undefined {

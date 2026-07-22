@@ -24,6 +24,12 @@ Transport-related constraints that must not break:
 - WebSocket sessions may be reused, but concurrent requests must never share an in-use socket.
 - Responses branch reuse requires append-only history and an identical request envelope. Model, instructions, tool definitions, or tool schema changes must bust reuse.
 
+Account-usage constraints that must not break:
+
+- Compact account-usage display is driven by fields returned from the usage endpoint, not by guessed plan names or fixed window assumptions.
+- A complete workspace Credit budget takes compact-display precedence; unselected Credit budgets and rate-limit windows remain available in the details tooltip.
+- `rate_limit_reset_credits` is a reset-credit count, not a workspace Credit balance or budget.
+
 ## Build, Test, and Development Commands
 
 - `npm install`: install dependencies
