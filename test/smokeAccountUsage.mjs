@@ -273,6 +273,23 @@ try {
   assertIncludes(businessSpendControlDisplay.tooltip, 'Other rate limits:', 'root spend-control keeps model limits in details');
   assertIncludes(businessSpendControlDisplay.tooltip, 'GPT-5.3-Codex-Spark-Preview', 'root spend-control identifies additional model limit');
 
+  const overdrawnSpendControlSnapshot = parseCodexAccountUsage({
+    plan_type: 'business',
+    spend_control: {
+      reached: true,
+      individual_limit: {
+        source: 'group_based_spend_controls',
+        limit: 100,
+        used: 101,
+        remaining: 0,
+        remaining_percent: 1
+      }
+    }
+  }, Date.now(), 'gpt-5.5');
+  const overdrawnSpendControlDisplay = buildCodexAccountUsageDisplay(overdrawnSpendControlSnapshot, 'gpt-5.5');
+  assertEqual(overdrawnSpendControlDisplay.compactText, 'Codex: Credits 0% · 0/100', 'overdrawn spend-control budget remains visible');
+  assertIncludes(overdrawnSpendControlDisplay.tooltip, '101 credits used', 'overdrawn spend-control retains actual usage');
+
   await assertRejects(
     fetchCodexAccountUsage({
       baseURL,

@@ -346,17 +346,19 @@ function parseCreditBudget(
   let remainingPercent: number;
 
   if (reportedUsed !== undefined) {
-    if (reportedUsed < 0 || reportedUsed > total) {
+    if (reportedUsed < 0) {
       return undefined;
     }
 
     used = reportedUsed;
-    const calculatedRemainingPercent = (total - used) / total * 100;
+    const calculatedRemainingPercent = Math.max(0, (total - used) / total * 100);
     if (reportedRemainingPercent !== undefined && Math.abs(reportedRemainingPercent - calculatedRemainingPercent) > 1) {
       return undefined;
     }
 
-    remainingPercent = reportedRemainingPercent ?? calculatedRemainingPercent;
+    remainingPercent = calculatedRemainingPercent === 0
+      ? 0
+      : reportedRemainingPercent ?? calculatedRemainingPercent;
   } else if (reportedRemainingPercent !== undefined) {
     remainingPercent = reportedRemainingPercent;
     used = total * (1 - remainingPercent / 100);
@@ -369,7 +371,7 @@ function parseCreditBudget(
     limitName: defaults.limitName,
     total,
     used,
-    remaining: total - used,
+    remaining: Math.max(0, total - used),
     remainingPercent,
     resetAt: parseResetAt(value, fetchedAt)
   };
