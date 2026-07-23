@@ -320,6 +320,25 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         virtualPlaceholderCount: options.tools?.filter((tool) => /^activate_group_/i.test(tool.name)).length ?? 0
       });
     }
+    if (toolPlan.mode === 'native-hosted') {
+      this.outputChannel.info('native Tool Search plan', {
+        requestModel: selectedModel.requestModel,
+        catalogHash: toolPlan.catalogHash,
+        immediateFunctionCount: toolPlan.immediateToolCount,
+        deferredFunctionCount: toolPlan.deferredToolCount,
+        includesToolSearch: toolPlan.responseTools.some((tool) => tool.type === 'tool_search'),
+        namespaces: toolPlan.responseTools.flatMap((tool) => {
+          if (tool.type !== 'namespace') {
+            return [];
+          }
+          return [{
+            name: tool.name,
+            functionCount: tool.tools.length,
+            deferredFunctionCount: tool.tools.filter((nestedTool) => nestedTool.defer_loading === true).length
+          }];
+        })
+      });
+    }
     let requestOptions: CodexRequestEnvelopeOptions = {
       compatibilityEnabled: compatibilityProfile.enabled,
       model: selectedModel.requestModel,
@@ -690,6 +709,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           this.outputChannel.info('response tool call timing', {
             callId,
             name,
+            backendName: call.name,
+            namespace: call.namespace ?? null,
+            toolPlanMode: toolPlan.mode,
             toolArgumentsDoneToReportedMs: lifecycle?.argumentsDoneAt === undefined
               ? null
               : Math.max(0, reportedAt - lifecycle.argumentsDoneAt)
