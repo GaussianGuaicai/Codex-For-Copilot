@@ -82,16 +82,17 @@ export function buildCodexResponsesRequestWithMetrics(
         client_metadata: metadata
       }
     : {};
+  const reasoning = normalizeReasoningForRequest(options);
 
   const request = {
     model: options.model,
     instructions: options.instructions,
-    input: options.input,
+    input: sanitizeResponsesInputForOutbound(options.input),
     stream: true,
     store: options.store ?? false,
     ...(options.previousResponseId ? { previous_response_id: options.previousResponseId } : {}),
     ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-    ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+    ...(reasoning ? { reasoning } : {}),
     ...(tools.length > 0
       ? {
           tools: [...tools],
@@ -173,6 +174,39 @@ export function areCodexRequestsIncrementallyCompatible(
   current: CodexResponsesRequest
 ): boolean {
   return fingerprintCodexRequest(previous) === fingerprintCodexRequest(current);
+}
+
+function normalizeReasoningForRequest(options: CodexRequestBuilderOptions): Reasoning | undefined {
+  if (!options.compatibilityEnabled) {
+    return options.reasoning;
+  }
+
+  return {
+    effort: options.reasoning?.effort ?? 'medium',
+    summary: options.reasoning?.summary ?? 'auto'
+  } as Reasoning;
+}
+
+function sanitizeResponsesInputForOutbound(input: readonly ResponsesInputMessage[]): ResponsesInputMessage[] {
+  return input.map((item) => sanitizeResponseItemIdForOutbound(item));
+}
+
+function sanitizeResponseItemIdForOutbound(item: ResponsesInputMessage): ResponsesInputMessage {
+  const record = item as unknown as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, 'id')) {
+    return item;
+  }
+  const id = record.id;
+  if (typeof id === 'string' && isAcceptedResponsesItemId(id)) {
+    return item;
+  }
+
+  const { id: _id, ...withoutId } = record;
+  return withoutId as unknown as ResponsesInputMessage;
+}
+
+function isAcceptedResponsesItemId(id: string): boolean {
+  return /^(msg|fc|fco|rs|item)_[A-Za-z0-9_-]+$/.test(id);
 }
 
 function mapToolChoice(toolMode: vscode.LanguageModelChatToolMode | undefined): ToolChoiceOptions {
