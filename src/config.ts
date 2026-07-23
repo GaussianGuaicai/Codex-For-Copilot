@@ -13,6 +13,7 @@ export interface ProviderConfig {
   transport: 'auto' | 'http' | 'websocket';
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
+  nativeToolSearch: 'auto' | 'enabled' | 'disabled';
   model: string;
   includeHiddenModels: boolean;
   disabledModels: string[];
@@ -34,6 +35,7 @@ export function getProviderConfig(): ProviderConfig {
     transport: normalizeTransport(config.get('transport', 'auto')),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
+    nativeToolSearch: normalizeTriState(config.get('nativeToolSearch', 'auto')),
     model: config.get('model', 'gpt-5.5'),
     includeHiddenModels: config.get('includeHiddenModels', false),
     disabledModels: normalizeStringList(config.get('disabledModels', [])),

@@ -30,6 +30,16 @@ import { shortHash } from './codexTelemetry';
 import { CodexLatencyRecorder, type CodexLatencyContext } from './codexLatency';
 import { createCodexContinuationSnapshot } from './codexContinuation';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
+import { resolveCodexToolPlan } from './nativeToolSearch/nativeToolCatalog';
+import { mapNativeToolCall } from './nativeToolSearch/nativeToolCallMapper';
+import {
+  canUseNativeToolSearch,
+  isNativeToolSearchUnsupportedError,
+  markNativeToolSearchUnsupported,
+  nativeToolSearchCapabilityKey
+} from './nativeToolSearch/nativeToolCapabilities';
+import { hasVirtualToolPlaceholder } from './nativeToolSearch/nativeToolPolicy';
+import { buildCanonicalReplayInput, createCanonicalReplayRequest } from './nativeToolSearch/nativeToolReplay';
 import { StreamPresenter } from './streamPresenter';
 import {
   CodexModelCache,
@@ -294,11 +304,28 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const observedToolResults = this.consumeReportedToolResults(input);
     latency.mark('messagesConverted');
     const requestBuildStartedAt = performance.now();
-    const requestOptions: CodexRequestEnvelopeOptions = {
+    const nativeToolSearchKey = nativeToolSearchCapabilityKey(
+      normalizeBaseURL(config.baseURL), authIdentity, selectedModel.requestModel
+    );
+    let toolPlan = resolveCodexToolPlan({
+      tools: options.tools,
+      model: selectedModel.requestModel,
+      compatibilityEnabled: compatibilityProfile.enabled,
+      nativeToolSearch: config.nativeToolSearch,
+      extensions: (vscode as typeof vscode & { extensions?: { all?: readonly vscode.Extension<any>[] } }).extensions?.all ?? [],
+      nativeToolSearchSupported: canUseNativeToolSearch(selectedModel.requestModel, nativeToolSearchKey)
+    });
+    if (hasVirtualToolPlaceholder(options.tools)) {
+      this.outputChannel.info('native Tool Search unavailable because VS Code supplied virtual tool placeholders', {
+        virtualPlaceholderCount: options.tools?.filter((tool) => /^activate_group_/i.test(tool.name)).length ?? 0
+      });
+    }
+    let requestOptions: CodexRequestEnvelopeOptions = {
       compatibilityEnabled: compatibilityProfile.enabled,
       model: selectedModel.requestModel,
       instructions: config.instructions,
       tools: options.tools,
+      toolPlan,
       toolMode: options.toolMode,
       reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
       serviceTier: getRequestServiceTier(config.defaultServiceTier),
@@ -308,19 +335,25 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       textVerbosity: 'medium',
       includeEncryptedReasoning: true
     };
-    const toolSchemas = resolveCodexToolSchemas(options.tools);
+    const toolSchemas = toolPlan;
     latency.recordContext({
       fullInputCount: input.length,
       toolCount: options.tools?.length ?? 0,
       toolSchemaBytes: toolSchemas.toolSchemaBytes,
-      toolSchemaCacheHit: toolSchemas.cacheHit,
+      toolSchemaCacheHit: toolPlan.mode === 'legacy',
+      toolPlanMode: toolPlan.mode,
+      originalToolCount: toolPlan.originalToolCount,
+      immediateToolCount: toolPlan.immediateToolCount,
+      deferredToolCount: toolPlan.deferredToolCount,
+      namespaceCount: toolPlan.namespaceCount,
+      catalogHash: toolPlan.catalogHash,
       reasoningEffort: reasoningEffort ?? null,
       serviceTier: config.defaultServiceTier ?? 'auto'
     });
-    const reuseEnvelope = buildResponseBranchReuseEnvelope({
+    let reuseEnvelope = buildResponseBranchReuseEnvelope({
       baseURL: normalizeBaseURL(config.baseURL),
       authIdentity,
-      toolSignatures: toolSchemas.toolSignatures,
+      toolSignatures: toolPlan.toolSignatures,
       effectiveInputBudget: selectedModel.effectiveInputBudget,
       ...requestOptions
     });
@@ -583,6 +616,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         serviceTier: requestOptions.serviceTier,
         input: requestInput,
         tools: requestOptions.tools,
+        toolPlan: requestOptions.toolPlan,
         toolMode: requestOptions.toolMode,
         reasoning: requestOptions.reasoning,
         maxOutputTokens: requestOptions.maxOutputTokens,
@@ -637,7 +671,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           toolCallLifecycleAt.set(callId, lifecycle);
           latency.mark('firstToolCallArgumentsDone');
         },
-        onToolCall: (callId, name, toolInput) => {
+        onToolCall: (call) => {
+          const mapped = toolPlan.mode === 'native-hosted' ? mapNativeToolCall(toolPlan, call) : {
+            ...call,
+            vscodeName: call.name
+          };
+          const { callId, input: toolInput, vscodeName: name } = mapped;
           presenter.flushBoundary();
           reportedVisibleOutput = true;
           const reportedAt = Date.now();
@@ -840,7 +879,34 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         }
       }
     } catch (error) {
-      if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
+      if (toolPlan.mode === 'native-hosted' && !reportedVisibleOutput && isNativeToolSearchUnsupportedError(error)) {
+        markNativeToolSearchUnsupported(nativeToolSearchKey);
+        toolPlan = resolveCodexToolPlan({
+          tools: options.tools,
+          model: selectedModel.requestModel,
+          compatibilityEnabled: compatibilityProfile.enabled,
+          nativeToolSearch: 'disabled',
+          extensions: (vscode as typeof vscode & { extensions?: { all?: readonly vscode.Extension<any>[] } }).extensions?.all ?? []
+        });
+        requestOptions = { ...requestOptions, toolPlan };
+        reuseEnvelope = buildResponseBranchReuseEnvelope({
+          baseURL: normalizeBaseURL(config.baseURL),
+          authIdentity,
+          toolSignatures: toolPlan.toolSignatures,
+          effectiveInputBudget: selectedModel.effectiveInputBudget,
+          ...requestOptions
+        });
+        rawResponseItems.length = 0;
+        createdResponseId = undefined;
+        completedResponseId = undefined;
+        activeBranchId = undefined;
+        latency.recordContext({ toolPlanMode: 'legacy' });
+        this.outputChannel.warn('native Tool Search unsupported; retrying once with selected legacy function tools', {
+          requestModel: selectedModel.requestModel,
+          nativeToolSearchFallback: true
+        });
+        await streamRequest(input);
+      } else if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
         if (reportedVisibleOutput) {
           this.responseBranchStore.invalidateResponseId(error.previousResponseId);
           if (reusableBranch) {
@@ -929,11 +995,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     const finalResponseId = completedResponseId ?? createdResponseId;
     if (finalResponseId) {
-      const fullRequest = buildCodexResponsesRequest({
+      const builtFullRequest = buildCodexResponsesRequest({
         ...requestOptions,
         identity: requestIdentity,
         input,
       });
+      const fullRequest = toolPlan.mode === 'native-hosted'
+        ? createCanonicalReplayRequest(builtFullRequest, buildCanonicalReplayInput({
+            previousSnapshot: reusableBranch?.state?.continuation,
+            convertedInput: input,
+            appendedInput,
+            catalogHash: toolPlan.catalogHash
+          }))
+        : builtFullRequest;
       branchState = {
         ...branchState,
         continuation: createCodexContinuationSnapshot(
@@ -943,7 +1017,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           requestIdentity.turnId,
           {
             clone: false,
-            requestFingerprint: reuseEnvelope.requestFingerprint
+            requestFingerprint: reuseEnvelope.requestFingerprint,
+            catalogHash: toolPlan.catalogHash,
+            toolPlanMode: toolPlan.mode
           }
         ),
         updatedAt: Date.now()
@@ -1763,7 +1839,9 @@ export function buildResponseBranchReuseEnvelope(options: {
     scopeKey,
     requestFingerprint,
     effectiveInputBudget,
-    toolSignatures: toolSignatures ?? buildResponseBranchToolSignatures(requestOptions.tools)
+    toolSignatures: toolSignatures ?? buildResponseBranchToolSignatures(requestOptions.tools),
+    catalogHash: requestOptions.toolPlan?.catalogHash,
+    toolPlanMode: requestOptions.toolPlan?.mode
   };
 }
 

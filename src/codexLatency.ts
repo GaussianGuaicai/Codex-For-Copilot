@@ -54,6 +54,12 @@ export interface CodexLatencyContext {
   toolCount?: number;
   toolSchemaBytes?: number;
   toolSchemaCacheHit?: boolean;
+  toolPlanMode?: 'legacy' | 'native-hosted';
+  originalToolCount?: number;
+  immediateToolCount?: number;
+  deferredToolCount?: number;
+  namespaceCount?: number;
+  catalogHash?: string;
   requestBuildMs?: number;
   modelDiscoveryCacheState?: 'cold' | 'fresh' | 'stale' | 'fallback' | 'direct';
   prewarmResult?: 'success' | 'timed-out' | 'disabled-after-failure' | 'skipped-auto';
@@ -128,6 +134,12 @@ export class CodexLatencyRecorder {
     if (context.toolSchemaCacheHit !== undefined) {
       this.context.toolSchemaCacheHit = context.toolSchemaCacheHit;
     }
+    if (context.toolPlanMode !== undefined) this.context.toolPlanMode = context.toolPlanMode;
+    if (context.originalToolCount !== undefined) this.context.originalToolCount = context.originalToolCount;
+    if (context.immediateToolCount !== undefined) this.context.immediateToolCount = context.immediateToolCount;
+    if (context.deferredToolCount !== undefined) this.context.deferredToolCount = context.deferredToolCount;
+    if (context.namespaceCount !== undefined) this.context.namespaceCount = context.namespaceCount;
+    if (context.catalogHash !== undefined) this.context.catalogHash = context.catalogHash;
     if (context.requestBuildMs !== undefined) {
       this.context.requestBuildMs = context.requestBuildMs;
     }
