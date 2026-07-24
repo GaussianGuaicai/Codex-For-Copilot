@@ -382,7 +382,7 @@ async function runToolContinuationProbe({
     token,
     input: initialInput,
     onTextDelta() {},
-    onToolCall: (callId, name, input) => toolCalls.push({ callId, name, input }),
+    onToolCall: ({ callId, name, input }) => toolCalls.push({ callId, name, input }),
     onRawResponseItem: (item) => rawResponseItems.push(item),
     onResponseCreated: (response) => {
       initialResponseId = response.id ?? initialResponseId;

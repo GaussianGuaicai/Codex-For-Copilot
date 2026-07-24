@@ -6,6 +6,7 @@ import { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexSecretStore } from './auth/codexSecretStore';
 import { InvalidAuthJsonError } from './auth/codexAuthTypes';
 import { clearApiKey, setApiKey } from './secrets';
+import { enableNativeToolSearchGroupingBridge, restoreVSCodeToolGrouping } from './nativeToolSearch/nativeToolGroupingBridge';
 
 export function activate(context: vscode.ExtensionContext): void {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
@@ -92,9 +93,11 @@ export function activate(context: vscode.ExtensionContext): void {
       await accountUsageStatusBar.refresh();
       await accountUsageStatusBar.showDetails();
     }),
+    vscode.commands.registerCommand('codexModelProvider.enableNativeToolSearch', () => enableNativeToolSearchGroupingBridge(context)),
+    vscode.commands.registerCommand('codexModelProvider.restoreVSCodeToolGrouping', () => restoreVSCodeToolGrouping(context)),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['Import Codex auth.json', 'Show Auth Status', 'Sign Out', 'Sign in with Device Code', 'Refresh Account Limits', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Import Codex auth.json', 'Show Auth Status', 'Sign Out', 'Sign in with Device Code', 'Refresh Account Limits', 'Enable Native Tool Search', 'Restore VS Code Tool Grouping', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex' }
       );
 
@@ -108,6 +111,10 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand('codexForCopilot.auth.signInWithDeviceCode');
       } else if (action === 'Refresh Account Limits') {
         await vscode.commands.executeCommand('codexModelProvider.refreshAccountLimits');
+      } else if (action === 'Enable Native Tool Search') {
+        await vscode.commands.executeCommand('codexModelProvider.enableNativeToolSearch');
+      } else if (action === 'Restore VS Code Tool Grouping') {
+        await vscode.commands.executeCommand('codexModelProvider.restoreVSCodeToolGrouping');
       } else if (action === 'Open Debug Logs') {
         await vscode.commands.executeCommand('codexModelProvider.openDebugLogs');
       } else if (action === 'Set API Key') {

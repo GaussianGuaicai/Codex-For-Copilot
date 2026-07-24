@@ -125,7 +125,7 @@ try {
       presentation.push({ type: 'text', delta });
     },
     onReasoningTextDelta: (delta) => reasoningDeltas.push(delta),
-    onToolCall: (callId, name, input) => {
+    onToolCall: ({ callId, name, input }) => {
       toolCalls.push({ callId, name, input });
       presentation.push({ type: 'tool', callId });
     },

@@ -339,7 +339,7 @@ async function runFunctionCallArgumentsDoneSmokeTest(streamResponseText) {
       onToolCallAdded: (callId, name) => progress.push({ type: 'tool-added', callId, name }),
       onToolCallArgumentsDelta: (callId, name) => progress.push({ type: 'tool-arguments-delta', callId, name }),
       onToolCallArgumentsDone: (callId, name) => progress.push({ type: 'tool-arguments-done', callId, name }),
-      onToolCall: (callId, name, input) => progress.push({ type: 'tool', callId, name, input })
+      onToolCall: ({ callId, name, input }) => progress.push({ type: 'tool', callId, name, input })
     });
 
     assertEqual(JSON.stringify(progress), JSON.stringify([
@@ -528,7 +528,7 @@ async function runManagedAutoFallbackVisibilitySmokeTest(streamResponseText) {
     try {
       await streamResponseText(requestOptions('managed-tool-visible', {
         onTextDelta() {},
-        onToolCall: (callId, name, input) => toolCalls.push({ callId, name, input })
+        onToolCall: ({ callId, name, input }) => toolCalls.push({ callId, name, input })
       }));
     } catch (error) {
       toolError = error;
