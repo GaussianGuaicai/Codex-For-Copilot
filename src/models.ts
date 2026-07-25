@@ -3,6 +3,14 @@ import type { ProviderConfig } from './config';
 import type { ApiCredentials } from './secrets';
 import { normalizeBaseURL } from './responsesClient';
 import { codexFetch } from './auth/codexAuthRequest';
+import {
+  getReasoningEffortDescription,
+  getReasoningEffortLabel,
+  normalizeReasoningEffort,
+  type ReasoningEffort
+} from './reasoningEffort';
+
+export type { ReasoningEffort } from './reasoningEffort';
 
 const REASONING_ID_DELIMITER = '::reasoning=';
 const CONTEXT_ID_DELIMITER = '::context=';
@@ -39,26 +47,6 @@ const MODEL_DEFAULT_REASONING_FALLBACKS: Partial<Record<string, ReasoningEffort>
   'gpt-5.3-codex-spark': 'high',
   'codex-auto-review': 'medium'
 };
-
-const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = {
-  none: 'None',
-  minimal: 'Minimal',
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra High'
-};
-
-const REASONING_EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
-  none: 'Skip extra reasoning for the fastest replies when the model supports it.',
-  minimal: 'Use a very light reasoning pass for small edits and quick follow-ups.',
-  low: 'Fast responses with lighter reasoning.',
-  medium: 'Balances speed and reasoning depth for everyday tasks.',
-  high: 'Greater reasoning depth for complex problems.',
-  xhigh: 'Extra high reasoning depth for complex problems.'
-};
-
-export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 interface UpstreamReasoningLevel {
   effort?: unknown;
@@ -568,11 +556,7 @@ function formatTokenCount(value: number): string {
 }
 
 function formatReasoningEffort(effort: ReasoningEffort): string {
-  return REASONING_EFFORT_LABELS[effort];
-}
-
-function getReasoningEffortDescription(effort: ReasoningEffort): string {
-  return REASONING_EFFORT_DESCRIPTIONS[effort];
+  return getReasoningEffortLabel(effort);
 }
 
 function normalizeSentence(value: string): string {
@@ -610,20 +594,6 @@ function isModelVisible(
   }
 
   return true;
-}
-
-function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  switch (value) {
-    case 'none':
-    case 'minimal':
-    case 'low':
-    case 'medium':
-    case 'high':
-    case 'xhigh':
-      return value;
-    default:
-      return undefined;
-  }
 }
 
 function getPositiveInteger(value: unknown): number | undefined {

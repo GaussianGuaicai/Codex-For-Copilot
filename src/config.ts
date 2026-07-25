@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { normalizeKnownReasoningEffort, type KnownReasoningEffort } from './reasoningEffort';
 
 export interface ModelPricing {
   input?: number;
@@ -19,7 +20,7 @@ export interface ProviderConfig {
   modelAliases: Record<string, string>;
   instructions: string;
   defaultServiceTier?: 'default' | 'fast';
-  defaultReasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  defaultReasoningEffort?: KnownReasoningEffort;
   maxOutputTokens: number;
   modelPricingUsdPerMTok: Record<string, ModelPricing>;
 }
@@ -71,17 +72,7 @@ function normalizeDefaultServiceTier(value: string): ProviderConfig['defaultServ
 }
 
 function normalizeDefaultReasoningEffort(value: string): ProviderConfig['defaultReasoningEffort'] {
-  switch (value) {
-    case 'none':
-    case 'minimal':
-    case 'low':
-    case 'medium':
-    case 'high':
-    case 'xhigh':
-      return value;
-    default:
-      return undefined;
-  }
+  return normalizeKnownReasoningEffort(value);
 }
 
 function normalizeModelPricing(value: unknown): Record<string, ModelPricing> {
