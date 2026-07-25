@@ -19,7 +19,8 @@ export async function enableNativeToolSearchGroupingBridge(context: vscode.Exten
   const configuration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
   const inspected = configuration.inspect<number>(THRESHOLD_SETTING);
   const target = getEffectiveSettingTarget(inspected);
-  const savedThresholds = getSavedThresholds(context);
+  const state = getStateForTarget(context, target);
+  const savedThresholds = getSavedThresholds(state, target === vscode.ConfigurationTarget.Global);
   if (!savedThresholds.some((saved) => saved.target === target)) {
     savedThresholds.push({ value: getSettingValueAtTarget(inspected, target), target });
   }
@@ -28,24 +29,30 @@ export async function enableNativeToolSearchGroupingBridge(context: vscode.Exten
     void vscode.window.showErrorMessage('Native Tool Search could not disable VS Code virtual tool grouping. Check that github.copilot.chat.virtualTools.threshold can be changed in Settings.');
     return;
   }
-  await context.globalState.update(PREVIOUS_KEY, savedThresholds);
-  await context.globalState.update(OWNER_KEY, true);
+  await state.update(PREVIOUS_KEY, savedThresholds);
+  await state.update(OWNER_KEY, true);
   await resetToolGroupsAndReload('Native Tool Search enabled.');
 }
 
 export async function restoreVSCodeToolGrouping(context: vscode.ExtensionContext): Promise<void> {
-  if (context.globalState.get<boolean>(OWNER_KEY) !== true) {
+  const ownedStates = [
+    { state: context.globalState, global: true },
+    { state: context.workspaceState, global: false }
+  ].filter(({ state }) => state.get<boolean>(OWNER_KEY) === true);
+  if (ownedStates.length === 0) {
     return;
   }
   const configuration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
-  for (const previous of getSavedThresholds(context)) {
-    const inspected = configuration.inspect<number>(THRESHOLD_SETTING);
-    if (getSettingValueAtTarget(inspected, previous.target) === 0) {
-      await configuration.update(THRESHOLD_SETTING, previous.value, previous.target);
+  for (const owned of ownedStates) {
+    for (const previous of getSavedThresholds(owned.state, owned.global)) {
+      const inspected = configuration.inspect<number>(THRESHOLD_SETTING);
+      if (getSettingValueAtTarget(inspected, previous.target) === 0) {
+        await configuration.update(THRESHOLD_SETTING, previous.value, previous.target);
+      }
     }
+    await owned.state.update(OWNER_KEY, undefined);
+    await owned.state.update(PREVIOUS_KEY, undefined);
   }
-  await context.globalState.update(OWNER_KEY, undefined);
-  await context.globalState.update(PREVIOUS_KEY, undefined);
   await resetToolGroupsAndReload('VS Code tool grouping restored.');
 }
 
@@ -77,12 +84,17 @@ function getEffectiveSettingTarget(
   return vscode.ConfigurationTarget.Global;
 }
 
-function getSavedThresholds(context: vscode.ExtensionContext): SavedThreshold[] {
-  const saved = context.globalState.get<SavedThreshold | SavedThreshold[]>(PREVIOUS_KEY);
+function getStateForTarget(context: vscode.ExtensionContext, target: vscode.ConfigurationTarget): vscode.Memento {
+  return target === vscode.ConfigurationTarget.Global ? context.globalState : context.workspaceState;
+}
+
+function getSavedThresholds(state: vscode.Memento, global: boolean): SavedThreshold[] {
+  const saved = state.get<SavedThreshold | SavedThreshold[]>(PREVIOUS_KEY);
   const entries = Array.isArray(saved) ? saved : saved ? [saved] : [];
   return entries.flatMap((entry) => {
     const target = isConfigurationTarget(entry.target) ? entry.target : vscode.ConfigurationTarget.Global;
-    return [{ value: entry.value, target }];
+    const isGlobalTarget = target === vscode.ConfigurationTarget.Global;
+    return isGlobalTarget === global ? [{ value: entry.value, target }] : [];
   });
 }
 
