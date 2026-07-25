@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.3.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.1...v1.3.2) (2026-07-25)
+
+
+### Bug Fixes
+
+* isolate WebSocket custom headers ([cf543eb](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/cf543eb1c87fa1a852b8885250ed54e03179e375))
+
 ## [1.3.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.0...v1.3.1) (2026-07-22)
 
 
