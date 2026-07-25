@@ -4,6 +4,7 @@ import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import WebSocket, * as webSocketModule from 'ws';
 import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
 const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-provider-fallback-'));
@@ -14,6 +15,24 @@ const require = createRequire(import.meta.url);
 let performanceNow = () => Date.now();
 const performanceMock = { now: () => performanceNow() };
 const warningMessages = [];
+let rewriteWebSocketURL;
+
+class RewritingWebSocket extends WebSocket {
+  constructor(address, protocols, options) {
+    const rewrittenAddress = rewriteWebSocketURL ? rewriteWebSocketURL(address) : address;
+    if (options === undefined) {
+      super(rewrittenAddress, protocols);
+    } else {
+      super(rewrittenAddress, protocols, options);
+    }
+  }
+}
+
+const testWebSocketModule = {
+  ...webSocketModule,
+  default: RewritingWebSocket,
+  WebSocket: RewritingWebSocket
+};
 
 const configValues = {
   baseURL: '',
@@ -122,6 +141,13 @@ const vscodeMock = {
   },
   workspace: {
     getConfiguration(section) {
+      if (section === 'http') {
+        return {
+          get(_key, defaultValue) {
+            return defaultValue;
+          }
+        };
+      }
       if (section !== 'codexModelProvider') {
         throw new Error(`Unexpected configuration section: ${section}`);
       }
@@ -145,7 +171,7 @@ await build({
   platform: 'node',
   target: 'node20',
   outfile: bundlePath,
-  external: ['vscode']
+  external: ['vscode', 'ws']
 });
 
 await build({
@@ -161,6 +187,9 @@ await build({
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === 'vscode') {
     return vscodeMock;
+  }
+  if (request === 'ws') {
+    return testWebSocketModule;
   }
   if (request === 'node:perf_hooks') {
     return { performance: performanceMock };
@@ -184,6 +213,8 @@ try {
   await runRequestEnvelopeReuseInvalidationSmokeTest();
   await runToolOutputFullInputReplaySmokeTest();
   await runModelGeneratedToolLoopFullReplaySmokeTest();
+  await runNativeHostedCanonicalReplaySmokeTest();
+  await runNativeHostedToolOutputContinuationRecoverySmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
@@ -1892,6 +1923,545 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
   }
 }
 
+async function runNativeHostedCanonicalReplaySmokeTest() {
+  const responseRequests = [];
+  let selectedNamespace;
+  let selectedTool;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (responseRequests.length === 3 && body.previous_response_id) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          code: 'previous_response_not_found',
+          message: 'Native replay continuation expired.',
+          param: 'previous_response_id'
+        }
+      }));
+      return;
+    }
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    if (responseRequests.length === 1) {
+      const namespaceTool = body.tools.find((tool) => tool.type === 'namespace');
+      selectedNamespace = namespaceTool?.name;
+      selectedTool = namespaceTool?.tools?.[0]?.name;
+      if (!selectedNamespace || !selectedTool) {
+        throw new Error('Expected native Tool Search request to contain a deferred namespace tool.');
+      }
+      const item = {
+        id: 'fc_native_replay',
+        type: 'function_call',
+        call_id: 'call_native_replay',
+        name: selectedTool,
+        namespace: selectedNamespace,
+        arguments: '{"value":"first"}'
+      };
+      send({ type: 'response.output_item.added', output_index: 0, item });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: item.id,
+        output_index: 0,
+        name: selectedTool,
+        arguments: item.arguments
+      });
+      send({ type: 'response.output_item.done', output_index: 0, item });
+      send({ type: 'response.completed', response: { id: 'resp_native_tool', status: 'completed' } });
+    } else if (responseRequests.length === 2) {
+      send({ type: 'response.output_text.delta', delta: 'Native tool result received.' });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'msg_native_result',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Native tool result received.', annotations: [] }]
+        }
+      });
+      send({ type: 'response.completed', response: { id: 'resp_native_result', status: 'completed' } });
+    } else {
+      send({ type: 'response.output_text.delta', delta: 'Native continuation recovered.' });
+      send({ type: 'response.completed', response: { id: 'resp_native_recovered', status: 'completed' } });
+    }
+    response.write('data: [DONE]\n\n');
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalNativeToolSearch = configValues.nativeToolSearch;
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.nativeToolSearch = 'enabled';
+  configValues.transport = 'http';
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+
+  const tools = Array.from({ length: 13 }, (_, index) => ({
+    name: `native_replay_tool_${String(index).padStart(2, '0')}`,
+    description: `Native replay tool ${index}`,
+    inputSchema: {
+      type: 'object',
+      properties: { value: { type: 'string' } },
+      required: ['value']
+    }
+  }));
+  const provider = new CodexModelProvider(
+    { subscriptions: [] },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getStatus() {
+        return { accountId: 'native-replay-account' };
+      },
+      async getAccessToken() {
+        return 'native-replay-token';
+      }
+    }
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for native canonical replay coverage.');
+    }
+
+    const firstParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native tool.')] }],
+      { tools },
+      { report(part) { firstParts.push(part); } },
+      token
+    );
+    const toolCall = firstParts.find((part) => part instanceof LanguageModelToolCallPart);
+    if (!toolCall || !selectedNamespace || !selectedTool) {
+      throw new Error('Expected one mapped native tool call.');
+    }
+    assertEqual(toolCall.name, selectedTool, 'native namespaced call maps back to the selected VS Code tool');
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native tool.')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_native_replay', selectedTool, { value: 'first' })]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolResultPart('call_native_replay', [new vscodeMock.LanguageModelTextPart('native output')])]
+        }
+      ],
+      { tools },
+      { report() {} },
+      token
+    );
+
+    const recoveredParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native tool.')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_native_replay', selectedTool, { value: 'first' })]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolResultPart('call_native_replay', [new vscodeMock.LanguageModelTextPart('native output')])]
+        },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Native tool result received.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the tool result.')] }
+      ],
+      { tools },
+      { report(part) { recoveredParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 4, 'native replay performs initial, full-replay, rejected continuation, and recovery requests');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'native HTTP tool output uses full replay');
+    const initialReplayCall = responseRequests[1].input.find((item) => item.type === 'function_call');
+    assertEqual(initialReplayCall.namespace, selectedNamespace, 'native HTTP full replay preserves the raw function-call namespace');
+    assertEqual(
+      responseRequests[1].input.filter((item) => item.type === 'function_call').length,
+      1,
+      'native HTTP full replay does not duplicate the converted function call'
+    );
+    assertEqual(responseRequests[1].input.at(-1).type, 'function_call_output', 'native HTTP full replay appends the matching output');
+    assertEqual(responseRequests[2].previous_response_id, 'resp_native_result', 'native follow-up first attempts incremental continuation');
+    assertEqual(
+      JSON.stringify(responseRequests[2].input),
+      JSON.stringify([{ role: 'user', content: 'Continue after the tool result.', type: 'message' }]),
+      'native continuation sends only appended input before recovery'
+    );
+    assertEqual('previous_response_id' in responseRequests[3], false, 'native continuation-miss recovery omits the stale response id');
+    assertEqual(
+      JSON.stringify(responseRequests[3].input),
+      JSON.stringify([
+        { role: 'user', content: 'Run a deferred native tool.', type: 'message' },
+        {
+          id: 'fc_native_replay',
+          type: 'function_call',
+          call_id: 'call_native_replay',
+          name: selectedTool,
+          namespace: selectedNamespace,
+          arguments: '{"value":"first"}'
+        },
+        { type: 'function_call_output', call_id: 'call_native_replay', output: 'native output' },
+        {
+          id: 'msg_native_result',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Native tool result received.', annotations: [] }]
+        },
+        { role: 'user', content: 'Continue after the tool result.', type: 'message' }
+      ]),
+      'native continuation-miss recovery sends exact ordered canonical input'
+    );
+    assertEqual(
+      responseRequests[3].input.filter((item) => item.type === 'function_call').length,
+      1,
+      'native continuation-miss recovery contains exactly one function call'
+    );
+    assertEqual(
+      recoveredParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Native continuation recovered.',
+      'native continuation-miss recovery reports only recovered output'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.nativeToolSearch = originalNativeToolSearch;
+    configValues.transport = 'http';
+    await closeServer(server);
+  }
+}
+
+async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
+  const frames = [];
+  const sockets = new Set();
+  const warnings = [];
+  let httpResponseRequestCount = 0;
+  let selectedNamespace;
+  let selectedTool;
+  const server = createServer((request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+    httpResponseRequestCount += 1;
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Native WebSocket replay must not fall back to HTTP.' } }));
+  });
+  const webSocketServer = new webSocketModule.WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+  webSocketServer.on('connection', (webSocket) => {
+    sockets.add(webSocket);
+    webSocket.once('close', () => sockets.delete(webSocket));
+    webSocket.on('message', (data) => {
+      const frame = JSON.parse(data.toString('utf8'));
+      frames.push(frame);
+      if (frames.length === 1) {
+        const namespaceTool = frame.tools.find((tool) => tool.type === 'namespace');
+        selectedNamespace = namespaceTool?.name;
+        selectedTool = namespaceTool?.tools?.[0]?.name;
+        if (!selectedNamespace || !selectedTool) {
+          webSocket.send(JSON.stringify({
+            type: 'response.failed',
+            response: { id: 'resp_native_ws_invalid', status: 'failed', error: { message: 'Missing native namespace tool.' } }
+          }));
+          return;
+        }
+        const item = {
+          id: 'fc_native_ws_replay',
+          type: 'function_call',
+          call_id: 'call_native_ws_replay',
+          name: selectedTool,
+          namespace: selectedNamespace,
+          arguments: '{"value":"websocket"}'
+        };
+        webSocket.send(JSON.stringify({ type: 'response.output_item.added', output_index: 0, item }));
+        webSocket.send(JSON.stringify({
+          type: 'response.function_call_arguments.done',
+          item_id: item.id,
+          output_index: 0,
+          name: selectedTool,
+          arguments: item.arguments
+        }));
+        webSocket.send(JSON.stringify({ type: 'response.output_item.done', output_index: 0, item }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_tool', status: 'completed' } }));
+        return;
+      }
+      if (frames.length === 2) {
+        webSocket.send(JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            code: 'previous_response_not_found',
+            message: 'Native WebSocket tool-output continuation expired.',
+            param: 'previous_response_id'
+          },
+          status: 400
+        }));
+        return;
+      }
+      if (frames.length === 3) {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'Native WebSocket continuation recovered.' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_recovered', status: 'completed' } }));
+        return;
+      }
+      webSocket.send(JSON.stringify({
+        type: 'response.failed',
+        response: { id: 'resp_native_ws_extra', status: 'failed', error: { message: 'Unexpected extra provider frame.' } }
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalNativeToolSearch = configValues.nativeToolSearch;
+  const originalTransport = configValues.transport;
+  const originalWebsocketPrewarm = configValues.websocketPrewarm;
+  const originalNoProxy = process.env.NO_PROXY;
+  const originalRewriteWebSocketURL = rewriteWebSocketURL;
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.nativeToolSearch = 'enabled';
+  configValues.transport = 'websocket';
+  configValues.websocketPrewarm = 'disabled';
+  process.env.NO_PROXY = [originalNoProxy, 'chatgpt.com'].filter(Boolean).join(',');
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+  rewriteWebSocketURL = (input) => {
+    const targetUrl = new URL(input.toString());
+    targetUrl.protocol = 'ws:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return targetUrl;
+  };
+
+  const tools = Array.from({ length: 13 }, (_, index) => ({
+    name: `native_ws_replay_tool_${String(index).padStart(2, '0')}`,
+    description: `Native WebSocket replay tool ${index}`,
+    inputSchema: {
+      type: 'object',
+      properties: { value: { type: 'string' } },
+      required: ['value']
+    }
+  }));
+  const context = { subscriptions: [] };
+  const provider = new CodexModelProvider(
+    context,
+    {
+      debug() {},
+      info() {},
+      warn(message, data) {
+        warnings.push({ message, data });
+      },
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getStatus() {
+        return { accountId: 'native-ws-replay-account' };
+      },
+      async getAccessToken() {
+        return 'native-ws-replay-token';
+      }
+    }
+  );
+  const token = createMutableCancellationToken();
+
+  try {
+    const models = await withSmokeTimeout(
+      provider.provideLanguageModelChatInformation({ silent: true }, token),
+      token,
+      'native WebSocket model discovery'
+    );
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for native WebSocket replay coverage.');
+    }
+
+    const firstParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] }],
+        { tools },
+        { report(part) { firstParts.push(part); } },
+        token
+      ),
+      token,
+      'native WebSocket function-call response'
+    );
+    const toolCall = firstParts.find((part) => part instanceof LanguageModelToolCallPart);
+    if (!toolCall || !selectedNamespace || !selectedTool) {
+      throw new Error('Expected one mapped native WebSocket tool call.');
+    }
+    assertEqual(toolCall.name, selectedTool, 'native WebSocket namespaced call maps to the selected VS Code tool');
+
+    const recoveredParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, { value: 'websocket' })]
+          },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolResultPart('call_native_ws_replay', [new vscodeMock.LanguageModelTextPart('native websocket output')])]
+          }
+        ],
+        { tools },
+        { report(part) { recoveredParts.push(part); } },
+        token
+      ),
+      token,
+      'native WebSocket tool-output continuation recovery'
+    );
+
+    assertEqual(frames.length, 3, 'native WebSocket recovery sends initial, incremental, and canonical retry frames');
+    assertEqual(frames[1].previous_response_id, 'resp_native_ws_tool', 'tool output is first sent with the previous response id');
+    assertEqual(
+      JSON.stringify(frames[1].input),
+      JSON.stringify([{ type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' }]),
+      'tool-output continuation sends only the matching incremental output'
+    );
+    assertEqual('previous_response_id' in frames[2], false, 'tool-output continuation-miss retry omits the stale response id');
+    assertEqual(
+      JSON.stringify(frames[2].input),
+      JSON.stringify([
+        { role: 'user', content: 'Run a deferred native WebSocket tool.', type: 'message' },
+        {
+          id: 'fc_native_ws_replay',
+          type: 'function_call',
+          call_id: 'call_native_ws_replay',
+          name: selectedTool,
+          namespace: selectedNamespace,
+          arguments: '{"value":"websocket"}'
+        },
+        { type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' }
+      ]),
+      'tool-output continuation-miss retry sends exact ordered canonical replay'
+    );
+    assertEqual(
+      frames[2].input.filter((item) => item.type === 'function_call').length,
+      1,
+      'tool-output continuation-miss retry contains exactly one namespaced function call'
+    );
+    assertEqual(
+      frames[2].input.filter((item) => item.type === 'function_call_output').length,
+      1,
+      'tool-output continuation-miss retry contains exactly one matching output'
+    );
+    assertEqual(
+      warnings.filter((entry) => entry.message === 'response tool-output continuation reset').length,
+      1,
+      'tool-output continuation miss executes the dedicated provider recovery branch'
+    );
+    assertEqual(
+      warnings.some((entry) => entry.message === 'response continuation reset'),
+      false,
+      'tool-output continuation miss does not execute generic continuation recovery'
+    );
+    assertEqual(httpResponseRequestCount, 0, 'structured WebSocket continuation miss never falls back to HTTP');
+    assertEqual(
+      recoveredParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Native WebSocket continuation recovered.',
+      'tool-output continuation recovery reports only retry output'
+    );
+  } finally {
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    globalThis.fetch = originalFetch;
+    rewriteWebSocketURL = originalRewriteWebSocketURL;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.nativeToolSearch = originalNativeToolSearch;
+    configValues.transport = originalTransport;
+    if (originalWebsocketPrewarm === undefined) {
+      delete configValues.websocketPrewarm;
+    } else {
+      configValues.websocketPrewarm = originalWebsocketPrewarm;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    for (const socket of sockets) {
+      socket.terminate();
+    }
+    await closeWebSocketServer(webSocketServer);
+    await closeServer(server);
+  }
+}
+
 async function runProviderCatalogVersionNeutralSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
@@ -2079,6 +2649,23 @@ function createMutableCancellationToken() {
   };
 }
 
+async function withSmokeTimeout(promise, token, label, timeoutMs = 5_000) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          token.cancel();
+          reject(new Error(`${label} timed out after ${timeoutMs}ms.`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function writeSseResponse(response, text, responseId) {
   response.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -2169,6 +2756,20 @@ async function runProviderVirtualToolFallbackNotificationSmokeTest() {
     delete configValues.nativeToolSearch;
     await closeServer(server);
   }
+}
+
+async function closeWebSocketServer(server) {
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('WebSocket server cleanup timed out.')), 5_000);
+    server.close((error) => {
+      clearTimeout(timeout);
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    });
+  });
 }
 
 function assertEqual(actual, expected, label) {
