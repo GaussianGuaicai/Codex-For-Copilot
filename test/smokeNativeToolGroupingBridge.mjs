@@ -67,7 +67,8 @@ const vscode = {
 
 const loaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
 try {
-  const context = { globalState: { get: (key) => state.get(key), update: async (key, value) => state.set(key, value) } };
+  const memento = { get: (key) => state.get(key), update: async (key, value) => state.set(key, value) };
+  const context = { globalState: memento, workspaceState: memento };
   await loaded.exports.enableNativeToolSearchGroupingBridge(context);
   assertEqual(updates[0].section, VIRTUAL_TOOLS_SECTION, 'opt-in changes the VS Code Virtual Tool setting');
   assertEqual(updates[0].value, 0, 'opt-in disables VS Code Virtual Tool grouping after confirmation');
@@ -123,3 +124,48 @@ try {
   assertEqual(nativeToolSearchGlobalValue, 'disabled', 'an explicit VS Code discovery choice remains disabled');
   console.log('Smoke test passed: Native Tool Search is opt-in and VS Code Virtual Tool Groups restore safely.');
 } finally { await loaded.dispose(); }
+
+const scopedLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const sharedGlobalState = createState();
+  const contextA = { globalState: sharedGlobalState, workspaceState: createState() };
+  const contextB = { globalState: sharedGlobalState, workspaceState: createState() };
+  nativeToolSearchGlobalValue = 'disabled';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 32;
+
+  await scopedLoaded.exports.enableNativeToolSearchGroupingBridge(contextA);
+  assertEqual(workspaceFolderThreshold, 0, 'workspace A folder threshold is disabled');
+
+  workspaceFolderThreshold = 48;
+  await scopedLoaded.exports.enableNativeToolSearchGroupingBridge(contextB);
+  assertEqual(workspaceFolderThreshold, 0, 'workspace B folder threshold is disabled independently');
+
+  workspaceFolderThreshold = 0;
+  await scopedLoaded.exports.restoreVSCodeToolGrouping(contextA);
+  assertEqual(workspaceFolderThreshold, 32, 'workspace A restores its own folder threshold');
+
+  workspaceFolderThreshold = 0;
+  await scopedLoaded.exports.restoreVSCodeToolGrouping(contextB);
+  assertEqual(workspaceFolderThreshold, 48, 'workspace B restores its own folder threshold');
+
+  console.log('Smoke test passed: Native Tool Search grouping restoration is scoped per workspace.');
+} finally {
+  await scopedLoaded.dispose();
+}
+
+function createState() {
+  const values = new Map();
+  return {
+    get: (key) => values.get(key),
+    update: async (key, value) => {
+      if (value === undefined) {
+        values.delete(key);
+      } else {
+        values.set(key, value);
+      }
+    }
+  };
+}
