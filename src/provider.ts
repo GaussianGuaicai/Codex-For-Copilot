@@ -411,9 +411,17 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
     const usePreviousResponseId = appendedInput.length > 0
       && (!requiresFullInputForToolOutput || shouldAttemptToolOutputContinuation);
+    const fullReplayInput = toolPlan.mode === 'native-hosted'
+      ? buildCanonicalReplayInput({
+          previousSnapshot: reusableBranch?.state?.continuation,
+          convertedInput: input,
+          appendedInput,
+          catalogHash: toolPlan.catalogHash
+        })
+      : input;
     const initialRequestInput = usePreviousResponseId
       ? appendedInput
-      : input;
+      : fullReplayInput;
     const initialPreviousResponseId = usePreviousResponseId
       ? reusableBranch?.responseId
       : undefined;
@@ -958,7 +966,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         createdResponseId = undefined;
         completedResponseId = undefined;
         rawResponseItems.length = 0;
-        await streamRequest(input);
+        await streamRequest(fullReplayInput);
       } else {
         if (!initialPreviousResponseId || !isResponsesContinuationMissError(error)) {
           const unavailableModel = getExactModelNotFoundName(error, selectedModel.requestModel);
@@ -1011,7 +1019,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         completedResponseId = undefined;
         rawResponseItems.length = 0;
         activeBranchId = undefined;
-        await streamRequest(input);
+        await streamRequest(fullReplayInput);
       }
     }
 
@@ -1023,12 +1031,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         input,
       });
       const fullRequest = toolPlan.mode === 'native-hosted'
-        ? createCanonicalReplayRequest(builtFullRequest, buildCanonicalReplayInput({
-            previousSnapshot: reusableBranch?.state?.continuation,
-            convertedInput: input,
-            appendedInput,
-            catalogHash: toolPlan.catalogHash
-          }))
+        ? createCanonicalReplayRequest(builtFullRequest, fullReplayInput)
         : builtFullRequest;
       branchState = {
         ...branchState,
