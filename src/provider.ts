@@ -4,7 +4,13 @@ import { performance } from 'node:perf_hooks';
 import type { ResponseUsage } from 'openai/resources/responses/responses';
 import { compareResponsesInputHistory, convertMessagesToResponsesInput, estimateTokenCount, stableSerialize, type ResponsesInputMessage } from './convertMessages';
 import { getProviderConfig, type ProviderConfig } from './config';
-import { buildFallbackModel, buildProviderModels, fetchAvailableModels, isProviderModelIdentifier, parseModelIdentifier, type ParsedModelIdentifier, type ReasoningEffort, type ResolvedProviderModel } from './models';
+import { buildFallbackModel, buildProviderModels, fetchAvailableModels, isProviderModelIdentifier, parseModelIdentifier, type ParsedModelIdentifier, type ResolvedProviderModel } from './models';
+import {
+  resolveReasoningEffort,
+  toResponsesReasoning,
+  type ReasoningEffort,
+  type ReasoningEffortResolution
+} from './reasoningEffort';
 import {
   countInputTokens,
   disposeReusableResponsesWebSockets,
@@ -42,24 +48,6 @@ type RuntimeProvideLanguageModelChatResponseOptions = vscode.ProvideLanguageMode
   readonly modelConfiguration?: Record<string, unknown>;
   readonly configuration?: Record<string, unknown>;
 };
-
-type ReasoningEffortSource =
-  | 'modelConfiguration'
-  | 'configuration'
-  | 'modelOptions.reasoningEffort'
-  | 'modelOptions.thinkingEffort'
-  | 'modelOptions.reasoning.effort'
-  | 'modelOptions.thinking.effort'
-  | 'modelOptions.thinking'
-  | 'default'
-  | 'model'
-  | 'none';
-
-interface ReasoningEffortResolution {
-  effort: ReasoningEffort | undefined;
-  source: ReasoningEffortSource;
-  hasExplicitConflict: boolean;
-}
 
 interface ResolvedRequestModel extends ParsedModelIdentifier {
   effectiveInputBudget?: number;
@@ -300,7 +288,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       instructions: config.instructions,
       tools: options.tools,
       toolMode: options.toolMode,
-      reasoning: reasoningEffort ? { effort: reasoningEffort } : undefined,
+      reasoning: reasoningEffort ? toResponsesReasoning(reasoningEffort) : undefined,
       serviceTier: getRequestServiceTier(config.defaultServiceTier),
       store: false,
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
@@ -1621,47 +1609,7 @@ export function getReasoningEffort(
   options: RuntimeProvideLanguageModelChatResponseOptions,
   defaultReasoningEffort: ReasoningEffort | undefined
 ): ReasoningEffortResolution {
-  const modelOptions = options.modelOptions;
-  const thinking = modelOptions?.thinking as { effort?: unknown } | undefined;
-  const explicitCandidates: Array<{ effort: ReasoningEffort | undefined; source: ReasoningEffortSource }> = [
-    { effort: normalizeReasoningEffort(modelOptions?.reasoningEffort), source: 'modelOptions.reasoningEffort' },
-    { effort: normalizeReasoningEffort(modelOptions?.thinkingEffort), source: 'modelOptions.thinkingEffort' },
-    { effort: normalizeReasoningEffort((modelOptions?.reasoning as { effort?: unknown } | undefined)?.effort), source: 'modelOptions.reasoning.effort' },
-    { effort: normalizeReasoningEffort(thinking?.effort), source: 'modelOptions.thinking.effort' },
-    { effort: normalizeReasoningEffort(modelOptions?.thinking), source: 'modelOptions.thinking' },
-    { effort: normalizeReasoningEffort(options.modelConfiguration?.reasoningEffort), source: 'modelConfiguration' },
-    { effort: normalizeReasoningEffort(options.configuration?.reasoningEffort), source: 'configuration' }
-  ].filter((candidate): candidate is { effort: ReasoningEffort; source: ReasoningEffortSource } => candidate.effort !== undefined);
-  const selected = explicitCandidates[0];
-  const hasExplicitConflict = new Set(explicitCandidates.map((candidate) => candidate.effort)).size > 1;
-
-  if (selected) {
-    return { ...selected, hasExplicitConflict };
-  }
-
-  if (defaultReasoningEffort) {
-    return { effort: defaultReasoningEffort, source: 'default', hasExplicitConflict };
-  }
-
-  if (selectedReasoningEffort) {
-    return { effort: selectedReasoningEffort, source: 'model', hasExplicitConflict };
-  }
-
-  return { effort: undefined, source: 'none', hasExplicitConflict };
-}
-
-function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  switch (value) {
-    case 'none':
-    case 'minimal':
-    case 'low':
-    case 'medium':
-    case 'high':
-    case 'xhigh':
-      return value;
-    default:
-      return undefined;
-  }
+  return resolveReasoningEffort(selectedReasoningEffort, options, defaultReasoningEffort);
 }
 
 function supportsOfficialTokenCounting(baseURL: string): boolean {
