@@ -37,6 +37,8 @@ export * from ${repoImport('src/auth/codexJwt')};
 export * from ${repoImport('src/auth/codexAuthManager')};
 export * from ${repoImport('src/auth/codexAuthRequest')};
 export * from ${repoImport('src/auth/codexAuthLock')};
+export * from ${repoImport('src/auth/codexPkce')};
+export * from ${repoImport('src/auth/codexOAuthClient')};
 `));
 
 await build({
@@ -92,12 +94,13 @@ try {
 
   let calls = 0;
   const manager = {
-    async getAccessToken() {
+    async getCredentialSnapshot() {
       calls += 1;
-      return calls === 1 ? 'old-token' : 'new-token';
+      return { accessToken: calls === 1 ? 'old-token' : 'new-token', accountId: 'acct_1', revision: calls === 1 ? 'old' : 'new' };
     },
-    async refreshAfter401() {
+    async recoverFromUnauthorized() {
       calls += 10;
+      return { accessToken: 'new-token', accountId: 'acct_1', revision: 'new' };
     }
   };
   const seenAuth = [];
@@ -109,7 +112,17 @@ try {
   assertEqual(response.status, 200, '401 retry succeeds');
   assertEqual(JSON.stringify(seenAuth), JSON.stringify(['Bearer old-token', 'Bearer new-token']), 'retry uses refreshed token');
 
-  console.log('Smoke test passed: auth import, JWT parsing, refresh decisions, and 401 retry are correct.');
+  const pkce = auth.generateCodexPkce();
+  assertEqual(pkce.verifier.length >= 43, true, 'PKCE verifier has RFC-compliant length');
+  assertEqual(pkce.challenge.length >= 43, true, 'PKCE challenge has RFC-compliant length');
+  assertEqual(auth.statesMatch(pkce.state, pkce.state), true, 'PKCE state matches itself');
+  assertEqual(auth.statesMatch(pkce.state, 'incorrect'), false, 'PKCE state rejects mismatch');
+  const oauth = new auth.CodexOAuthClient(async () => new Response(JSON.stringify({ id_token: futureToken, access_token: 'access', refresh_token: 'refresh' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  const url = new URL(oauth.createAuthorizationUrl('http://localhost:1455/auth/callback', pkce.verifier, pkce.challenge, pkce.state));
+  assertEqual(url.searchParams.get('code_challenge_method'), 'S256', 'authorization URL uses PKCE S256');
+  assertEqual(url.searchParams.get('state'), pkce.state, 'authorization URL includes state');
+
+  console.log('Smoke test passed: auth import, PKCE, JWT parsing, refresh decisions, and 401 retry are correct.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });

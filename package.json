@@ -85,6 +85,10 @@
         "title": "Codex: Refresh Account Limits"
       },
       {
+        "command": "codexForCopilot.auth.signInWithChatGPT",
+        "title": "Codex for Copilot: Sign in with ChatGPT"
+      },
+      {
         "command": "codexForCopilot.auth.importAuthJson",
         "title": "Codex for Copilot: Import Codex auth.json"
       },
@@ -126,8 +130,8 @@
             "secretStorage"
           ],
           "enumDescriptions": [
-            "Prefer ~/.codex/auth.json when present, then fall back to the API key saved in VS Code SecretStorage.",
-            "Only use credentials from ~/.codex/auth.json.",
+            "Prefer ChatGPT sign-in, then a read-only ~/.codex/auth.json fallback, then the API key saved in VS Code SecretStorage.",
+            "Only use ChatGPT sign-in or the read-only ~/.codex/auth.json fallback.",
             "Only use the API key saved with 'Codex: Set API Key'."
           ],
           "description": "Select which credential source the provider uses."

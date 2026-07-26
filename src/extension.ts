@@ -17,6 +17,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, outputChannel, authManager);
   const provider = new CodexModelProvider(context, outputChannel, undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
 
+  context.subscriptions.push(authManager, authManager.onDidChangeAuth(() => {
+    provider.handleAuthenticationChanged();
+    void accountUsageStatusBar.refresh();
+  }));
+
   context.subscriptions.push(
     outputChannel,
     accountUsageStatusBar,
@@ -71,10 +76,18 @@ export function activate(context: vscode.ExtensionContext): void {
       await authManager.signOut();
       vscode.window.showInformationMessage('Codex credentials removed.');
     }),
+    vscode.commands.registerCommand('codexForCopilot.auth.signInWithChatGPT', async () => {
+      try {
+        await authManager.signInWithBrowser();
+        vscode.window.showInformationMessage('Signed in with ChatGPT.');
+      } catch (error) {
+        vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ChatGPT sign-in failed.');
+      }
+    }),
     vscode.commands.registerCommand('codexForCopilot.auth.showStatus', async () => {
       const status = await authManager.getStatus();
       if (!status.authenticated) {
-        vscode.window.showInformationMessage('Codex credentials are not imported.');
+        vscode.window.showInformationMessage('Not signed in.');
         return;
       }
       const details = [
@@ -83,7 +96,7 @@ export function activate(context: vscode.ExtensionContext): void {
         status.accessTokenExpiresAt ? `Access token expires: ${new Date(status.accessTokenExpiresAt).toLocaleString()}` : undefined,
         status.lastRefresh ? `Last refresh: ${status.lastRefresh}` : undefined
       ].filter(Boolean).join('\n');
-      vscode.window.showInformationMessage(details || 'Codex credentials are imported.');
+      vscode.window.showInformationMessage(details || 'Signed in with ChatGPT.');
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.signInWithDeviceCode', async () => {
       await authManager.signInWithDeviceCode();
@@ -94,11 +107,13 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['Import Codex auth.json', 'Show Auth Status', 'Sign Out', 'Sign in with Device Code', 'Refresh Account Limits', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json (Legacy)', 'Refresh Account Limits', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex' }
       );
 
-      if (action === 'Import Codex auth.json') {
+      if (action === 'Sign in with ChatGPT') {
+        await vscode.commands.executeCommand('codexForCopilot.auth.signInWithChatGPT');
+      } else if (action === 'Import Codex auth.json (Legacy)') {
         await vscode.commands.executeCommand('codexForCopilot.auth.importAuthJson');
       } else if (action === 'Show Auth Status') {
         await vscode.commands.executeCommand('codexForCopilot.auth.showStatus');

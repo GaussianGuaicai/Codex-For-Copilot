@@ -50,14 +50,13 @@ export async function clearApiKey(context: vscode.ExtensionContext): Promise<voi
 async function readCodexAuthCredentials(authManager?: CodexAuthManager): Promise<ApiCredentials | undefined> {
   if (authManager) {
     try {
-      const status = await authManager.getStatus();
-      const accessToken = await authManager.getAccessToken();
+      const snapshot = await authManager.getCredentialSnapshot();
       const headers: Record<string, string> = { 'User-Agent': DEFAULT_USER_AGENT };
-      if (status.accountId?.trim()) {
-        headers['ChatGPT-Account-ID'] = status.accountId.trim();
+      if (snapshot.accountId?.trim()) {
+        headers['ChatGPT-Account-ID'] = snapshot.accountId.trim();
       }
       return {
-        apiKey: accessToken,
+        apiKey: snapshot.accessToken,
         headers,
         source: 'codexAuth',
         authManager,
