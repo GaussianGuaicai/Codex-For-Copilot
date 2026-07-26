@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.3.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.2...v1.3.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* **models:** support catalog reasoning efforts ([f209b9d](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/f209b9d3e9afd3483050a52fc49e4232e63dd980))
+
 ## [1.3.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.1...v1.3.2) (2026-07-25)
 
 
