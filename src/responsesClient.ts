@@ -198,7 +198,7 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
   });
 
   try {
-    const client = createOpenAIClient(options, headers);
+    const client = createOpenAIClient(options);
     return codexConnectionManager.preconnect(scope, client, createResponsesWsOptions(headers, options.baseURL), {
       onConnected: options.onConnected,
       onError: options.onError
@@ -473,7 +473,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
   }
 
   const headers = buildDynamicHeaders(options, 'websocket');
-  const client = createOpenAIClient(options, headers);
+  const client = createOpenAIClient(options);
   let managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
   options.onWebSocketSession?.({ reused: managed.reused, origin: managed.origin });
   const { request, metrics } = buildResponsesCreateRequest(options);
@@ -769,7 +769,7 @@ function evictReusableWebSocketSessions(): void {
 
 function createOpenAIClient(
   options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
-  defaultHeaders = options.headers
+  defaultHeaders?: Record<string, string>
 ): OpenAI {
   const customFetch = createCodexFetchAdapter({
     endpointKey: options.compatibilityProfile?.endpointKey ?? normalizeBaseURL(options.baseURL),
@@ -787,7 +787,7 @@ function createOpenAIClient(
   return new OpenAI({
     apiKey: options.apiKey,
     baseURL: normalizeBaseURL(options.baseURL),
-    defaultHeaders,
+    ...(defaultHeaders ? { defaultHeaders } : {}),
     fetch: customFetch,
     maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
     timeout: OPENAI_DEFAULT_TIMEOUT_MS

@@ -31,6 +31,34 @@ try {
     textVerbosity: 'medium'
   };
   const request = buildCodexResponsesRequest(base);
+  const compatibilityDefaultReasoningRequest = buildCodexResponsesRequest({
+    ...base,
+    reasoning: undefined,
+    tools: []
+  });
+  const standardRequest = buildCodexResponsesRequest({
+    ...base,
+    compatibilityEnabled: false,
+    reasoning: undefined,
+    tools: []
+  });
+  const continuationInput = [
+    { type: 'message', id: '', role: 'assistant', content: 'empty id' },
+    { type: 'message', id: 'legacy-message-id', role: 'assistant', content: 'legacy id' },
+    { type: 'message', id: 'msg_valid123', role: 'assistant', content: 'valid message id' },
+    { type: 'function_call', id: 'fc_valid123', call_id: 'call_valid', name: 'read', arguments: '{}' },
+    { type: 'function_call_output', id: 'legacy-output-id', call_id: 'call_valid', output: 'result' }
+  ];
+  const sanitizedHttpRequest = buildCodexResponsesRequest({
+    ...base,
+    input: continuationInput,
+    tools: []
+  });
+  const sanitizedWebSocketEvent = buildCodexResponsesWebSocketEvent({
+    ...base,
+    input: continuationInput,
+    tools: []
+  });
   const appended = buildCodexResponsesRequest({ ...base, input: [...base.input, { type: 'message', role: 'user', content: 'next' }] });
   const event = buildCodexResponsesWebSocketEvent(base, false);
   resetCodexToolSchemaCache();
@@ -41,6 +69,21 @@ try {
   assertEqual(request.parallel_tool_calls, true, 'parallel tools');
   assertEqual(request.instructions, base.instructions, 'configured instructions preserved with tools');
   assertEqual(request.include[0], 'reasoning.encrypted_content', 'encrypted reasoning include');
+  assertEqual(JSON.stringify(request.reasoning), JSON.stringify({ effort: 'high', summary: 'auto' }), 'explicit compatibility reasoning preserved');
+  assertEqual(JSON.stringify(compatibilityDefaultReasoningRequest.reasoning), JSON.stringify({ effort: 'medium', summary: 'auto' }), 'compatibility default reasoning is normalized');
+  assertEqual(compatibilityDefaultReasoningRequest.include[0], 'reasoning.encrypted_content', 'compatibility default reasoning requests encrypted content');
+  assertEqual('reasoning' in standardRequest, false, 'standard request does not add default reasoning');
+  assertEqual('include' in standardRequest, false, 'standard request does not request encrypted reasoning');
+  assertEqual('id' in sanitizedHttpRequest.input[0], false, 'HTTP continuation omits empty response item id');
+  assertEqual('id' in sanitizedHttpRequest.input[1], false, 'HTTP continuation omits legacy response item id');
+  assertEqual(sanitizedHttpRequest.input[2].id, 'msg_valid123', 'HTTP continuation preserves valid response item id');
+  assertEqual(sanitizedHttpRequest.input[3].id, 'fc_valid123', 'HTTP continuation preserves valid function call item id');
+  assertEqual(sanitizedHttpRequest.input[3].call_id, 'call_valid', 'HTTP continuation preserves call id');
+  assertEqual('id' in sanitizedHttpRequest.input[4], false, 'HTTP continuation omits legacy tool output item id');
+  assertEqual(sanitizedHttpRequest.input[4].call_id, 'call_valid', 'HTTP continuation preserves tool output call id');
+  assertEqual('id' in sanitizedWebSocketEvent.input[1], false, 'WebSocket continuation omits legacy response item id');
+  assertEqual(sanitizedWebSocketEvent.input[2].id, 'msg_valid123', 'WebSocket continuation preserves valid response item id');
+  assertEqual(sanitizedWebSocketEvent.input[4].call_id, 'call_valid', 'WebSocket continuation preserves tool output call id');
   assertEqual(event.generate, false, 'prewarm generate flag');
   assertEqual('stream' in event, false, 'WebSocket stream omitted');
   assertEqual(areCodexRequestsIncrementallyCompatible(request, appended), true, 'input ignored by request fingerprint');

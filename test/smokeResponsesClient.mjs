@@ -57,6 +57,7 @@ try {
   await runManagedWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketToolOutputContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketSequentialReuseSmokeTest(streamResponseText);
+  await runWebSocketConcurrentReuseIsolationSmokeTest(streamResponseText);
 
   console.log('Smoke tests passed: HTTP, auto fallback, and WebSocket transports are correct.');
 } finally {
@@ -1173,6 +1174,155 @@ async function runWebSocketSequentialReuseSmokeTest(streamResponseText) {
   }
 }
 
+async function runWebSocketConcurrentReuseIsolationSmokeTest(streamResponseText) {
+  let upgradeCount = 0;
+  let initialSocket;
+  let releaseFirstContinuation = () => {};
+  let resolveFirstContinuationStarted;
+  const firstContinuationStarted = new Promise((resolve) => {
+    resolveFirstContinuationStarted = resolve;
+  });
+  const connections = [];
+  const receivedEvents = [];
+  const sessionEvents = [];
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    upgradeCount += 1;
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    connections.push(webSocket);
+
+    webSocket.on('message', (data) => {
+      const event = JSON.parse(data.toString('utf8'));
+      const connectionIndex = connections.indexOf(webSocket);
+      receivedEvents.push({ connectionIndex, event });
+
+      if (!event.previous_response_id) {
+        initialSocket = webSocket;
+        webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_concurrent_base', status: 'in_progress' } }));
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'base' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_concurrent_base', status: 'completed' } }));
+        return;
+      }
+
+      const continuationCount = receivedEvents.filter((received) => received.event.previous_response_id).length;
+      if (webSocket === initialSocket && continuationCount === 1) {
+        webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_concurrent_first', status: 'in_progress' } }));
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'first held' }));
+        releaseFirstContinuation = () => {
+          webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: ' first released' }));
+          webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_concurrent_first', status: 'completed' } }));
+          releaseFirstContinuation = () => {};
+        };
+        resolveFirstContinuationStarted();
+        return;
+      }
+
+      webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_ws_concurrent_second', status: 'in_progress' } }));
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'second isolated' }));
+      webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ws_concurrent_second', status: 'completed' } }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  let firstContinuationPromise;
+  let secondContinuationPromise;
+  try {
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+    const baseDeltas = [];
+    const firstDeltas = [];
+    const secondDeltas = [];
+    const requestOptions = (label, input, deltas, previousResponseId) => ({
+      baseURL,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'websocket',
+      ...(previousResponseId ? { previousResponseId } : {}),
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: input }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (text) => deltas.push(text),
+      onWebSocketSession: (event) => {
+        sessionEvents.push({ label, reused: event.reused });
+      }
+    });
+
+    await streamResponseText(requestOptions('base', 'Establish reusable session', baseDeltas));
+
+    let firstContinuationSettled = false;
+    firstContinuationPromise = streamResponseText(requestOptions(
+      'first continuation',
+      'Hold this continuation',
+      firstDeltas,
+      'resp_ws_concurrent_base'
+    ));
+    firstContinuationPromise.then(
+      () => {
+        firstContinuationSettled = true;
+      },
+      () => {
+        firstContinuationSettled = true;
+      }
+    );
+    await waitForPromise(firstContinuationStarted, 'first concurrent continuation');
+
+    secondContinuationPromise = streamResponseText(requestOptions(
+      'second continuation',
+      'Run concurrently',
+      secondDeltas,
+      'resp_ws_concurrent_base'
+    ));
+    await waitForPromise(secondContinuationPromise, 'second concurrent continuation');
+
+    assertEqual(firstContinuationSettled, false, 'first continuation remains open until released');
+    assertEqual(baseDeltas.join(''), 'base', 'concurrent reuse base output');
+    assertEqual(firstDeltas.join(''), 'first held', 'held continuation receives no concurrent delta');
+    assertEqual(secondDeltas.join(''), 'second isolated', 'second continuation receives isolated output');
+    assertEqual(upgradeCount, 2, 'concurrent reuse upgrade count');
+    assertEqual(connections.length, 2, 'concurrent reuse connection count');
+    assertEqual(connections[0] === connections[1], false, 'concurrent continuations use distinct sockets');
+
+    releaseFirstContinuation();
+    await waitForPromise(firstContinuationPromise, 'released first continuation');
+
+    const continuationEvents = receivedEvents.filter((received) => received.event.previous_response_id);
+    assertEqual(continuationEvents.length, 2, 'concurrent continuation message count');
+    assertEqual(continuationEvents[0].connectionIndex, 0, 'first continuation uses reusable socket');
+    assertEqual(continuationEvents[1].connectionIndex, 1, 'second continuation uses isolated socket');
+    assertEqual(continuationEvents[0].event.previous_response_id, 'resp_ws_concurrent_base', 'first concurrent previous response id');
+    assertEqual(continuationEvents[1].event.previous_response_id, 'resp_ws_concurrent_base', 'second concurrent previous response id');
+    assertEqual(firstDeltas.join(''), 'first held first released', 'released continuation receives only its output');
+    assertEqual(secondDeltas.join(''), 'second isolated', 'second continuation remains isolated after release');
+    assertEqual(JSON.stringify(sessionEvents), JSON.stringify([
+      { label: 'base', reused: false },
+      { label: 'first continuation', reused: true },
+      { label: 'second continuation', reused: false }
+    ]), 'concurrent reuse session states');
+  } finally {
+    releaseFirstContinuation();
+    for (const webSocket of connections) {
+      webSocket.terminate();
+    }
+    const pendingRequests = [firstContinuationPromise, secondContinuationPromise].filter(Boolean);
+    await Promise.allSettled(pendingRequests.map((request, index) => (
+      waitForPromise(request, `concurrent cleanup request ${index + 1}`)
+    )));
+    webSocketServer.close();
+    server.close();
+  }
+}
+
 function createHeaders() {
   return {
     'User-Agent': 'local.codex-for-copilot/1.0.1 Codex-Extension',
@@ -1185,6 +1335,20 @@ function createCancellationToken() {
     isCancellationRequested: false,
     onCancellationRequested: () => ({ dispose() {} })
   };
+}
+
+async function waitForPromise(promise, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out.`)), 5_000);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function captureEnvironment(names) {
