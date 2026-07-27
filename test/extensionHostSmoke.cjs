@@ -8,6 +8,9 @@ async function run() {
   const extensionId = `${manifest.publisher}.${manifest.name}`.toLowerCase();
   const extension = vscode.extensions.getExtension(extensionId);
   assert(extension, 'Extension is not registered in VS Code.');
+  const authenticationProvider = manifest.contributes.authentication?.find((provider) => provider.id === 'codex-for-copilot');
+  assert(authenticationProvider, 'Codex authentication provider is not declared in the extension manifest.');
+  assert.strictEqual(authenticationProvider.label, 'Codex for Copilot');
 
   let modelDiscoveryRequestCount = 0;
   let responseRequestCount = 0;

@@ -52,6 +52,15 @@
     "typescript": "^5.9.2"
   },
   "contributes": {
+    "authentication": [
+      {
+        "id": "codex-for-copilot",
+        "label": "Codex for Copilot",
+        "authorizationServerGlobs": [
+          "https://auth.openai.com/*"
+        ]
+      }
+    ],
     "languageModelChatProviders": [
       {
         "vendor": "codex-for-copilot",

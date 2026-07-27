@@ -16,12 +16,12 @@ export interface CodexOAuthCompatibilityProfile {
 export const CODEX_OAUTH: CodexOAuthCompatibilityProfile = {
   issuer: 'https://auth.openai.com',
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
-  authorizeUrl: 'https://auth.openai.com/authorize',
+  authorizeUrl: 'https://auth.openai.com/oauth/authorize',
   tokenUrl: 'https://auth.openai.com/oauth/token',
   revokeUrl: 'https://auth.openai.com/oauth/revoke',
   deviceCodeUrl: 'https://auth.openai.com/api/accounts/deviceauth/usercode',
   deviceTokenUrl: 'https://auth.openai.com/api/accounts/deviceauth/token',
   loopbackPorts: [1455, 1457],
   callbackPath: '/auth/callback',
-  scopes: 'openid profile email offline_access'
+  scopes: 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 };

@@ -14,13 +14,30 @@ export class CodexAuthManager implements vscode.Disposable {
   private permanentFailureRevision: string | undefined;
   private readonly changes = new vscode.EventEmitter<CodexAuthChangeEvent>();
   readonly onDidChangeAuth = this.changes.event;
-  constructor(private readonly store: CodexSecretStore, private readonly lock: CodexAuthLock, private readonly oauth = new CodexOAuthClient()) {}
+  constructor(
+    private readonly store: CodexSecretStore,
+    private readonly lock: CodexAuthLock,
+    private readonly oauth = new CodexOAuthClient(),
+    private readonly log?: (message: string, details?: Record<string, unknown>) => void
+  ) {}
   dispose(): void { this.changes.dispose(); }
-  async getStatus(): Promise<CodexAuthStatus> { const record = await this.store.getCredential(); if (!record) return { authenticated: false }; const snapshot = snapshotFor(record); return { authenticated: true, source: record.source, email: record.source === 'extensionOAuth' ? record.email : record.email, accountId: snapshot.accountId, accessTokenExpiresAt: snapshot.expiresAt, lastRefresh: record.source === 'extensionOAuth' ? record.lastRefreshAt : record.loadedAt, reauthRequired: this.permanentFailureRevision === snapshot.revision }; }
+  async getStatus(): Promise<CodexAuthStatus> { const record = await this.store.getCredential(); if (!record) return { authenticated: false }; const snapshot = snapshotFor(record); return { authenticated: true, source: record.source, email: record.email, accountId: snapshot.accountId, accessTokenExpiresAt: snapshot.expiresAt, lastRefresh: record.source === 'extensionOAuth' ? record.lastRefreshAt : record.loadedAt, reauthRequired: this.permanentFailureRevision === snapshot.revision }; }
   async getCredentialSnapshot(): Promise<CodexCredentialSnapshot> { const record = await this.store.getCredential(); if (!record) throw new AuthRequiredError(); if (record.source === 'extensionOAuth') await this.refreshIfNeeded(); const latest = await this.store.getCredential(); if (!latest) throw new AuthRequiredError(); return snapshotFor(latest); }
   async getAccessToken(): Promise<string> { return (await this.getCredentialSnapshot()).accessToken; }
   async importAuthJson(rawJson: string): Promise<void> { const bundle = parseCodexAuthJson(rawJson); const payload = safeDecode(bundle.tokens.id_token); await this.store.setLegacyCredential({ schemaVersion: 2, source: 'legacyCodexFile', revision: randomRevision(), accessToken: bundle.tokens.access_token, accountId: bundle.tokens.account_id, email: stringValue(payload.email), accessTokenExpiresAt: getJwtExpiration(bundle.tokens.access_token), loadedAt: bundle.last_refresh ?? new Date().toISOString() }); this.fire('signedIn'); }
-  async signInWithBrowser(): Promise<void> { const tokens = await signInWithLoopback(this.oauth, (uri) => vscode.env.openExternal(vscode.Uri.parse(uri))); await this.completeSignIn(tokens); }
+  async signInWithBrowser(): Promise<void> {
+    this.log?.('ChatGPT sign-in started');
+    await signInWithLoopback(
+      this.oauth,
+      (uri) => vscode.env.openExternal(vscode.Uri.parse(uri)),
+      undefined,
+      (stage, port) => this.log?.('ChatGPT sign-in stage', { stage, port }),
+      async (tokens) => {
+        await this.completeSignIn(tokens);
+        this.log?.('ChatGPT credentials stored');
+      }
+    );
+  }
   async signInWithDeviceCode(): Promise<void> { await this.completeSignIn(await signInWithDeviceCode(this.oauth)); }
   async refreshIfNeeded(reason: 'proactive' | 'unauthorized' = 'proactive'): Promise<CodexCredentialSnapshot> {
     if (!this.refreshPromise) this.refreshPromise = this.doRefresh(reason).finally(() => { this.refreshPromise = undefined; });

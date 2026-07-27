@@ -3,6 +3,7 @@ import { CodexAccountUsageStatusBar } from './accountUsageStatusBar';
 import { CodexModelProvider } from './provider';
 import { CodexAuthLock } from './auth/codexAuthLock';
 import { CodexAuthManager } from './auth/codexAuthManager';
+import { CodexAuthenticationProvider, CODEX_AUTHENTICATION_PROVIDER_ID } from './auth/codexAuthenticationProvider';
 import { CodexSecretStore } from './auth/codexSecretStore';
 import { InvalidAuthJsonError } from './auth/codexAuthTypes';
 import { clearApiKey, setApiKey } from './secrets';
@@ -12,8 +13,11 @@ export function activate(context: vscode.ExtensionContext): void {
   void vscode.workspace.fs.createDirectory(context.globalStorageUri);
   const authManager = new CodexAuthManager(
     new CodexSecretStore(context.secrets),
-    new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, 'codex-auth-refresh.lock'))
+    new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, 'codex-auth-refresh.lock')),
+    undefined,
+    (message, details) => outputChannel.info(message, details)
   );
+  const authenticationProvider = new CodexAuthenticationProvider(authManager);
   const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, outputChannel, authManager);
   const provider = new CodexModelProvider(context, outputChannel, undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
 
@@ -24,7 +28,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     outputChannel,
+    authenticationProvider,
     accountUsageStatusBar,
+    vscode.authentication.registerAuthenticationProvider(
+      CODEX_AUTHENTICATION_PROVIDER_ID,
+      'Codex for Copilot',
+      authenticationProvider,
+      { supportsMultipleAccounts: false }
+    ),
     vscode.lm.registerLanguageModelChatProvider('codex-for-copilot', provider),
     vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
       outputChannel.show(true);
@@ -81,6 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await authManager.signInWithBrowser();
         vscode.window.showInformationMessage('Signed in with ChatGPT.');
       } catch (error) {
+        outputChannel.error('ChatGPT sign-in failed', error);
         vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ChatGPT sign-in failed.');
       }
     }),
