@@ -80,6 +80,7 @@ export interface StreamResponseTextOptions {
   baseURL: string;
   apiKey: string;
   headers?: Record<string, string>;
+  authManager?: CodexAuthManager;
   transport?: 'auto' | 'http' | 'websocket';
   compatibilityProfile?: CodexCompatibilityProfile;
   identity?: CodexRequestIdentity;
@@ -572,6 +573,22 @@ async function streamCodexResponseTextOverManagedWebSocket(
     } catch (error) {
       codexConnectionManager.closeThread(scope);
       const classified = classifyManagedWebSocketError(error, options);
+      if (attempt === 0 && !visibleActivity && options.authManager && isUnauthorizedError(error)) {
+        const currentSnapshot = await options.authManager.getCredentialSnapshot();
+        const snapshot = await options.authManager.recoverFromUnauthorized({
+          snapshotRevision: currentSnapshot.revision,
+          visibleActivity: false,
+          reason: 'websocketUnauthorized'
+        });
+        options.apiKey = snapshot.accessToken;
+        options.headers = {
+          ...options.headers,
+          ...(snapshot.accountId ? { 'ChatGPT-Account-ID': snapshot.accountId } : {})
+        };
+        managed = codexConnectionManager.getOrCreate(scope, createOpenAIClient(options), createResponsesWsOptions(buildDynamicHeaders(options, 'websocket'), options.baseURL));
+        options.onTransportMetrics?.({ retryReason: 'websocket_unauthorized_recovered' });
+        continue;
+      }
       if (attempt === 0 && !visibleActivity && /connection limit/i.test(classified.message)) {
         managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
         options.onTransportMetrics?.({ retryReason: 'websocket_connection_limit_reached' });
@@ -586,6 +603,12 @@ async function streamCodexResponseTextOverManagedWebSocket(
       throw classified;
     }
   }
+}
+
+function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof AuthenticationError
+    || error instanceof APIError && error.status === 401
+    || collectErrorMessages(error).some((message) => /\b401\b|unauthori[sz]ed|invalid api key/i.test(message));
 }
 
 function reportManagedWebSocketRequestMetrics(
@@ -766,10 +789,10 @@ function evictReusableWebSocketSessions(): void {
 }
 
 function createOpenAIClient(
-  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
+  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
   defaultHeaders?: Record<string, string>
 ): OpenAI {
-  const customFetch = createCodexFetchAdapter({
+  const compressedFetch = createCodexFetchAdapter({
     endpointKey: options.compatibilityProfile?.endpointKey ?? normalizeBaseURL(options.baseURL),
     compatibilityEnabled: options.compatibilityProfile?.enabled ?? false,
     compression: options.requestCompression ?? 'disabled',
@@ -782,6 +805,9 @@ function createOpenAIClient(
       responseStatus: observation.responseStatus
     })
   });
+  const customFetch: typeof fetch = options.authManager
+    ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch)
+    : compressedFetch;
   return new OpenAI({
     apiKey: options.apiKey,
     baseURL: normalizeBaseURL(options.baseURL),
