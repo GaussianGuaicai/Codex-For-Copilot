@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.4.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.3...v1.4.0) (2026-07-27)
+
+
+### Features
+
+* **auth:** add native ChatGPT OAuth sign-in ([ce83ec2](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/ce83ec2dc23dc0d7bc7c433f02a7081df755a863))
+* **auth:** add native ChatGPT OAuth sign-in ([8a65566](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/8a65566bfb2d53fa41028d66b8b4d09f9bf57125))
+
 ## [1.3.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.2...v1.3.3) (2026-07-26)
 
 
