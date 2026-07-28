@@ -11,6 +11,7 @@
 - `responsesClient.ts`: shared request builder and the HTTP/WebSocket transport facade for Responses streaming.
 - `convertMessages.ts`: conversion from VS Code chat messages into Responses input items.
 - `responseBranchStore.ts`: in-memory branch reuse cache keyed by normalized request envelope and transcript prefix.
+- `auth/codexAuthenticationProvider.ts`: bridges saved ChatGPT OAuth credentials into VS Code's Authentication session registry.
 - `codexWebSocketSession.ts`: serializes managed WebSocket streams and preserves safe continuation state.
 - `models.ts`: upstream model discovery and provider model shaping.
 - `codexModelCache.ts`: bounded stale-while-revalidate cache for discovered provider models.
@@ -22,6 +23,9 @@
 
 - Keep provider-visible callback semantics transport-agnostic: HTTP and WebSocket must report the same deltas and terminal events.
 - Keep ChatGPT Codex compatibility logic centralized in `responsesClient.ts`, `config.ts`, and `secrets.ts`; do not duplicate header or base URL normalization across call sites.
+- Native ChatGPT OAuth credentials must be exposed through the `codex-for-copilot` VS Code AuthenticationProvider and emit added, changed, or removed session events when credential state changes.
+- The loopback OAuth URL uses `localhost` but follows the upstream registered flow by binding `127.0.0.1`; callback responses must close browser connections, and server cleanup must never block credential persistence.
+- Keep the authorization endpoint and scopes synchronized with `openai/codex` `codex-rs/login/src/server.rs`; the current endpoint is `/oauth/authorize`, not the legacy `/authorize` path.
 - Keep Responses tool conversion and request-field shaping in `codexRequestBuilder.ts`; transport code consumes its shared request output rather than maintaining a second conversion path.
 - WebSocket requests must send `response.create` payloads without the HTTP-only `stream` field.
 - When `transport` is `auto`, only fall back to HTTP for transport availability failures, not for successful in-band model responses.

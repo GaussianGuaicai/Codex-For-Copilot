@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { build } from 'esbuild';
 import { resolveTestTempDirectory } from './testTempDirectory.mjs';
@@ -11,6 +12,24 @@ const entryPath = join(tempDir, 'auth-entry.ts');
 const repoImport = (relativePath) => JSON.stringify(join(process.cwd(), relativePath));
 const require = createRequire(import.meta.url);
 const moduleLoad = Module._load;
+const nativeFetch = globalThis.fetch;
+class EventEmitter {
+  constructor() {
+    this.listeners = new Set();
+    this.event = (listener) => {
+      this.listeners.add(listener);
+      return { dispose: () => this.listeners.delete(listener) };
+    };
+  }
+  fire(value) {
+    for (const listener of this.listeners) {
+      listener(value);
+    }
+  }
+  dispose() {
+    this.listeners.clear();
+  }
+}
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === 'vscode') {
     return {
@@ -26,7 +45,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
         }
       },
       window: { showErrorMessage: async () => undefined, showInformationMessage: async () => undefined },
-      commands: { executeCommand: async () => undefined }
+      commands: { executeCommand: async () => undefined },
+      EventEmitter
     };
   }
   return moduleLoad.call(this, request, parent, isMain);
@@ -37,6 +57,10 @@ export * from ${repoImport('src/auth/codexJwt')};
 export * from ${repoImport('src/auth/codexAuthManager')};
 export * from ${repoImport('src/auth/codexAuthRequest')};
 export * from ${repoImport('src/auth/codexAuthLock')};
+export * from ${repoImport('src/auth/codexPkce')};
+export * from ${repoImport('src/auth/codexOAuthClient')};
+export * from ${repoImport('src/auth/codexAuthenticationProvider')};
+export * from ${repoImport('src/auth/codexLoopbackLogin')};
 `));
 
 await build({
@@ -92,12 +116,13 @@ try {
 
   let calls = 0;
   const manager = {
-    async getAccessToken() {
+    async getCredentialSnapshot() {
       calls += 1;
-      return calls === 1 ? 'old-token' : 'new-token';
+      return { accessToken: calls === 1 ? 'old-token' : 'new-token', accountId: 'acct_1', revision: calls === 1 ? 'old' : 'new' };
     },
-    async refreshAfter401() {
+    async recoverFromUnauthorized() {
       calls += 10;
+      return { accessToken: 'new-token', accountId: 'acct_1', revision: 'new' };
     }
   };
   const seenAuth = [];
@@ -108,8 +133,118 @@ try {
   const response = await auth.codexFetch(manager, 'http://example.test', {});
   assertEqual(response.status, 200, '401 retry succeeds');
   assertEqual(JSON.stringify(seenAuth), JSON.stringify(['Bearer old-token', 'Bearer new-token']), 'retry uses refreshed token');
+  globalThis.fetch = nativeFetch;
 
-  console.log('Smoke test passed: auth import, JWT parsing, refresh decisions, and 401 retry are correct.');
+  const pkce = auth.generateCodexPkce();
+  assertEqual(pkce.verifier.length >= 43, true, 'PKCE verifier has RFC-compliant length');
+  assertEqual(pkce.challenge.length >= 43, true, 'PKCE challenge has RFC-compliant length');
+  assertEqual(auth.statesMatch(pkce.state, pkce.state), true, 'PKCE state matches itself');
+  assertEqual(auth.statesMatch(pkce.state, 'incorrect'), false, 'PKCE state rejects mismatch');
+  const oauth = new auth.CodexOAuthClient(async () => new Response(JSON.stringify({ id_token: futureToken, access_token: 'access', refresh_token: 'refresh' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  const url = new URL(oauth.createAuthorizationUrl('http://localhost:1455/auth/callback', pkce.verifier, pkce.challenge, pkce.state));
+  assertEqual(url.origin + url.pathname, 'https://auth.openai.com/oauth/authorize', 'authorization URL matches Codex OAuth endpoint');
+  assertEqual(url.searchParams.get('scope'), 'openid profile email offline_access api.connectors.read api.connectors.invoke', 'authorization URL matches Codex OAuth scopes');
+  assertEqual(url.searchParams.get('code_challenge_method'), 'S256', 'authorization URL uses PKCE S256');
+  assertEqual(url.searchParams.get('state'), pkce.state, 'authorization URL includes state');
+
+  const callbackPort = await findAvailablePort();
+  const loopbackClient = {
+    createAuthorizationUrl(redirectUri, _verifier, _challenge, state) {
+      const callback = new URL(redirectUri);
+      callback.searchParams.set('state', state);
+      return callback.toString();
+    },
+    async exchangeAuthorizationCode(code) {
+      assertEqual(code, 'authorization-code', 'IPv6 callback authorization code');
+      return { id_token: futureToken, access_token: 'access', refresh_token: 'refresh' };
+    }
+  };
+  const loopbackStages = [];
+  let callbackConnection;
+  let credentialsPersisted = false;
+  let callbackPromise;
+  const loopbackTokens = await auth.signInWithLoopback(loopbackClient, async (redirectUri) => {
+    const callback = new URL(redirectUri);
+    callbackPromise = fetch(`http://127.0.0.1:${callback.port}${callback.pathname}?code=authorization-code&state=${callback.searchParams.get('state')}`).then(async (response) => {
+      callbackConnection = response.headers.get('connection');
+      assertEqual(response.status, 200, 'callback reports success after credentials are persisted');
+      assertEqual(credentialsPersisted, true, 'callback success waits for credential persistence');
+    });
+    return true;
+  }, { loopbackPorts: [callbackPort], callbackPath: '/auth/callback' }, (stage) => loopbackStages.push(stage), async () => {
+    credentialsPersisted = true;
+  });
+  await callbackPromise;
+  assertEqual(loopbackTokens.access_token, 'access', 'loopback callback completes OAuth sign-in');
+  assertEqual(callbackConnection, 'close', 'callback response closes the browser connection');
+  assertEqual(loopbackStages.at(-1), 'completed', 'loopback sign-in completes before server cleanup');
+
+  const failedCallbackPort = await findAvailablePort();
+  let failedCallbackPromise;
+  const failedLoopbackClient = {
+    createAuthorizationUrl: loopbackClient.createAuthorizationUrl,
+    async exchangeAuthorizationCode() {
+      throw new Error('token exchange failed');
+    }
+  };
+  await assertRejects(() => auth.signInWithLoopback(failedLoopbackClient, async (redirectUri) => {
+    const callback = new URL(redirectUri);
+    failedCallbackPromise = fetch(`http://127.0.0.1:${callback.port}${callback.pathname}?code=authorization-code&state=${callback.searchParams.get('state')}`).then((response) => {
+      assertEqual(response.status, 500, 'callback reports token exchange failure');
+    });
+    return true;
+  }, { loopbackPorts: [failedCallbackPort], callbackPath: '/auth/callback' }), 'token exchange failure rejects loopback sign-in');
+  await failedCallbackPromise;
+
+  const authChanges = new EventEmitter();
+  let signedInSnapshot;
+  const fakeAuthManager = {
+    onDidChangeAuth: authChanges.event,
+    async getStatus() {
+      return signedInSnapshot
+        ? { authenticated: true, email: 'user@example.com' }
+        : { authenticated: false };
+    },
+    async getCredentialSnapshot() {
+      if (!signedInSnapshot) {
+        throw new Error('not signed in');
+      }
+      return signedInSnapshot;
+    },
+    async signInWithBrowser() {
+      signedInSnapshot = {
+        source: 'extensionOAuth',
+        accessToken: 'initial-access-token',
+        accountId: 'acct_1',
+        revision: 'first',
+        refreshable: true
+      };
+      authChanges.fire({ reason: 'signedIn' });
+    },
+    async signOut() {
+      signedInSnapshot = undefined;
+      authChanges.fire({ reason: 'signedOut' });
+    }
+  };
+  const authenticationProvider = new auth.CodexAuthenticationProvider(fakeAuthManager);
+  const sessionChanges = [];
+  authenticationProvider.onDidChangeSessions((event) => sessionChanges.push(event));
+  assertEqual((await authenticationProvider.getSessions(undefined, {})).length, 0, 'unauthenticated provider has no sessions');
+  const session = await authenticationProvider.createSession(['openid'], {});
+  await flushEvents();
+  assertEqual(session.account.id, 'acct_1', 'session uses Codex account ID');
+  assertEqual(sessionChanges[0].added[0].id, session.id, 'sign-in adds a VS Code session');
+  signedInSnapshot = { ...signedInSnapshot, accessToken: 'refreshed-access-token', revision: 'second' };
+  authChanges.fire({ reason: 'tokensRefreshed' });
+  await flushEvents();
+  assertEqual(sessionChanges[1].changed[0].accessToken, 'refreshed-access-token', 'token refresh updates the VS Code session');
+  await authenticationProvider.removeSession(session.id);
+  await flushEvents();
+  assertEqual(sessionChanges[2].removed[0].id, session.id, 'sign-out removes the VS Code session');
+  await assertRejects(() => authenticationProvider.createSession(['unsupported-scope'], {}), 'unsupported authentication scope rejected');
+  authenticationProvider.dispose();
+
+  console.log('Smoke test passed: auth import, PKCE, loopback completion, JWT parsing, refresh decisions, 401 retry, and VS Code authentication sessions are correct.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
@@ -132,4 +267,25 @@ function assertThrows(fn, label) {
     return;
   }
   throw new Error(`${label}: expected throw`);
+}
+
+async function assertRejects(fn, label) {
+  try {
+    await fn();
+  } catch {
+    return;
+  }
+  throw new Error(`${label}: expected rejection`);
+}
+
+async function flushEvents() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function findAvailablePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => server.listen(0, '127.0.0.1').once('listening', resolve).once('error', reject));
+  const { port } = server.address();
+  await new Promise((resolve) => server.close(resolve));
+  return port;
 }

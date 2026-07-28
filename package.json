@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -52,6 +52,15 @@
     "typescript": "^5.9.2"
   },
   "contributes": {
+    "authentication": [
+      {
+        "id": "codex-for-copilot",
+        "label": "Codex for Copilot",
+        "authorizationServerGlobs": [
+          "https://auth.openai.com/*"
+        ]
+      }
+    ],
     "languageModelChatProviders": [
       {
         "vendor": "codex-for-copilot",
@@ -83,6 +92,10 @@
       {
         "command": "codexModelProvider.refreshAccountLimits",
         "title": "Codex: Refresh Account Limits"
+      },
+      {
+        "command": "codexForCopilot.auth.signInWithChatGPT",
+        "title": "Codex for Copilot: Sign in with ChatGPT"
       },
       {
         "command": "codexModelProvider.enableNativeToolSearch",
@@ -134,8 +147,8 @@
             "secretStorage"
           ],
           "enumDescriptions": [
-            "Prefer ~/.codex/auth.json when present, then fall back to the API key saved in VS Code SecretStorage.",
-            "Only use credentials from ~/.codex/auth.json.",
+            "Prefer ChatGPT sign-in, then a read-only ~/.codex/auth.json fallback, then the API key saved in VS Code SecretStorage.",
+            "Only use ChatGPT sign-in or the read-only ~/.codex/auth.json fallback.",
             "Only use the API key saved with 'Codex: Set API Key'."
           ],
           "description": "Select which credential source the provider uses."

@@ -192,6 +192,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     );
   }
 
+  handleAuthenticationChanged(): void {
+    disposeReusableResponsesWebSockets();
+    resetCodexFetchCapabilities();
+    this.lastConnectionConfigurationKey = undefined;
+    this.modelCache.clear();
+    this.modelInfoChangedEmitter.fire();
+  }
+
   async provideLanguageModelChatInformation(
     options: vscode.PrepareLanguageModelChatModelOptions,
     token: vscode.CancellationToken
@@ -605,6 +613,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         baseURL: config.baseURL,
         apiKey: credentials.apiKey,
         headers: credentials.headers,
+        authManager: credentials.authManager,
         transport: config.transport,
         compatibilityProfile,
         identity: requestIdentity,

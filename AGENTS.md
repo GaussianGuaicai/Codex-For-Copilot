@@ -13,6 +13,8 @@ The extension source lives in [`src/`](src/). Key modules are:
 - `secrets.ts`: credential selection across the Codex auth manager, `~/.codex/auth.json`, and SecretStorage
 - `auth/`: imported Codex credential storage, refresh, locking, JWT parsing, and request authentication
 
+The extension manifest declares the `codex-for-copilot` AuthenticationProvider under `contributes.authentication`; its ID and label must match the runtime registration in `src/extension.ts`.
+
 Compiled output is written to `out/` and should be treated as build artifacts. Tests live in `test/`. Workspace debug helpers are in `.vscode/`.
 
 Transport-related constraints that must not break:
