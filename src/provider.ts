@@ -46,6 +46,7 @@ import {
 } from './nativeToolSearch/nativeToolCapabilities';
 import { hasVirtualToolPlaceholder } from './nativeToolSearch/nativeToolPolicy';
 import { buildCanonicalReplayInput, createCanonicalReplayRequest } from './nativeToolSearch/nativeToolReplay';
+import { summarizeNativeToolSearchItem } from './nativeToolSearch/nativeToolLogging';
 import { StreamPresenter } from './streamPresenter';
 import {
   CodexModelCache,
@@ -330,7 +331,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           return [{
             name: tool.name,
             functionCount: tool.tools.length,
-            deferredFunctionCount: tool.tools.filter((nestedTool) => nestedTool.defer_loading === true).length
+            deferredFunctionCount: tool.tools.filter((nestedTool) => nestedTool.defer_loading === true).length,
+            // Names make a private/workspace namespace auditable without exposing
+            // its schemas, arguments, or tool results in the extension log.
+            functionNames: tool.tools.map((nestedTool) => nestedTool.name)
           }];
         })
       });
@@ -734,6 +738,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onRawResponseItem: (item) => {
+          const toolSearchEvent = summarizeNativeToolSearchItem(item);
+          if (toolSearchEvent) {
+            this.outputChannel.info('native Tool Search event', toolSearchEvent);
+          }
           rawResponseItems.push(item);
         },
         onTurnState: (turnState) => {

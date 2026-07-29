@@ -63,8 +63,9 @@ function classify(name: string, extension: { id: string; displayName?: string } 
   if (category) {
     return { kind: 'vscode', category, key: `vscode:${category}`, description: `VS Code ${category} tools.` };
   }
-  const hash = shortHash(name);
-  return { kind: 'private', key: `private:${hash}`, description: 'Private or workspace-provided tools.' };
+  // The stable VS Code API does not expose a provider ID for every tool. Keep
+  // unresolved tools together so the catalog can still chunk them efficiently.
+  return { kind: 'private', key: 'private:workspace', description: 'Private or workspace-provided tools.' };
 }
 
 function readContributedToolNames(packageJSON: unknown): string[] {
