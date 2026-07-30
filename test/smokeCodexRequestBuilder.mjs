@@ -59,6 +59,15 @@ try {
     input: continuationInput,
     tools: []
   });
+  const replayInput = [
+    { type: 'message', role: 'user', content: 'earlier user input' },
+    { type: 'message', role: 'assistant', content: 'earlier assistant output' },
+    { type: 'function_call', call_id: 'call_replay', name: 'read', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'call_replay', output: 'result' }
+  ];
+  const replayRequest = buildCodexResponsesRequest({ ...base, input: replayInput, tools: [] });
+  const repeatedReplayRequest = buildCodexResponsesRequest({ ...base, input: replayInput, tools: [] });
+  const freshRequest = buildCodexResponsesRequest({ ...base, input: base.input, tools: [] });
   const appended = buildCodexResponsesRequest({ ...base, input: [...base.input, { type: 'message', role: 'user', content: 'next' }] });
   const event = buildCodexResponsesWebSocketEvent(base, false);
   resetCodexToolSchemaCache();
@@ -84,6 +93,12 @@ try {
   assertEqual('id' in sanitizedWebSocketEvent.input[1], false, 'WebSocket continuation omits legacy response item id');
   assertEqual(sanitizedWebSocketEvent.input[2].id, 'msg_valid123', 'WebSocket continuation preserves valid response item id');
   assertEqual(sanitizedWebSocketEvent.input[4].call_id, 'call_valid', 'WebSocket continuation preserves tool output call id');
+  assertEqual(replayRequest.input[0].id.startsWith('msg_'), true, 'full replay assigns an ID to historical user input');
+  assertEqual(replayRequest.input[1].id.startsWith('msg_'), true, 'full replay assigns an ID to client-created assistant input');
+  assertEqual(replayRequest.input[2].id.startsWith('fc_'), true, 'full replay assigns an ID to a client-created function call');
+  assertEqual(replayRequest.input[3].id.startsWith('fco_'), true, 'full replay assigns an ID to a client-created tool result');
+  assertEqual(JSON.stringify(replayRequest.input), JSON.stringify(repeatedReplayRequest.input), 'full replay item IDs are stable');
+  assertEqual('id' in freshRequest.input[0], false, 'ordinary fresh user input does not receive a fabricated ID');
   assertEqual(event.generate, false, 'prewarm generate flag');
   assertEqual('stream' in event, false, 'WebSocket stream omitted');
   assertEqual(areCodexRequestsIncrementallyCompatible(request, appended), true, 'input ignored by request fingerprint');

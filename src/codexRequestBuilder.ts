@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { ResponseCreateParamsStreaming, ToolChoiceOptions } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
@@ -87,7 +88,10 @@ export function buildCodexResponsesRequestWithMetrics(
   const request = {
     model: options.model,
     instructions: options.instructions,
-    input: sanitizeResponsesInputForOutbound(options.input),
+    input: sanitizeResponsesInputForOutbound(
+      options.input,
+      options.compatibilityEnabled && !options.previousResponseId && options.input.length > 1
+    ),
     stream: true,
     store: options.store ?? false,
     ...(options.previousResponseId ? { previous_response_id: options.previousResponseId } : {}),
@@ -187,8 +191,42 @@ function normalizeReasoningForRequest(options: CodexRequestBuilderOptions): Reas
   } as Reasoning;
 }
 
-function sanitizeResponsesInputForOutbound(input: readonly ResponsesInputMessage[]): ResponsesInputMessage[] {
-  return input.map((item) => sanitizeResponseItemIdForOutbound(item));
+function sanitizeResponsesInputForOutbound(
+  input: readonly ResponsesInputMessage[],
+  assignReplayIds: boolean
+): ResponsesInputMessage[] {
+  return input.map((item, index) => {
+    const sanitized = sanitizeResponseItemIdForOutbound(item);
+    const record = sanitized as unknown as Record<string, unknown>;
+    const original = item as unknown as Record<string, unknown>;
+    if (!assignReplayIds
+      || Object.prototype.hasOwnProperty.call(original, 'id')
+      || Object.prototype.hasOwnProperty.call(record, 'id')
+      || isFreshTrailingUserMessage(item, index, input.length)) {
+      return sanitized;
+    }
+
+    const prefix = responseItemIdPrefix(record.type);
+    if (!prefix) {
+      return sanitized;
+    }
+    return {
+      ...record,
+      id: `${prefix}_${createHash('sha256').update(`${index}:${stableSerialize(record)}`).digest('hex').slice(0, 24)}`
+    } as unknown as ResponsesInputMessage;
+  });
+}
+
+function isFreshTrailingUserMessage(item: ResponsesInputMessage, index: number, inputLength: number): boolean {
+  return index === inputLength - 1 && item.type === 'message' && item.role === 'user';
+}
+
+function responseItemIdPrefix(type: unknown): 'msg' | 'fc' | 'fco' | 'rs' | undefined {
+  if (type === 'message') return 'msg';
+  if (type === 'function_call') return 'fc';
+  if (type === 'function_call_output') return 'fco';
+  if (type === 'reasoning') return 'rs';
+  return undefined;
 }
 
 function sanitizeResponseItemIdForOutbound(item: ResponsesInputMessage): ResponsesInputMessage {
