@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.4.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.0...v1.4.1) (2026-08-01)
+
+
+### Bug Fixes
+
+* improve Codex reasoning thinking presentation ([abb6ca2](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/abb6ca235d402c0f27377d5f62faa89c441f67ec))
+* improve Codex reasoning thinking presentation ([f12c766](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/f12c766014e4ad39bee9f1c6a795151660eb8608))
+
 ## [1.4.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.3...v1.4.0) (2026-07-27)
 
 
