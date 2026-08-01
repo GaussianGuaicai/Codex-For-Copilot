@@ -44,6 +44,7 @@ const {
   normalizeKnownReasoningEffort,
   normalizeReasoningEffort,
   resolveReasoningEffort,
+  buildResponsesReasoning,
   toResponsesReasoning
 } = require(reasoningBundlePath);
 const { buildProviderModels } = require(modelsBundlePath);
@@ -114,6 +115,16 @@ try {
     'request-level effort keeps precedence and reports conflicts'
   );
   assertEqual(toResponsesReasoning('ultra').effort, 'ultra', 'Ultra remains unchanged at the SDK boundary');
+  assertEqual(
+    JSON.stringify(buildResponsesReasoning({ effort: 'high', summary: 'auto' })),
+    JSON.stringify({ effort: 'high', summary: 'auto' }),
+    'explicit reasoning summary is preserved'
+  );
+  assertEqual(
+    JSON.stringify(buildResponsesReasoning({ effort: 'none', summary: 'auto' })),
+    JSON.stringify({ effort: 'none' }),
+    'none omits reasoning summary'
+  );
 
   console.log('Smoke test passed: catalog reasoning efforts are selectable, forward-compatible, and preserved on the wire.');
 } finally {
