@@ -15,6 +15,8 @@ export interface StreamPresentationMetrics {
   firstReportAt?: number;
   coalescingDelayP95Ms?: number;
   coalescingDelayMaxMs?: number;
+  /** Internal timing samples used when several presenters share one response. */
+  coalescingDelaysMs: readonly number[];
 }
 
 export interface StreamPresenterTimer {
@@ -124,7 +126,8 @@ export class StreamPresenter {
       firstBackendDeltaAt: this.firstBackendDeltaAt,
       firstReportAt: this.firstReportAt,
       coalescingDelayP95Ms: percentile(delays, 0.95),
-      coalescingDelayMaxMs: delays.at(-1)
+      coalescingDelayMaxMs: delays.at(-1),
+      coalescingDelaysMs: delays
     };
   }
 
@@ -149,9 +152,30 @@ export class StreamPresenter {
   }
 }
 
+/** Combines text and reasoning presentation telemetry for one response stream. */
+export function mergeStreamPresentationMetrics(
+  ...metrics: readonly StreamPresentationMetrics[]
+): StreamPresentationMetrics {
+  const delays = metrics.flatMap((metric) => metric.coalescingDelaysMs).sort((left, right) => left - right);
+  return {
+    backendDeltaCount: metrics.reduce((total, metric) => total + metric.backendDeltaCount, 0),
+    progressReportCount: metrics.reduce((total, metric) => total + metric.progressReportCount, 0),
+    coalescedDeltaCount: metrics.reduce((total, metric) => total + metric.coalescedDeltaCount, 0),
+    firstBackendDeltaAt: firstDefined(metrics.map((metric) => metric.firstBackendDeltaAt)),
+    firstReportAt: firstDefined(metrics.map((metric) => metric.firstReportAt)),
+    coalescingDelayP95Ms: percentile(delays, 0.95),
+    coalescingDelayMaxMs: delays.at(-1),
+    coalescingDelaysMs: delays
+  };
+}
+
 function percentile(values: readonly number[], fraction: number): number | undefined {
   if (values.length === 0) {
     return undefined;
   }
   return values[Math.min(values.length - 1, Math.ceil(values.length * fraction) - 1)];
+}
+
+function firstDefined(values: readonly (number | undefined)[]): number | undefined {
+  return values.filter((value): value is number => value !== undefined).sort((left, right) => left - right)[0];
 }

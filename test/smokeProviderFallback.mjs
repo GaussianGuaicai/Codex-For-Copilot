@@ -1076,11 +1076,10 @@ async function runInterleavedResponsePresentationSmokeTest() {
         ? { type: 'thinking', value: part.value, id: part.id }
         : { type: 'text', value: part.value });
     assertEqual(JSON.stringify(presentation), JSON.stringify([
-      { type: 'thinking', value: 'Optimized ', id: 'rs_planning:0' },
-      { type: 'thinking', value: 'tool selection', id: 'rs_planning:0' },
+      { type: 'thinking', value: 'Optimized tool selection', id: 'rs_planning:reasoning:reasoning-text:0:phase:0' },
       { type: 'text', value: '我先看一下仓库的' },
       { type: 'text', value: '结构。' }
-    ]), 'interleaved reasoning does not interrupt visible text streaming');
+    ]), 'raw reasoning falls back as one bounded Thinking part before visible text');
   } finally {
     await closeServer(server);
   }
@@ -1387,7 +1386,13 @@ async function runContinuationMissAfterVisibleOutputSmokeTest() {
       'cache-control': 'no-cache',
       connection: 'keep-alive'
     });
-    response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'partial visible output' })}\n\n`);
+    response.write(`data: ${JSON.stringify({
+      type: 'response.reasoning_summary_text.delta',
+      item_id: 'rs_visible_summary',
+      output_index: 0,
+      summary_index: 0,
+      delta: 'partial visible reasoning'
+    })}\n\n`);
     response.write(`data: ${JSON.stringify({
       type: 'response.failed',
       response: {
@@ -1471,9 +1476,9 @@ async function runContinuationMissAfterVisibleOutputSmokeTest() {
     assertEqual(responseRequests.length, 2, 'visible continuation miss is never replayed');
     assertEqual(responseRequests[1].previous_response_id, 'resp_visible_initial', 'visible continuation uses prior response');
     assertEqual(
-      visibleParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
-      'partial visible output',
-      'visible continuation output is emitted once'
+      visibleParts.filter((part) => part instanceof LanguageModelThinkingPart).map((part) => part.value).join(''),
+      'partial visible reasoning',
+      'visible reasoning continuation output is emitted once'
     );
     assertEqual(
       warnings.some((entry) => entry.message === 'response continuation reset'),
@@ -1511,9 +1516,9 @@ async function runContinuationMissAfterVisibleOutputSmokeTest() {
       'next turn reports only new-chain output'
     );
     assertEqual(
-      visibleParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
-      'partial visible output',
-      'visible continuation output remains unduplicated after the next turn'
+      visibleParts.filter((part) => part instanceof LanguageModelThinkingPart).map((part) => part.value).join(''),
+      'partial visible reasoning',
+      'visible reasoning continuation output remains unduplicated after the next turn'
     );
     assertEqual(
       warnings.some((entry) => entry.message === 'response continuation reset'),

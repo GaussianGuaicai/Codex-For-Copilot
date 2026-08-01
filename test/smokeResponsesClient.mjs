@@ -180,7 +180,82 @@ async function runHttpTransportSmokeTest(streamResponseText) {
       body: JSON.parse(Buffer.concat(chunks).toString('utf8'))
     };
 
-    writeSseResponse(response, ['hello', ' world']);
+    writeSseResponse(response, [
+      {
+        type: 'response.reasoning_summary_part.added',
+        item_id: 'rs_http',
+        summary_index: 1,
+        output_index: 0,
+        sequence_number: 1,
+        part: { type: 'summary_text', text: '' }
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        item_id: 'rs_http',
+        summary_index: 1,
+        output_index: 0,
+        delta: 'Brief plan'
+      },
+      {
+        type: 'response.reasoning_summary_text.done',
+        item_id: 'rs_http',
+        summary_index: 1,
+        output_index: 0,
+        text: 'Brief plan'
+      },
+      {
+        type: 'response.reasoning_summary_part.added',
+        item_id: 'rs_http',
+        summary_index: 1,
+        output_index: 0,
+        sequence_number: 2,
+        part: { type: 'summary_text', text: '' }
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        item_id: 'rs_http',
+        summary_index: 1,
+        output_index: 0,
+        delta: 'Next step'
+      },
+      {
+        type: 'response.reasoning_summary_text.done',
+        item_id: 'rs_http',
+        summary_index: 1,
+        output_index: 0,
+        text: 'Next step'
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        item_id: 'rs_fallback',
+        summary_index: 0,
+        output_index: 0,
+        delta: 'Fallback one'
+      },
+      {
+        type: 'response.reasoning_summary_text.done',
+        item_id: 'rs_fallback',
+        summary_index: 0,
+        output_index: 0,
+        text: 'Fallback one'
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        item_id: 'rs_fallback',
+        summary_index: 0,
+        output_index: 0,
+        delta: 'Fallback two'
+      },
+      {
+        type: 'response.reasoning_summary_text.done',
+        item_id: 'rs_fallback',
+        summary_index: 0,
+        output_index: 0,
+        text: 'Fallback two'
+      },
+      { type: 'response.output_text.delta', delta: 'hello' },
+      { type: 'response.output_text.delta', delta: ' world' }
+    ]);
   });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -188,6 +263,8 @@ async function runHttpTransportSmokeTest(streamResponseText) {
   try {
     const address = server.address();
     const deltas = [];
+    const reasoningDeltas = [];
+    const reasoningLifecycleEvents = [];
 
     await streamResponseText({
       baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
@@ -200,11 +277,38 @@ async function runHttpTransportSmokeTest(streamResponseText) {
       input: [{ role: 'user', content: 'Ping' }],
       maxOutputTokens: 32,
       token: createCancellationToken(),
-      onTextDelta: (text) => deltas.push(text)
+      onTextDelta: (text) => deltas.push(text),
+      onReasoningDelta: (delta) => reasoningDeltas.push(delta),
+      onReasoningLifecycleEvent: (event) => reasoningLifecycleEvents.push(event)
     });
 
     assertHttpRequest(capturedRequest, '/backend-api/codex/responses');
     assertEqual(deltas.join(''), 'hello world', 'HTTP streamed text');
+    assertEqual(JSON.stringify(reasoningDeltas), JSON.stringify([{
+      source: 'summary', text: 'Brief plan', itemId: 'rs_http', partIndex: 1, outputIndex: 0,
+      presentationId: 'summary-part:1'
+    }, {
+      source: 'summary', text: 'Next step', itemId: 'rs_http', partIndex: 1, outputIndex: 0,
+      presentationId: 'summary-part:2'
+    }, {
+      source: 'summary', text: 'Fallback one', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0,
+      presentationId: 'summary-fallback:1'
+    }, {
+      source: 'summary', text: 'Fallback two', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0,
+      presentationId: 'summary-fallback:2'
+    }]), 'HTTP normalizes reasoning summary item identity');
+    assertEqual(JSON.stringify(reasoningLifecycleEvents), JSON.stringify([
+      { phase: 'part-added', source: 'summary', itemId: 'rs_http', partIndex: 1, outputIndex: 0, presentationId: 'summary-part:1', sequenceNumber: 1 },
+      { phase: 'text-started', source: 'summary', itemId: 'rs_http', partIndex: 1, outputIndex: 0, presentationId: 'summary-part:1', textLength: 10 },
+      { phase: 'text-completed', source: 'summary', itemId: 'rs_http', partIndex: 1, outputIndex: 0, presentationId: 'summary-part:1', textLength: 10 },
+      { phase: 'part-added', source: 'summary', itemId: 'rs_http', partIndex: 1, outputIndex: 0, presentationId: 'summary-part:2', sequenceNumber: 2 },
+      { phase: 'text-started', source: 'summary', itemId: 'rs_http', partIndex: 1, outputIndex: 0, presentationId: 'summary-part:2', textLength: 9 },
+      { phase: 'text-completed', source: 'summary', itemId: 'rs_http', partIndex: 1, outputIndex: 0, presentationId: 'summary-part:2', textLength: 9 },
+      { phase: 'text-started', source: 'summary', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0, presentationId: 'summary-fallback:1', textLength: 12 },
+      { phase: 'text-completed', source: 'summary', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0, presentationId: 'summary-fallback:1', textLength: 12 },
+      { phase: 'text-started', source: 'summary', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0, presentationId: 'summary-fallback:2', textLength: 12 },
+      { phase: 'text-completed', source: 'summary', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0, presentationId: 'summary-fallback:2', textLength: 12 }
+    ]), 'reasoning lifecycle logs structural boundaries without retaining reasoning text');
   } finally {
     server.close();
   }
@@ -680,7 +784,7 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
       maxOutputTokens: 32,
       token: createCancellationToken(),
       onTextDelta: (text) => deltas.push(text),
-      onReasoningTextDelta: (delta) => reasoningDeltas.push(delta),
+      onReasoningDelta: (delta) => reasoningDeltas.push(delta),
       onWebSocketSession: (event) => {
         sessionEvent = event;
       }
@@ -699,9 +803,10 @@ async function runWebSocketTransportSmokeTest(streamResponseText) {
     assertEqual(JSON.stringify(capturedClientEvent.input), JSON.stringify([{ role: 'user', content: 'Ping' }]), 'WebSocket input');
     assertEqual(deltas.join(''), 'hello websocket', 'WebSocket streamed text');
     assertEqual(JSON.stringify(reasoningDeltas), JSON.stringify([{
+      source: 'reasoning-text',
       text: 'Planning',
       itemId: 'rs_ws',
-      contentIndex: 0,
+      partIndex: 0,
       outputIndex: 0
     }]), 'WebSocket reasoning item identity');
     assertEqual(sessionEvent?.reused, false, 'WebSocket initial session reuse state');
@@ -1387,7 +1492,10 @@ function writeSseResponse(response, deltas) {
   });
 
   for (const delta of deltas) {
-    response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta })}\n\n`);
+    const event = typeof delta === 'string'
+      ? { type: 'response.output_text.delta', delta }
+      : delta;
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
   response.write('data: {"type":"response.completed","response":{"id":"resp_mock","object":"response","status":"completed"}}\n\n');

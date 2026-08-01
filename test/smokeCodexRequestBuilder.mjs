@@ -36,6 +36,11 @@ try {
     reasoning: undefined,
     tools: []
   });
+  const noReasoningRequest = buildCodexResponsesRequest({
+    ...base,
+    reasoning: { effort: 'none', summary: 'auto' },
+    tools: []
+  });
   const standardRequest = buildCodexResponsesRequest({
     ...base,
     compatibilityEnabled: false,
@@ -71,6 +76,7 @@ try {
   assertEqual(request.include[0], 'reasoning.encrypted_content', 'encrypted reasoning include');
   assertEqual(JSON.stringify(request.reasoning), JSON.stringify({ effort: 'high', summary: 'auto' }), 'explicit compatibility reasoning preserved');
   assertEqual(JSON.stringify(compatibilityDefaultReasoningRequest.reasoning), JSON.stringify({ effort: 'medium', summary: 'auto' }), 'compatibility default reasoning is normalized');
+  assertEqual(JSON.stringify(noReasoningRequest.reasoning), JSON.stringify({ effort: 'none' }), 'none does not request a reasoning summary');
   assertEqual(compatibilityDefaultReasoningRequest.include[0], 'reasoning.encrypted_content', 'compatibility default reasoning requests encrypted content');
   assertEqual('reasoning' in standardRequest, false, 'standard request does not add default reasoning');
   assertEqual('include' in standardRequest, false, 'standard request does not request encrypted reasoning');

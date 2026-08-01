@@ -124,7 +124,7 @@ try {
       text.push(delta);
       presentation.push({ type: 'text', delta });
     },
-    onReasoningTextDelta: (delta) => reasoningDeltas.push(delta),
+    onReasoningDelta: (delta) => reasoningDeltas.push(delta),
     onToolCall: ({ callId, name, input }) => {
       toolCalls.push({ callId, name, input });
       presentation.push({ type: 'tool', callId });
@@ -164,9 +164,10 @@ try {
     input: { number: 10 }
   }]), 'managed WebSocket reports a function call once');
   assertEqual(JSON.stringify(reasoningDeltas), JSON.stringify([{
+    source: 'reasoning-text',
     text: 'Planning',
     itemId: 'rs_managed',
-    contentIndex: 0,
+    partIndex: 0,
     outputIndex: 0
   }]), 'managed WebSocket reasoning item identity');
   assertEqual(rawItems.length, 2, 'raw output items retained');

@@ -67,6 +67,33 @@ interface ReusableResponsesWebSocketSession {
 
 const reusableWebSocketSessions = new Map<string, ReusableResponsesWebSocketSession>();
 
+export type ReasoningStreamSource = 'summary' | 'reasoning-text';
+
+export interface ReasoningStreamDelta {
+  source: ReasoningStreamSource;
+  text: string;
+  itemId: string;
+  partIndex: number;
+  outputIndex: number;
+  /**
+   * Stable identity for one server-declared reasoning summary part. This is
+   * distinct from summary_index when a backend reuses that index for several
+   * separately rendered summary entries.
+   */
+  presentationId?: string;
+}
+
+export interface ReasoningStreamLifecycleEvent {
+  phase: 'part-added' | 'text-started' | 'text-completed' | 'part-completed';
+  source: ReasoningStreamSource;
+  itemId: string;
+  partIndex: number;
+  outputIndex: number;
+  presentationId?: string;
+  sequenceNumber?: number;
+  textLength?: number;
+}
+
 export interface CountInputTokensOptions {
   baseURL: string;
   apiKey: string;
@@ -106,12 +133,8 @@ export interface StreamResponseTextOptions {
   maxOutputTokens: number;
   token: vscode.CancellationToken;
   onTextDelta: (text: string) => void;
-  onReasoningTextDelta?: (delta: {
-    text: string;
-    itemId: string;
-    contentIndex: number;
-    outputIndex: number;
-  }) => void;
+  onReasoningDelta?: (delta: ReasoningStreamDelta) => void;
+  onReasoningLifecycleEvent?: (event: ReasoningStreamLifecycleEvent) => void;
   onToolCallAdded?: (callId: string, name: string) => void;
   onToolCallArgumentsDelta?: (callId: string, name: string) => void;
   onToolCallArgumentsDone?: (callId: string, name: string) => void;
@@ -557,6 +580,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
         onEvent: (event) => {
           if (event.type === 'response.output_text.delta'
             || event.type === 'response.reasoning_text.delta'
+            || (event as unknown as { type?: string }).type === 'response.reasoning_summary_text.delta'
             || event.type === 'response.function_call_arguments.done'
             || (event.type === 'response.output_item.done' && event.item.type === 'function_call')) {
             visibleActivity = true;
@@ -989,6 +1013,9 @@ export function createResponsesServerEventHandler(
 ): (event: ResponsesServerEvent) => void {
   const functionCallsByItemId = new Map<string, { callId: string; name: string; namespace?: string }>();
   const reportedFunctionCallItemIds = new Set<string>();
+  const summaryPresentationIdsByPart = new Map<string, string>();
+  const startedReasoningPresentationIds = new Set<string>();
+  let nextSummaryPresentationId = 0;
 
   const reportFunctionCall = (
     itemId: string,
@@ -1014,6 +1041,86 @@ export function createResponsesServerEventHandler(
   };
 
   return (event) => {
+    const reasoningEvent = event as unknown as Record<string, unknown>;
+    if (reasoningEvent.type === 'response.reasoning_summary_part.added') {
+      const itemId = typeof reasoningEvent.item_id === 'string' ? reasoningEvent.item_id : '';
+      const outputIndex = typeof reasoningEvent.output_index === 'number' ? reasoningEvent.output_index : 0;
+      const summaryIndex = typeof reasoningEvent.summary_index === 'number' ? reasoningEvent.summary_index : 0;
+      if (itemId) {
+        const sequenceNumber = typeof reasoningEvent.sequence_number === 'number'
+          ? reasoningEvent.sequence_number
+          : ++nextSummaryPresentationId;
+        const partKey = getSummaryPartKey(itemId, outputIndex, summaryIndex);
+        const presentationId = `summary-part:${sequenceNumber}`;
+        summaryPresentationIdsByPart.set(
+          partKey,
+          presentationId
+        );
+        options.onReasoningLifecycleEvent?.({
+          phase: 'part-added',
+          source: 'summary',
+          itemId,
+          partIndex: summaryIndex,
+          outputIndex,
+          presentationId,
+          sequenceNumber
+        });
+      }
+      return;
+    }
+
+    if (reasoningEvent.type === 'response.reasoning_summary_text.done'
+      || reasoningEvent.type === 'response.reasoning_text.done') {
+      const source: ReasoningStreamSource = reasoningEvent.type === 'response.reasoning_summary_text.done'
+        ? 'summary'
+        : 'reasoning-text';
+      const itemId = typeof reasoningEvent.item_id === 'string' ? reasoningEvent.item_id : '';
+      const outputIndex = typeof reasoningEvent.output_index === 'number' ? reasoningEvent.output_index : 0;
+      const index = source === 'summary' ? reasoningEvent.summary_index : reasoningEvent.content_index;
+      const partIndex = typeof index === 'number' ? index : 0;
+      const partKey = getSummaryPartKey(itemId, outputIndex, partIndex);
+      const presentationId = source === 'summary' ? summaryPresentationIdsByPart.get(partKey) : undefined;
+      const text = typeof reasoningEvent.text === 'string' ? reasoningEvent.text : '';
+      if (itemId) {
+        options.onReasoningLifecycleEvent?.({
+          phase: 'text-completed',
+          source,
+          itemId,
+          partIndex,
+          outputIndex,
+          presentationId,
+          textLength: text.length
+        });
+      }
+      if (source === 'summary') {
+        summaryPresentationIdsByPart.delete(partKey);
+      }
+      return;
+    }
+
+    if (reasoningEvent.type === 'response.reasoning_summary_part.done') {
+      const itemId = typeof reasoningEvent.item_id === 'string' ? reasoningEvent.item_id : '';
+      const outputIndex = typeof reasoningEvent.output_index === 'number' ? reasoningEvent.output_index : 0;
+      const summaryIndex = typeof reasoningEvent.summary_index === 'number' ? reasoningEvent.summary_index : 0;
+      const partKey = getSummaryPartKey(itemId, outputIndex, summaryIndex);
+      const presentationId = summaryPresentationIdsByPart.get(partKey);
+      if (itemId) {
+        options.onReasoningLifecycleEvent?.({
+          phase: 'part-completed',
+          source: 'summary',
+          itemId,
+          partIndex: summaryIndex,
+          outputIndex,
+          presentationId,
+          sequenceNumber: typeof reasoningEvent.sequence_number === 'number'
+            ? reasoningEvent.sequence_number
+            : undefined
+        });
+      }
+      summaryPresentationIdsByPart.delete(partKey);
+      return;
+    }
+
     if (event.type === 'response.output_item.added' && event.item.type === 'function_call') {
       const item = event.item as typeof event.item & { namespace?: string };
       if (event.item.id) {
@@ -1053,8 +1160,35 @@ export function createResponsesServerEventHandler(
       return;
     }
 
-    handleResponsesServerEvent(event, options, reportFunctionCall);
+    handleResponsesServerEvent(
+      event,
+      options,
+      reportFunctionCall,
+      (itemId, outputIndex, summaryIndex) => {
+        const partKey = getSummaryPartKey(itemId, outputIndex, summaryIndex);
+        const existingPresentationId = summaryPresentationIdsByPart.get(partKey);
+        if (existingPresentationId) {
+          return existingPresentationId;
+        }
+
+        const presentationId = `summary-fallback:${++nextSummaryPresentationId}`;
+        summaryPresentationIdsByPart.set(partKey, presentationId);
+        return presentationId;
+      },
+      (lifecycleEvent) => {
+        const presentationKey = `${lifecycleEvent.source}:${lifecycleEvent.itemId}:${lifecycleEvent.outputIndex}:${lifecycleEvent.presentationId ?? lifecycleEvent.partIndex}`;
+        if (startedReasoningPresentationIds.has(presentationKey)) {
+          return;
+        }
+        startedReasoningPresentationIds.add(presentationKey);
+        options.onReasoningLifecycleEvent?.(lifecycleEvent);
+      }
+    );
   };
+}
+
+function getSummaryPartKey(itemId: string, outputIndex: number, summaryIndex: number): string {
+  return `${itemId}:${outputIndex}:${summaryIndex}`;
 }
 
 function firstNonEmptyString(...values: string[]): string {
@@ -1064,7 +1198,9 @@ function firstNonEmptyString(...values: string[]): string {
 function handleResponsesServerEvent(
   event: ResponsesServerEvent,
   options: StreamResponseTextOptions,
-  reportFunctionCall: (itemId: string, callId: string, name: string, argumentsJson: string, namespace?: string) => void
+  reportFunctionCall: (itemId: string, callId: string, name: string, argumentsJson: string, namespace?: string) => void,
+  getSummaryPresentationId?: (itemId: string, outputIndex: number, summaryIndex: number) => string | undefined,
+  reportReasoningTextStarted?: (event: ReasoningStreamLifecycleEvent) => void
 ): void {
   if (event.type === 'response.output_item.done') {
     options.onRawResponseItem?.(event.item);
@@ -1075,13 +1211,39 @@ function handleResponsesServerEvent(
     return;
   }
 
-  if (event.type === 'response.reasoning_text.delta') {
-    options.onReasoningTextDelta?.({
-      text: event.delta,
-      itemId: event.item_id,
-      contentIndex: event.content_index,
-      outputIndex: event.output_index
-    });
+  const reasoningEvent = event as unknown as Record<string, unknown>;
+  if (reasoningEvent.type === 'response.reasoning_summary_text.delta'
+    || reasoningEvent.type === 'response.reasoning_text.delta') {
+    const source: ReasoningStreamSource = reasoningEvent.type === 'response.reasoning_summary_text.delta'
+      ? 'summary'
+      : 'reasoning-text';
+    const text = typeof reasoningEvent.delta === 'string' ? reasoningEvent.delta : '';
+    const itemId = typeof reasoningEvent.item_id === 'string' ? reasoningEvent.item_id : '';
+    const index = source === 'summary' ? reasoningEvent.summary_index : reasoningEvent.content_index;
+    const outputIndex = typeof reasoningEvent.output_index === 'number' ? reasoningEvent.output_index : 0;
+    const partIndex = typeof index === 'number' ? index : 0;
+    if (text && itemId) {
+      const presentationId = source === 'summary'
+        ? getSummaryPresentationId?.(itemId, outputIndex, partIndex)
+        : undefined;
+      options.onReasoningDelta?.({
+        source,
+        text,
+        itemId,
+        partIndex,
+        outputIndex,
+        presentationId
+      });
+      reportReasoningTextStarted?.({
+        phase: 'text-started',
+        source,
+        itemId,
+        partIndex,
+        outputIndex,
+        presentationId,
+        textLength: text.length
+      });
+    }
     return;
   }
 

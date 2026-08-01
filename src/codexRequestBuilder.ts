@@ -184,9 +184,10 @@ function normalizeReasoningForRequest(options: CodexRequestBuilderOptions): Reas
     return options.reasoning;
   }
 
+  const effort = options.reasoning?.effort ?? 'medium';
   return {
-    effort: options.reasoning?.effort ?? 'medium',
-    summary: options.reasoning?.summary ?? 'auto'
+    effort,
+    ...(effort === 'none' ? {} : { summary: options.reasoning?.summary ?? 'auto' })
   } as Reasoning;
 }
 

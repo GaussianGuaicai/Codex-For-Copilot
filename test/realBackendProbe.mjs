@@ -21,6 +21,13 @@ const shouldRunToolContinuationProbe = process.env.CODEX_TEST_TOOL_CONTINUATION 
 const requestStore = process.env.CODEX_TEST_STORE === '1';
 const requestedPrewarm = parsePrewarmSetting(process.env.CODEX_TEST_PREWARM);
 const requestedReasoningEffort = parseReasoningEffort(process.env.CODEX_TEST_REASONING_EFFORT);
+const requestedReasoning = requestedReasoningEffort
+  ? {
+      effort: requestedReasoningEffort,
+      ...(requestedReasoningEffort === 'none' ? {} : { summary: 'auto' })
+    }
+  : undefined;
+const requireReasoningSummary = process.env.CODEX_TEST_REQUIRE_REASONING_SUMMARY === '1';
 const requestTimeoutMs = parsePositiveInteger(process.env.CODEX_TEST_TIMEOUT_MS, 60_000);
 const requestServiceTier = requestedServiceTier === 'fast'
   ? 'priority'
@@ -112,6 +119,7 @@ try {
   assertEqual(credentials.omitMaxOutputTokens, true, 'omit max_output_tokens');
 
   const deltas = [];
+  const reasoningSources = new Set();
   const sessionEvents = [];
   const transportMetrics = [];
   let createdServiceTier = null;
@@ -175,11 +183,12 @@ try {
     model: requestedModel,
     instructions: 'You are a test assistant.',
     ...(requestServiceTier ? { serviceTier: requestServiceTier } : {}),
-    ...(requestedReasoningEffort ? { reasoning: { effort: requestedReasoningEffort } } : {}),
+    ...(requestedReasoning ? { reasoning: requestedReasoning } : {}),
     input: [{ role: 'user', content: 'Reply with OK only.' }],
     maxOutputTokens: 32,
     token,
     onTextDelta: (text) => deltas.push(text),
+    onReasoningDelta: ({ source }) => reasoningSources.add(source),
     onResponseCreated: (response) => {
       createdServiceTier = response.service_tier ?? null;
       previousResponseId = response.id ?? previousResponseId;
@@ -200,6 +209,9 @@ try {
   }));
 
   assertEqual(deltas.join('').trim(), 'OK', 'real backend output');
+  if (requireReasoningSummary && requestedReasoningEffort && requestedReasoningEffort !== 'none') {
+    assertEqual(reasoningSources.has('summary'), true, 'real backend reasoning summary stream');
+  }
   if (runPreconnectionProbe) {
     assertEqual(sessionEvents[0]?.origin, 'preconnected', 'real backend preconnection origin');
     preconnection = { ...preconnection, formalConnectionOrigin: sessionEvents[0].origin };
@@ -234,7 +246,7 @@ try {
       model: requestedModel,
       instructions: 'You are a test assistant.',
       ...(requestServiceTier ? { serviceTier: requestServiceTier } : {}),
-      ...(requestedReasoningEffort ? { reasoning: { effort: requestedReasoningEffort } } : {}),
+      ...(requestedReasoning ? { reasoning: requestedReasoning } : {}),
       input: [{ role: 'user', content: 'Reply with PONG only.' }],
       maxOutputTokens: 32,
       token: undefined,
@@ -291,6 +303,8 @@ try {
     requestStore,
     requestedPrewarm,
     requestedReasoningEffort: requestedReasoningEffort ?? null,
+    requireReasoningSummary,
+    reasoningSources: [...reasoningSources],
     requestedServiceTier: requestedServiceTier ?? null,
     requestServiceTier: requestServiceTier ?? null,
     createdServiceTier,

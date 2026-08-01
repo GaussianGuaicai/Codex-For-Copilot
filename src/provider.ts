@@ -47,7 +47,8 @@ import {
 import { hasVirtualToolPlaceholder } from './nativeToolSearch/nativeToolPolicy';
 import { buildCanonicalReplayInput, createCanonicalReplayRequest } from './nativeToolSearch/nativeToolReplay';
 import { summarizeNativeToolSearchItem } from './nativeToolSearch/nativeToolLogging';
-import { StreamPresenter } from './streamPresenter';
+import { StreamPresenter, mergeStreamPresentationMetrics } from './streamPresenter';
+import { ReasoningStreamPresenter } from './reasoningStreamPresenter';
 import {
   CodexModelCache,
   MODEL_CACHE_FRESH_TTL_MS,
@@ -539,7 +540,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             latencyMs: number;
           }
         | undefined;
-      let hasReportedText = false;
       let previousResponseIdUsed = false;
       if (config.transport === 'http') {
         latency.mark('connectionAcquired');
@@ -582,25 +582,48 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         };
       };
 
-      const presenter = new StreamPresenter(
-        (_kind, receivedAt) => latency.mark('firstBackendDelta', receivedAt),
-        (kind, reportedAt) => {
-          reportedVisibleOutput = true;
-          recordFirstVisibleOutput(kind, reportedAt);
-          if (kind === 'text') {
-            latency.mark('firstText', reportedAt);
-          } else {
-            latency.mark('firstReasoning', reportedAt);
-          }
+      const reportVisiblePart = (
+        kind: 'text' | 'reasoning' | 'tool_call',
+        part: vscode.LanguageModelResponsePart,
+        reportedAt = Date.now()
+      ) => {
+        progress.report(part);
+        reportedVisibleOutput = true;
+        recordFirstVisibleOutput(kind, reportedAt);
+        if (kind === 'text') {
+          latency.mark('firstText', reportedAt);
+        } else if (kind === 'reasoning') {
+          latency.mark('firstReasoning', reportedAt);
         }
+      };
+
+      const presenter = new StreamPresenter(
+        (_kind, receivedAt) => latency.mark('firstBackendDelta', receivedAt)
       );
+      let loggedMissingThinkingPart = false;
+      const reasoningPresenter = new ReasoningStreamPresenter((update) => {
+        const thinkingPart = createThinkingPart(update.value, update.id, {
+          source: update.source,
+          itemId: update.itemId,
+          outputIndex: update.outputIndex,
+          phase: update.phase
+        });
+        if (thinkingPart) {
+          reportVisiblePart('reasoning', thinkingPart);
+        } else if (!loggedMissingThinkingPart) {
+          loggedMissingThinkingPart = true;
+          this.outputChannel.debug('Reasoning output received, but LanguageModelThinkingPart is unavailable.');
+        }
+      }, {
+        onBackendDelta: (receivedAt) => latency.mark('firstBackendDelta', receivedAt)
+      });
       let presentationMetricsRecorded = false;
       const recordPresentationMetrics = () => {
         if (presentationMetricsRecorded) {
           return;
         }
         presentationMetricsRecorded = true;
-        const metrics = presenter.metrics();
+        const metrics = mergeStreamPresentationMetrics(presenter.metrics(), reasoningPresenter.metrics());
         latency.recordContext({
           metricVersion: 2,
           backendDeltaCount: metrics.backendDeltaCount,
@@ -642,37 +665,25 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         maxOutputTokens: requestOptions.maxOutputTokens,
         token,
         onTextDelta: (text) => {
+          if (text) {
+            reasoningPresenter.close();
+          }
           presenter.push({
             kind: 'text',
             identity: 'text',
             text,
             emit: (presentedText) => {
-              hasReportedText ||= presentedText.length > 0;
-              progress.report(new vscode.LanguageModelTextPart(presentedText));
+              reportVisiblePart('text', new vscode.LanguageModelTextPart(presentedText));
             }
           });
         },
-        onReasoningTextDelta: ({ text, itemId, contentIndex }) => {
-          if (hasReportedText) {
-            return;
-          }
-
-          const identity = `reasoning:${itemId}:${contentIndex}`;
-          const thinkingPartId = `${itemId}:${contentIndex}`;
-          if (!createThinkingPart(text, thinkingPartId)) {
-            return;
-          }
-
-          presenter.push({
-            kind: 'reasoning',
-            identity,
-            text,
-            emit: (presentedText) => {
-              const thinkingPart = createThinkingPart(presentedText, thinkingPartId);
-              if (thinkingPart) {
-                progress.report(thinkingPart);
-              }
-            }
+        onReasoningDelta: (delta) => {
+          reasoningPresenter.push(delta);
+        },
+        onReasoningLifecycleEvent: (event) => {
+          this.outputChannel.info('response reasoning lifecycle', {
+            requestModel: selectedModel.requestModel,
+            ...event
           });
         },
         onToolCallAdded: (callId) => {
@@ -697,12 +708,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             vscodeName: call.name
           };
           const { callId, input: toolInput, vscodeName: name } = mapped;
+          reasoningPresenter.startNextPhase();
           presenter.flushBoundary();
-          reportedVisibleOutput = true;
           const reportedAt = Date.now();
           latency.mark('firstToolCall', reportedAt);
-          recordFirstVisibleOutput('tool_call', reportedAt);
-          progress.report(new vscode.LanguageModelToolCallPart(callId, name, toolInput));
+          reportVisiblePart('tool_call', new vscode.LanguageModelToolCallPart(callId, name, toolInput), reportedAt);
           latency.mark('firstToolCallReported', reportedAt);
           this.rememberReportedToolCall(callId, name, reportedAt);
           reportedToolCallIds.add(callId);
@@ -785,6 +795,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onResponseCompleted: (response) => {
+          reasoningPresenter.close();
           this.markReportedToolCallsResponseCompleted(reportedToolCallIds);
           presenter.flushBoundary();
           recordPresentationMetrics();
@@ -836,11 +847,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           void this.accountUsageRefreshSink?.refresh();
         },
         onResponseFailed: (message) => {
+          reasoningPresenter.close();
           presenter.flushBoundary();
           recordPresentationMetrics();
           this.outputChannel.error(`response failed model=${selectedModel.requestModel} previousResponseId=${previousResponseId ?? 'none'} message=${message}`);
         },
         onTransportFallback: ({ from, to, reason }) => {
+          reasoningPresenter.flush();
           actualTransport = 'http-fallback';
           latency.mark('connectionAcquired');
           latency.recordContext({ transportActual: actualTransport });
@@ -868,6 +881,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         }
         });
       } finally {
+        reasoningPresenter.close();
         presenter.flushBoundary();
         recordPresentationMetrics();
       }
@@ -1773,13 +1787,17 @@ function createAbortError(): Error {
   return error;
 }
 
-function createThinkingPart(text: string, id?: string): vscode.LanguageModelResponsePart | undefined {
+function createThinkingPart(
+  value: string | string[],
+  id?: string,
+  metadata?: { readonly [key: string]: unknown }
+): vscode.LanguageModelResponsePart | undefined {
   const ThinkingPart = (vscode as VSCodeWithThinkingPart).LanguageModelThinkingPart;
   if (typeof ThinkingPart !== 'function') {
     return undefined;
   }
 
-  return new ThinkingPart(text, id) as vscode.LanguageModelResponsePart;
+  return new ThinkingPart(value, id, metadata) as vscode.LanguageModelResponsePart;
 }
 
 function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.LanguageModelResponsePart | undefined {
