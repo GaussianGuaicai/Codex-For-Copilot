@@ -140,8 +140,21 @@ export function resolveReasoningEffort(
   return { effort: undefined, source: 'none', hasExplicitConflict };
 }
 
-export function toResponsesReasoning(effort: ReasoningEffort): Reasoning {
+export interface BuildReasoningOptions {
+  effort: ReasoningEffort;
+  summary?: 'auto' | 'concise' | 'detailed';
+}
+
+export function buildResponsesReasoning(options: BuildReasoningOptions): Reasoning {
   // Codex model catalogs can advertise efforts before the public SDK schema is regenerated.
   // Keep the forward-compatible wire value at this single typed boundary.
-  return { effort } as Reasoning;
+  return {
+    effort: options.effort,
+    ...(options.effort === 'none' || !options.summary ? {} : { summary: options.summary })
+  } as Reasoning;
+}
+
+/** @deprecated Prefer buildResponsesReasoning for new request construction. */
+export function toResponsesReasoning(effort: ReasoningEffort): Reasoning {
+  return buildResponsesReasoning({ effort });
 }
