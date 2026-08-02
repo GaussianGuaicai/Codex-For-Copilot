@@ -27,6 +27,19 @@ In **Settings → Actions → General**, confirm that workflow permissions allow
 
 Release Please uses the repository `GITHUB_TOKEN`, so the release pull request it creates does not automatically trigger another `pull_request` workflow. The publishing job runs the complete check, compile, and smoke-test sequence after the release pull request is merged. To validate the generated release branch before merging, manually run **Pull Request CI** and select the Release Please branch in the workflow branch selector.
 
+### Merge policy
+
+Treat each pull request as one release unit. In **Settings → General → Pull Requests**:
+
+- enable **Allow squash merging**;
+- set the default squash commit message to the pull request title;
+- disable **Allow merge commits**;
+- disable **Allow rebase merging**.
+
+For stronger enforcement, add a ruleset for `master` with **Require linear history** enabled. These settings ensure that one pull request produces one commit on `master`, so Release Please produces one changelog entry instead of separately reading both an original commit and a merge commit.
+
+The lightweight **Pull Request Title** workflow validates the title whenever a pull request is opened or renamed. Keep that check required in the `master` ruleset so every squash commit remains valid Conventional Commit metadata.
+
 ## Version selection
 
 Use Conventional Commit prefixes in the final pull request title used for squash merging:

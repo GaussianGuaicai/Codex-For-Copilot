@@ -7,16 +7,14 @@ This changelog is maintained by Release Please from Conventional Commit titles m
 
 ### Bug Fixes
 
-* improve Codex reasoning thinking presentation ([abb6ca2](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/abb6ca235d402c0f27377d5f62faa89c441f67ec))
-* improve Codex reasoning thinking presentation ([f12c766](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/f12c766014e4ad39bee9f1c6a795151660eb8608))
+* improve Codex reasoning thinking presentation ([#56](https://github.com/GaussianGuaicai/Codex-For-Copilot/pull/56)) ([abb6ca2](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/abb6ca235d402c0f27377d5f62faa89c441f67ec))
 
 ## [1.4.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.3...v1.4.0) (2026-07-27)
 
 
 ### Features
 
-* **auth:** add native ChatGPT OAuth sign-in ([ce83ec2](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/ce83ec2dc23dc0d7bc7c433f02a7081df755a863))
-* **auth:** add native ChatGPT OAuth sign-in ([8a65566](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/8a65566bfb2d53fa41028d66b8b4d09f9bf57125))
+* **auth:** add native ChatGPT OAuth sign-in ([#52](https://github.com/GaussianGuaicai/Codex-For-Copilot/pull/52)) ([ce83ec2](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/ce83ec2dc23dc0d7bc7c433f02a7081df755a863))
 
 ## [1.3.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.3.2...v1.3.3) (2026-07-26)
 
@@ -54,8 +52,7 @@ This changelog is maintained by Release Please from Conventional Commit titles m
 
 * classify wrapped continuation misses ([80da656](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/80da656fc4fcd1769e9c8aab11cefd11005bca29))
 * invalidate stale continuation branches ([f45a755](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/f45a755f9a84fca70172ea311814ae63d8c7e23d))
-* match IPv6 no_proxy hosts ([47f7856](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/47f78567b5dae52259aa9d45640ad15affd8aeda))
-* match IPv6 no_proxy hosts ([8edd2ad](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/8edd2adb9540b4b06a3f895df6826fa111746aa3))
+* match IPv6 no_proxy hosts ([#26](https://github.com/GaussianGuaicai/Codex-For-Copilot/pull/26)) ([47f7856](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/47f78567b5dae52259aa9d45640ad15affd8aeda))
 * recover wrapped continuation misses ([ed38c37](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/ed38c37363bb37cd15f2e0ef42431987e995c103))
 
 ## [1.2.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.1.2...v1.2.0) (2026-07-19)
