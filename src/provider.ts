@@ -365,7 +365,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     let activeBranchId = initialPreviousResponseId || requiresFullInputForToolOutput
       ? reusableBranch?.branchId
       : undefined;
-    let createdResponseId: string | undefined;
     let completedResponseId: string | undefined;
     const rawResponseItems: unknown[] = [];
     const requestIdentity = await this.resolveRequestIdentity(
@@ -715,7 +714,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           this.outputChannel.debug('response transport metrics', metrics);
         },
         onResponseCreated: (response) => {
-          createdResponseId = response.id ?? createdResponseId;
           latency.mark('responseCreated');
           this.outputChannel.debug('response created', {
             requestModel: selectedModel.requestModel,
@@ -878,7 +876,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           reason: error.message
         });
 
-        createdResponseId = undefined;
         completedResponseId = undefined;
         rawResponseItems.length = 0;
         await streamRequest(input);
@@ -930,7 +927,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           this.responseBranchStore.invalidate(reusableBranch.branchId);
         }
 
-        createdResponseId = undefined;
         completedResponseId = undefined;
         rawResponseItems.length = 0;
         activeBranchId = undefined;
@@ -938,7 +934,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       }
     }
 
-    const finalResponseId = completedResponseId ?? createdResponseId;
+    const finalResponseId = completedResponseId;
     if (finalResponseId) {
       const fullRequest = buildCodexResponsesRequest({
         ...requestOptions,

@@ -101,7 +101,10 @@ export class ResponseBranchStore {
 
     const currentContinuationInput = projectResponsesInputForContinuation(currentInput);
 
-    let bestMatch: ReusableResponseBranchMatch | undefined;
+    let bestCandidate: {
+      branch: ResponseBranchEntry;
+      comparison: ResponsesInputHistoryComparison;
+    } | undefined;
 
     for (const branch of this.branches.values()) {
       if (branch.envelope.identityKey !== envelope.identityKey
@@ -119,17 +122,24 @@ export class ResponseBranchStore {
         continue;
       }
 
-      if (!bestMatch || comparison.matchedPrefixCount > bestMatch.comparison.matchedPrefixCount) {
-        bestMatch = {
-          branchId: branch.id,
-          responseId: branch.responseId,
-          comparison,
-          state: branch.state ? cloneBranchState(branch.state) : undefined
-        };
+      if (!bestCandidate
+        || comparison.matchedPrefixCount > bestCandidate.comparison.matchedPrefixCount
+        || (comparison.matchedPrefixCount === bestCandidate.comparison.matchedPrefixCount
+          && branch.updatedAt > bestCandidate.branch.updatedAt)) {
+        bestCandidate = { branch, comparison };
       }
     }
 
-    return bestMatch;
+    if (!bestCandidate || !hasContinuationIntegrity(bestCandidate.branch, bestCandidate.comparison.appendedInput)) {
+      return undefined;
+    }
+
+    return {
+      branchId: bestCandidate.branch.id,
+      responseId: bestCandidate.branch.responseId,
+      comparison: bestCandidate.comparison,
+      state: bestCandidate.branch.state ? cloneBranchState(bestCandidate.branch.state) : undefined
+    };
   }
 
   explainReuseMiss(
@@ -323,6 +333,41 @@ function hasCompatibleInputBudget(previous: number | undefined, current: number 
     && Number.isFinite(current)
     && current > 0
     && current >= previous;
+}
+
+function hasContinuationIntegrity(
+  branch: ResponseBranchEntry,
+  appendedInput: readonly ResponsesInputMessage[]
+): boolean {
+  const state = branch.state;
+  if (!state?.turn.completed || !state.continuation || !Array.isArray(state.continuation.responseItems)) {
+    return false;
+  }
+
+  const functionCallIds = new Set<string>();
+  for (const item of state.continuation.responseItems) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+
+    const record = item as Record<string, unknown>;
+    const callId = typeof record.call_id === 'string' ? record.call_id.trim() : '';
+    if (record.type === 'function_call' && callId) {
+      functionCallIds.add(callId);
+    }
+  }
+
+  if (functionCallIds.size === 0) {
+    return true;
+  }
+
+  const outputCallIds = new Set(
+    appendedInput
+      .filter((item) => item.type === 'function_call_output')
+      .map((item) => item.call_id.trim())
+      .filter(Boolean)
+  );
+  return [...functionCallIds].every((callId) => outputCallIds.has(callId));
 }
 
 function compareToolSignatures(
