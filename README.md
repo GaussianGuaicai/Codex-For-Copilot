@@ -53,13 +53,21 @@ Open VS Code Chat, choose **Codex** from the model picker, and start chatting or
 
 - `Codex: Manage`
 - `Codex: Open Settings`
-- `Codex: Open Debug Logs`
+- `Codex: Open Logs`
 - `Codex: Refresh Account Limits`
 - `Codex for Copilot: Sign in with ChatGPT`
 - `Codex for Copilot: Sign in with Device Code`
 - `Codex for Copilot: Import Codex auth.json`
 - `Codex for Copilot: Show Auth Status`
 - `Codex for Copilot: Sign Out`
+
+## Diagnostics and privacy
+
+Use **Codex: Open Logs** to view the extension's structured VS Code log channel. Each model request, authentication flow, model discovery operation, and account-limit refresh receives an `operationId`; search for that value to follow one operation through retries, WebSocket fallback, and completion.
+
+The channel follows VS Code's native log level. Use **Developer: Set Log Level...** and select the Codex channel to enable Debug or Trace detail when investigating a problem.
+
+Logs never include prompt or instruction text, reasoning, tool arguments/results, credentials, cookies, or Turn State. They retain only safe counts, sizes, hashes, identifiers hashed for correlation, transport decisions, and redacted error metadata.
 
 ## Configuration
 
