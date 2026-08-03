@@ -21,7 +21,7 @@ export function activate(context: vscode.ExtensionContext): void {
     logLevel: outputChannel.logLevel
   });
   const config = getProviderConfig();
-  logger.info('configuration.loaded', {
+  logger.debug('configuration.loaded', {
     baseURL: config.baseURL,
     credentialsSource: config.credentialsSource,
     transport: config.transport,

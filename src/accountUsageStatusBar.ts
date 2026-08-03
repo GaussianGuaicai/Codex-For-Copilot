@@ -108,7 +108,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
       });
       this.lastSnapshot = snapshot;
       this.render(snapshot);
-      logger.info('refresh.completed', {
+      logger.debug('refresh.completed', {
         selectedModel: this.selectedModel,
         rateLimitCount: snapshot.limits.length,
         creditBudgetCount: snapshot.creditBudgets.length
