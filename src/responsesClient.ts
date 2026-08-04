@@ -296,9 +296,9 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         );
       }
 
-      if (isMissingFunctionCallForToolOutputError(error)) {
+      if (isFunctionCallContinuationIntegrityError(error)) {
         throw new ResponsesContinuationMissError(
-          'Responses API rejected function_call_output because its previous_response_id lacks the matching function_call.',
+          'Responses API rejected continuation because function calls and outputs are inconsistent with previous_response_id.',
           options.previousResponseId,
           { cause: error instanceof Error ? error : undefined }
         );
@@ -1473,9 +1473,9 @@ function isOpaqueHttpContinuationRejection(error: unknown): boolean {
     && /\b400 status code \(no body\)/i.test(error.message);
 }
 
-function isMissingFunctionCallForToolOutputError(error: unknown): boolean {
+function isFunctionCallContinuationIntegrityError(error: unknown): boolean {
   return collectErrorMessages(error)
-    .some((message) => /no tool call found for function call output with call_id/i.test(message));
+    .some((message) => /no tool call found for function call output with call_id|no tool output found for function call\b/i.test(message));
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {

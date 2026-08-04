@@ -44,10 +44,62 @@ try {
   toolMatch.state.continuation.responseItems[0].type = 'mutated';
   assertEqual(store.findReusableBranch(envelope, toolContinuation).state.turn.stickyState, 'opaque', 'state is safely cloned');
   assertEqual(store.findReusableBranch(envelope, toolContinuation).state.continuation.responseItems[0].type, 'reasoning', 'continuation snapshot is safely cloned');
-  const updated = { ...state, turn: { ...state.turn, completed: false }, updatedAt: Date.now() };
-  store.recordSuccess(envelope, toolContinuation, 'resp-b', branchId, updated);
+  const incomplete = { ...state, turn: { ...state.turn, completed: false }, updatedAt: Date.now() };
+  store.recordSuccess(envelope, toolContinuation, 'resp-b', branchId, incomplete);
   const userContinuation = [...toolContinuation, { type: 'message', role: 'user', content: 'next' }];
+  assertEqual(store.findReusableBranch(envelope, userContinuation), undefined, 'explicitly incomplete turn fails closed');
+  const updated = { ...state, updatedAt: Date.now() };
+  store.recordSuccess(envelope, toolContinuation, 'resp-c', branchId, updated);
   assertEqual(store.findReusableBranch(envelope, userContinuation).state.identity.threadId, 'thread', 'thread identity remains stable');
+
+  const missingStateStore = new ResponseBranchStore();
+  missingStateStore.recordSuccess(envelope, initial, 'resp-missing-state');
+  assertEqual(
+    missingStateStore.findReusableBranch(envelope, [...initial, { type: 'message', role: 'user', content: 'continue' }]),
+    undefined,
+    'branch without completion snapshot fails closed'
+  );
+
+  const missingContinuationStore = new ResponseBranchStore();
+  missingContinuationStore.recordSuccess(
+    envelope,
+    initial,
+    'resp-missing-continuation',
+    undefined,
+    { ...state, continuation: undefined }
+  );
+  assertEqual(
+    missingContinuationStore.findReusableBranch(envelope, [...initial, { type: 'message', role: 'user', content: 'continue' }]),
+    undefined,
+    'branch without continuation items fails closed'
+  );
+
+  const predecessorStore = new ResponseBranchStore();
+  predecessorStore.recordSuccess(envelope, initial, 'resp-predecessor', undefined, state);
+  const intermediateInput = [...initial, { type: 'message', role: 'user', content: 'inspect the file' }];
+  const pendingCallState = {
+    ...state,
+    turn: { ...state.turn, id: 'turn-pending' },
+    continuation: {
+      ...state.continuation,
+      fullRequest: { ...state.continuation.fullRequest, input: intermediateInput },
+      responseId: 'resp-pending-call',
+      responseItems: [{
+        type: 'function_call',
+        call_id: 'call-pending',
+        name: 'read_file',
+        arguments: '{"filePath":"src/provider.ts"}'
+      }],
+      turnId: 'turn-pending'
+    }
+  };
+  predecessorStore.recordSuccess(envelope, intermediateInput, 'resp-pending-call', undefined, pendingCallState);
+  const steeredInput = [...intermediateInput, { type: 'message', role: 'user', content: 'skip that and continue' }];
+  assertEqual(
+    predecessorStore.findReusableBranch(envelope, steeredInput),
+    undefined,
+    'unsafe most-specific branch blocks fallback to an older predecessor'
+  );
   console.log('Smoke test passed: branch state preserves thread/turn data across tool and user continuations.');
 } finally {
   await loaded.dispose();
