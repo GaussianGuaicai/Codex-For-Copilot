@@ -1051,7 +1051,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     if (!credentials || !supportsOfficialTokenCounting(config.baseURL)) {
       const estimated = estimateTokenCount(text);
-      this.outputChannel.debug('provideTokenCount local estimate', {
+      this.outputChannel.trace('provideTokenCount local estimate', {
         modelId: model.id,
         requestModel: parseModelIdentifier(model.id || config.model).requestModel,
         count: estimated,
