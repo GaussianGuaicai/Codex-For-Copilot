@@ -33,6 +33,7 @@ import {
 } from './codexRequestBuilder';
 import type { CodexBranchState } from './responseBranchStore';
 import { shortHash } from './codexTelemetry';
+import { type CodexLogSink, CodexLogger, createCodexLogger } from './codexLogger';
 import { CodexLatencyRecorder, type CodexLatencyContext } from './codexLatency';
 import { createCodexContinuationSnapshot } from './codexContinuation';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
@@ -154,15 +155,17 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     staleTtlMs: MODEL_CACHE_STALE_TTL_MS
   });
   private lastConnectionConfigurationKey?: string;
+  private readonly logger: CodexLogger;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly outputChannel: vscode.LogOutputChannel,
+    logger: CodexLogger | CodexLogSink,
     private readonly usageSink?: UsageSink,
     private readonly accountUsageRefreshSink?: AccountUsageRefreshSink,
     private readonly selectedModelSink?: SelectedModelSink,
     private readonly authManager?: CodexAuthManager
   ) {
+    this.logger = logger instanceof CodexLogger ? logger : createCodexLogger(logger, 'provider');
     const runtimeContext = context as vscode.ExtensionContext & {
       globalState?: vscode.Memento;
     };
@@ -181,6 +184,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         }
       })
     );
+  }
+
+  // Keeps the existing provider diagnostics compact while routing every event
+  // through the safe structured logger.
+  private get outputChannel(): CodexLogger {
+    return this.logger;
   }
 
   handleAuthenticationChanged(): void {
@@ -227,7 +236,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     const { models } = await this.getAvailableModelCatalog(config, credentials, token);
     this.scheduleWebSocketPreconnection(config, credentials, getCredentialIdentity(credentials));
-    this.outputChannel.info('provideLanguageModelChatInformation complete', {
+    this.outputChannel.debug('provideLanguageModelChatInformation complete', {
       modelCount: models.length,
       models: models.map((model) => ({
         id: model.info.id,
@@ -246,6 +255,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken
   ): Promise<void> {
+    const requestLogger = this.logger.operation('chat.response');
     const latency = new CodexLatencyRecorder();
     const config = getProviderConfig();
     const credentials = await getApiCredentials(this.context, this.authManager);
@@ -267,7 +277,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     if (directModel) {
       selectedModel = directModel;
       latency.recordContext({ modelDiscoveryCacheState: 'direct' });
-      this.outputChannel.debug('request model resolved from provider model id', {
+      requestLogger.debug('request model resolved from provider model id', {
         modelId: model.id,
         requestModel: selectedModel.requestModel
       });
@@ -407,7 +417,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
     latency.mark('requestReady');
 
-    this.outputChannel.info('provideLanguageModelChatResponse start', {
+    requestLogger.debug('provideLanguageModelChatResponse start', {
       modelId: model.id,
       requestModel: selectedModel.requestModel,
       transport: config.transport,
@@ -449,7 +459,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     });
 
     if (reuseMissDiagnostic) {
-      this.outputChannel.info('response reuse miss', {
+      this.outputChannel.debug('response reuse miss', {
         requestModel: selectedModel.requestModel,
         branchId: reuseMissDiagnostic.branchId,
         previousResponseId: reuseMissDiagnostic.responseId,
@@ -496,7 +506,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       latency.mark('requestSent');
       if (observedToolResults.length > 0) {
         const requestSentAt = Date.now();
-        this.outputChannel.info('tool result recovery timing', {
+        this.outputChannel.trace('tool result recovery timing', {
           requestModel: selectedModel.requestModel,
           toolResults: observedToolResults.map(({ resultObservedAt, ...toolResult }) => ({
             ...toolResult,
@@ -576,7 +586,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           coalescingDelayP95Ms: metrics.coalescingDelayP95Ms,
           coalescingDelayMaxMs: metrics.coalescingDelayMaxMs
         });
-        this.outputChannel.debug('response stream presentation', metrics);
+        this.outputChannel.trace('response stream presentation', { ...metrics });
       };
 
       try {
@@ -624,7 +634,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           reasoningPresenter.push(delta);
         },
         onReasoningLifecycleEvent: (event) => {
-          this.outputChannel.info('response reasoning lifecycle', {
+          this.outputChannel.trace('response reasoning lifecycle', {
             requestModel: selectedModel.requestModel,
             ...event
           });
@@ -655,7 +665,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           this.rememberReportedToolCall(callId, name, reportedAt);
           reportedToolCallIds.add(callId);
           const lifecycle = toolCallLifecycleAt.get(callId);
-          this.outputChannel.info('response tool call timing', {
+          this.outputChannel.trace('response tool call timing', {
             callId,
             name,
             toolArgumentsDoneToReportedMs: lifecycle?.argumentsDoneAt === undefined
@@ -665,7 +675,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           setImmediate(() => {
             try {
               const serializedToolInput = JSON.stringify(toolInput);
-              this.outputChannel.debug('response tool call', {
+              this.outputChannel.trace('response tool call', {
                 requestModel: selectedModel.requestModel,
                 callId,
                 name,
@@ -674,7 +684,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
                 inputHash: shortHash(serializedToolInput)
               });
             } catch {
-              this.outputChannel.debug('response tool call telemetry unavailable', {
+              this.outputChannel.trace('response tool call telemetry unavailable', {
                 requestModel: selectedModel.requestModel,
                 callId,
                 name
@@ -693,7 +703,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           };
         },
         onWebSocketHandshake: (handshake) => {
-          this.outputChannel.debug('response websocket handshake', {
+          this.outputChannel.trace('response websocket handshake', {
             turnStateReceived: Boolean(handshake.turnState),
             modelsEtagPresent: Boolean(handshake.modelsEtag),
             reasoningIncluded: handshake.reasoningIncluded,
@@ -712,12 +722,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             latency.mark('prewarmCompleted', metrics.prewarmCompletedAt);
           }
           latency.recordContext(readLatencyContextFromTransportMetrics(metrics));
-          this.outputChannel.debug('response transport metrics', metrics);
+          this.outputChannel.trace('response transport metrics', metrics);
         },
         onResponseCreated: (response) => {
           createdResponseId = response.id ?? createdResponseId;
           latency.mark('responseCreated');
-          this.outputChannel.debug('response created', {
+          this.outputChannel.trace('response created', {
             requestModel: selectedModel.requestModel,
             responseId: response.id,
             status: response.status,
@@ -746,7 +756,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             updatedAt: Date.now()
           };
           completedResponseId = response.id ?? completedResponseId;
-          this.outputChannel.info('response completed', {
+          requestLogger.info('response completed', {
             requestModel: selectedModel.requestModel,
             responseId: response.id,
             durationMs: Date.now() - requestStartedAt,
@@ -757,7 +767,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             usage: response.usage ?? null,
             previousResponseId: previousResponseId ?? null
           });
-          this.outputChannel.info('response latency', {
+          requestLogger.debug('response latency', {
             ...latency.snapshot(),
             transportConfigured: config.transport
           });
@@ -781,14 +791,21 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           reasoningPresenter.close();
           presenter.flushBoundary();
           recordPresentationMetrics();
-          this.outputChannel.error(`response failed model=${selectedModel.requestModel} previousResponseId=${previousResponseId ?? 'none'} message=${message}`);
+          if (token.isCancellationRequested) {
+            requestLogger.debug('response.cancelled', { requestModel: selectedModel.requestModel });
+            return;
+          }
+          requestLogger.error('response.failed', new Error(message), {
+            requestModel: selectedModel.requestModel,
+            previousResponseId: previousResponseId ?? null
+          });
         },
         onTransportFallback: ({ from, to, reason }) => {
           reasoningPresenter.flush();
           actualTransport = 'http-fallback';
           latency.mark('connectionAcquired');
           latency.recordContext({ transportActual: actualTransport });
-          this.outputChannel.warn('response transport fallback', {
+          requestLogger.nextAttempt().warn('response transport fallback', {
             requestModel: selectedModel.requestModel,
             from,
             to,
@@ -1034,7 +1051,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     if (!credentials || !supportsOfficialTokenCounting(config.baseURL)) {
       const estimated = estimateTokenCount(text);
-      this.outputChannel.debug('provideTokenCount local estimate', {
+      this.outputChannel.trace('provideTokenCount local estimate', {
         modelId: model.id,
         requestModel: parseModelIdentifier(model.id || config.model).requestModel,
         count: estimated,
@@ -1087,6 +1104,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken,
     onCacheState?: (state: CodexModelCacheState | 'fallback') => void
   ): Promise<ProviderModelCatalog> {
+    const logger = this.logger.operation('model-discovery');
     const authIdentity = getCredentialIdentity(credentials);
     const cacheKey = buildModelCacheKey(config, credentials.source, credentials.kind, authIdentity);
     try {
@@ -1100,7 +1118,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         ),
         token
       );
-      this.outputChannel.debug('getAvailableModels cache result', {
+      logger.debug('getAvailableModels cache result', {
         modelDiscoveryCacheState: lookup.state,
         modelCount: lookup.value.models.length,
         refreshStarted: lookup.refreshStarted
@@ -1109,9 +1127,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       if (lookup.state === 'stale' && lookup.refreshStarted && lookup.refresh) {
         void lookup.refresh.then(
           () => this.modelInfoChangedEmitter.fire(),
-          () => this.outputChannel.warn('getAvailableModels background refresh failed, retaining stale models', {
-            modelDiscoveryCacheState: 'stale'
-          })
+          (error) => logger.warn('getAvailableModels background refresh failed, retaining stale models', { modelDiscoveryCacheState: 'stale', error })
         );
       }
       return lookup.value;
@@ -1126,9 +1142,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           freshTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS,
           staleTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS
         });
-        this.outputChannel.warn('getAvailableModels discovery failed, retaining authoritative catalog', {
-          modelCount: cachedCatalog.models.length
-        });
+        logger.warn('getAvailableModels discovery failed, retaining authoritative catalog', { modelCount: cachedCatalog.models.length, error });
         onCacheState?.('fallback');
         return cachedCatalog;
       }
@@ -1139,9 +1153,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         freshTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS,
         staleTtlMs: MODEL_DISCOVERY_FALLBACK_TTL_MS
       });
-      this.outputChannel.warn('getAvailableModels discovery failed, using fallback model', {
-        fallbackModel: config.model
-      });
+      logger.warn('getAvailableModels discovery failed, using fallback model', { fallbackModel: config.model, error });
       onCacheState?.('fallback');
       return fallbackCatalog;
     }
@@ -1153,9 +1165,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken,
     authIdentity: string
   ): Promise<ProviderModelCatalog> {
+    const logger = this.logger.operation('model-discovery.fetch');
     const upstreamModels = await fetchAvailableModels(config, credentials, token);
     const models = this.applyModelDiscoveryPolicy(buildProviderModels(config, upstreamModels, credentials.kind), config, authIdentity);
-    this.outputChannel.info('getAvailableModels discovery success', {
+    logger.debug('getAvailableModels discovery success', {
       discoveredCount: upstreamModels.length,
       returnedCount: models.length,
       requestModels: models.map((model) => model.requestModel)
@@ -1446,7 +1459,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     if (filteredModels.length !== models.length) {
-      this.outputChannel.info('model discovery policy filtered models', {
+      this.outputChannel.debug('model discovery policy filtered models', {
         before: models.map((model) => model.requestModel),
         after: filteredModels.map((model) => model.requestModel),
         disabledModels: [...disabledModels],
