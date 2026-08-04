@@ -8,6 +8,7 @@ import { CodexOAuthClient, type OAuthTokens } from './codexOAuthClient';
 import { signInWithLoopback } from './codexLoopbackLogin';
 import { signInWithDeviceCode } from './codexDeviceCodeLogin';
 import { AuthRequiredError, type CodexAuthChangeEvent, type CodexAuthStatus, type CodexCredentialRecord, type CodexCredentialSnapshot, type ExtensionOAuthCredentialRecord, ReauthRequiredError, TokenRefreshError } from './codexAuthTypes';
+import type { CodexLogger } from '../codexLogger';
 
 export class CodexAuthManager implements vscode.Disposable {
   private refreshPromise: Promise<CodexCredentialSnapshot> | undefined;
@@ -18,7 +19,7 @@ export class CodexAuthManager implements vscode.Disposable {
     private readonly store: CodexSecretStore,
     private readonly lock: CodexAuthLock,
     private readonly oauth = new CodexOAuthClient(),
-    private readonly log?: (message: string, details?: Record<string, unknown>) => void
+    private readonly logger?: CodexLogger
   ) {}
   dispose(): void { this.changes.dispose(); }
   async getStatus(): Promise<CodexAuthStatus> { const record = await this.store.getCredential(); if (!record) return { authenticated: false }; const snapshot = snapshotFor(record); return { authenticated: true, source: record.source, email: record.email, accountId: snapshot.accountId, accessTokenExpiresAt: snapshot.expiresAt, lastRefresh: record.source === 'extensionOAuth' ? record.lastRefreshAt : record.loadedAt, reauthRequired: this.permanentFailureRevision === snapshot.revision }; }
@@ -26,19 +27,20 @@ export class CodexAuthManager implements vscode.Disposable {
   async getAccessToken(): Promise<string> { return (await this.getCredentialSnapshot()).accessToken; }
   async importAuthJson(rawJson: string): Promise<void> { const bundle = parseCodexAuthJson(rawJson); const payload = safeDecode(bundle.tokens.id_token); await this.store.setLegacyCredential({ schemaVersion: 2, source: 'legacyCodexFile', revision: randomRevision(), accessToken: bundle.tokens.access_token, accountId: bundle.tokens.account_id, email: stringValue(payload.email), accessTokenExpiresAt: getJwtExpiration(bundle.tokens.access_token), loadedAt: bundle.last_refresh ?? new Date().toISOString() }); this.fire('signedIn'); }
   async signInWithBrowser(): Promise<void> {
-    this.log?.('ChatGPT sign-in started');
+    const logger = this.logger?.operation('auth.browser-sign-in');
+    logger?.info('sign-in.started');
     await signInWithLoopback(
       this.oauth,
       (uri) => vscode.env.openExternal(vscode.Uri.parse(uri)),
       undefined,
-      (stage, port) => this.log?.('ChatGPT sign-in stage', { stage, port }),
+      (stage, port) => logger?.debug('sign-in.stage', { stage, port }),
       async (tokens) => {
         await this.completeSignIn(tokens);
-        this.log?.('ChatGPT credentials stored');
+        logger?.info('sign-in.completed');
       }
     );
   }
-  async signInWithDeviceCode(): Promise<void> { await this.completeSignIn(await signInWithDeviceCode(this.oauth)); }
+  async signInWithDeviceCode(): Promise<void> { const logger = this.logger?.operation('auth.device-code-sign-in'); try { await this.completeSignIn(await signInWithDeviceCode(this.oauth)); logger?.info('sign-in.completed'); } catch (error) { logger?.error('sign-in.failed', error); throw error; } }
   async refreshIfNeeded(reason: 'proactive' | 'unauthorized' = 'proactive'): Promise<CodexCredentialSnapshot> {
     if (!this.refreshPromise) this.refreshPromise = this.doRefresh(reason).finally(() => { this.refreshPromise = undefined; });
     return this.refreshPromise;
@@ -51,7 +53,10 @@ export class CodexAuthManager implements vscode.Disposable {
   async signOut(): Promise<void> { const record = await this.store.getCredential(); if (record?.source === 'extensionOAuth') await this.oauth.revoke(record.tokens.refresh_token).catch(() => undefined); await this.store.deleteCredential(); this.permanentFailureRevision = undefined; this.fire('signedOut'); }
   private async doRefresh(reason: 'proactive' | 'unauthorized'): Promise<CodexCredentialSnapshot> {
     const existing = await this.store.getCredential(); if (!existing) throw new AuthRequiredError(); if (existing.source !== 'extensionOAuth') return snapshotFor(existing); if (reason === 'proactive' && !needsRefresh(existing)) return snapshotFor(existing); if (this.permanentFailureRevision === existing.revision) throw new ReauthRequiredError();
-    return this.lock.withLock(async () => { const latest = await this.store.getCredential(); if (!latest) throw new AuthRequiredError(); if (latest.source !== 'extensionOAuth') return snapshotFor(latest); if (reason === 'proactive' && !needsRefresh(latest)) return snapshotFor(latest); const tokens = await this.oauth.refresh(latest.tokens.refresh_token); const replacement: ExtensionOAuthCredentialRecord = { ...latest, revision: randomRevision(), tokens: { ...latest.tokens, ...tokens }, accessTokenExpiresAt: getJwtExpiration(tokens.access_token ?? latest.tokens.access_token), lastRefreshAt: new Date().toISOString() }; await this.store.setCredential(replacement); this.permanentFailureRevision = undefined; this.fire('tokensRefreshed', replacement.revision); return snapshotFor(replacement); });
+    const logger = this.logger?.operation('auth.refresh', { reason });
+    try {
+      return await this.lock.withLock(async () => { const latest = await this.store.getCredential(); if (!latest) throw new AuthRequiredError(); if (latest.source !== 'extensionOAuth') return snapshotFor(latest); if (reason === 'proactive' && !needsRefresh(latest)) return snapshotFor(latest); const tokens = await this.oauth.refresh(latest.tokens.refresh_token); const replacement: ExtensionOAuthCredentialRecord = { ...latest, revision: randomRevision(), tokens: { ...latest.tokens, ...tokens }, accessTokenExpiresAt: getJwtExpiration(tokens.access_token ?? latest.tokens.access_token), lastRefreshAt: new Date().toISOString() }; await this.store.setCredential(replacement); this.permanentFailureRevision = undefined; this.fire('tokensRefreshed', replacement.revision); logger?.info('refresh.completed'); return snapshotFor(replacement); });
+    } catch (error) { logger?.warn('refresh.failed', { error }); throw error; }
   }
   private async completeSignIn(tokens: OAuthTokens): Promise<void> { const payload = safeDecode(tokens.id_token); const previous = await this.store.getCredential(); const record: ExtensionOAuthCredentialRecord = { schemaVersion: 2, source: 'extensionOAuth', revision: randomRevision(), tokens, email: stringValue(payload.email), accessTokenExpiresAt: getJwtExpiration(tokens.access_token), lastRefreshAt: new Date().toISOString() }; await this.store.setCredential(record); this.permanentFailureRevision = undefined; this.fire(previous ? 'accountChanged' : 'signedIn', record.revision); }
   private fire(reason: CodexAuthChangeEvent['reason'], revision?: string): void { this.changes.fire({ reason, revision }); }

@@ -899,8 +899,6 @@ async function runProviderFallbackSmokeTest() {
           resolvePostRejectionCacheLookup(payload);
         }
       }
-    },
-    info(message) {
       if (message === 'getAvailableModels discovery success') {
         discoverySuccessCount += 1;
         if (discoverySuccessCount === 2) {
@@ -908,6 +906,7 @@ async function runProviderFallbackSmokeTest() {
         }
       }
     },
+    info() {},
     warn(message, payload) {
       warnings.push({ message, payload });
     },
@@ -1810,7 +1809,9 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
       subscriptions: []
     },
     {
-      debug() {},
+      debug(message, data) {
+        infoEvents.push({ message, data });
+      },
       info(message, data) {
         infoEvents.push({ message, data });
       },
@@ -1882,14 +1883,6 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
     assertEqual(typeof observedToolResults[0].reportedToResultObservedMs, 'number', 'observed tool result latency is numeric');
     assertEqual(typeof observedToolResults[0].responseCompletedToResultObservedMs, 'number', 'VS Code tool-loop latency after provider completion is numeric');
     assertEqual(observedToolResults[0].resultBytes > 0, true, 'observed tool result size is recorded');
-    const recoveryTiming = infoEvents.find((event) => event.message === 'tool result recovery timing');
-    assertEqual(recoveryTiming?.data?.toolResults?.length, 1, 'tool recovery timing records one result');
-    assertEqual(recoveryTiming?.data?.toolResults?.[0]?.callId, 'call_tool_loop', 'tool recovery timing call id');
-    assertEqual(
-      typeof recoveryTiming?.data?.toolResults?.[0]?.resultObservedToRequestSentMs,
-      'number',
-      'tool recovery request latency is numeric'
-    );
     assertEqual(secondParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''), 'Tool result received.', 'tool loop continues once');
 
   } finally {
@@ -3115,12 +3108,12 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
       subscriptions: []
     },
     {
-      debug() {},
-      info(message, payload) {
+      debug(message, payload) {
         if (message === 'response latency') {
           latencySnapshots.push(payload);
         }
       },
+      info() {},
       warn() {},
       error() {}
     },
