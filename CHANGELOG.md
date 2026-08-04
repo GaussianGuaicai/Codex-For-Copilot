@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.4.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.1...v1.4.2) (2026-08-04)
+
+
+### Bug Fixes
+
+* improve extension logging diagnostics ([#59](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/59)) ([7722eeb](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/7722eeb85dc2857366f28faa8b4d6acf0371a8e6))
+
 ## [1.4.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.0...v1.4.1) (2026-08-01)
 
 
