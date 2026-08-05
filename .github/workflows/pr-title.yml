@@ -1,0 +1,49 @@
+name: Pull Request Title
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Conventional Commit title
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Check pull request title
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|revert|docs|refactor|test|build|ci|chore)(\([a-z0-9][a-z0-9._/-]*\))?!?:[[:space:]].+'
+
+          if [[ "${PR_TITLE}" =~ ${pattern} ]]; then
+            exit 0
+          fi
+
+          cat <<'EOF'
+          Pull request titles must follow Conventional Commits so squash merges
+          produce exactly one Release Please changelog entry.
+
+          Examples:
+            feat(auth): add native ChatGPT OAuth sign-in
+            fix(streaming): preserve visible output metrics
+            perf(transport): reduce websocket startup latency
+            chore(master): release 1.4.2
+          EOF
+          exit 1

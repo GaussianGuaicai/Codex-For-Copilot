@@ -6,23 +6,46 @@ import { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexAuthenticationProvider, CODEX_AUTHENTICATION_PROVIDER_ID } from './auth/codexAuthenticationProvider';
 import { CodexSecretStore } from './auth/codexSecretStore';
 import { InvalidAuthJsonError } from './auth/codexAuthTypes';
+import { createCodexLogger } from './codexLogger';
+import { getProviderConfig } from './config';
 import { clearApiKey, setApiKey } from './secrets';
 import { enableNativeToolSearchGroupingBridge, restoreVSCodeToolGrouping } from './nativeToolSearch/nativeToolGroupingBridge';
 
 export function activate(context: vscode.ExtensionContext): void {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
+  const logger = createCodexLogger(outputChannel, 'extension');
+  logger.info('extension.activated', {
+    extensionVersion: context.extension.packageJSON.version,
+    vscodeVersion: vscode.version,
+    platform: process.platform,
+    architecture: process.arch,
+    logLevel: outputChannel.logLevel
+  });
+  const config = getProviderConfig();
+  logger.debug('configuration.loaded', {
+    baseURL: config.baseURL,
+    credentialsSource: config.credentialsSource,
+    transport: config.transport,
+    websocketPrewarm: config.websocketPrewarm,
+    requestCompression: config.requestCompression,
+    model: config.model,
+    includeHiddenModels: config.includeHiddenModels,
+    defaultServiceTier: config.defaultServiceTier ?? 'auto',
+    defaultReasoningEffort: config.defaultReasoningEffort ?? 'auto'
+  });
   void vscode.workspace.fs.createDirectory(context.globalStorageUri);
   const authManager = new CodexAuthManager(
     new CodexSecretStore(context.secrets),
     new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, 'codex-auth-refresh.lock')),
     undefined,
-    (message, details) => outputChannel.info(message, details)
+    logger.child('auth')
   );
   const authenticationProvider = new CodexAuthenticationProvider(authManager);
-  const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, outputChannel, authManager);
-  const provider = new CodexModelProvider(context, outputChannel, undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
+  const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, logger.child('account-usage'), authManager);
+  const provider = new CodexModelProvider(context, logger.child('provider'), undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
 
-  context.subscriptions.push(authManager, authManager.onDidChangeAuth(() => {
+  context.subscriptions.push(authManager, authManager.onDidChangeAuth((event) => {
+    logger.child('auth').info('auth.changed', { reason: event.reason });
     provider.handleAuthenticationChanged();
     void accountUsageStatusBar.refresh();
   }));
@@ -39,6 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.lm.registerLanguageModelChatProvider('codex-for-copilot', provider),
     vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
+      logger.debug('command.open-logs');
       outputChannel.show(true);
     }),
     vscode.commands.registerCommand('codexModelProvider.openSettings', () => {
@@ -54,11 +78,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
       if (apiKey?.trim()) {
         await setApiKey(context, apiKey.trim());
+        logger.child('command').info('api-key.saved');
         vscode.window.showInformationMessage('Responses API key saved.');
       }
     }),
     vscode.commands.registerCommand('codexModelProvider.clearApiKey', async () => {
       await clearApiKey(context);
+      logger.child('command').info('api-key.cleared');
       vscode.window.showInformationMessage('Responses API key cleared.');
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.importAuthJson', async () => {
@@ -80,12 +106,14 @@ export function activate(context: vscode.ExtensionContext): void {
         const suffix = status.email ? ` for ${status.email}` : '';
         vscode.window.showInformationMessage(`Codex credentials imported${suffix}.`);
       } catch (error) {
+        logger.child('command').error('auth.import.failed', error);
         const message = error instanceof InvalidAuthJsonError ? error.message : 'Failed to import Codex auth.json.';
         vscode.window.showErrorMessage(message);
       }
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.signOut', async () => {
       await authManager.signOut();
+      logger.child('command').info('auth.sign-out.completed');
       vscode.window.showInformationMessage('Codex credentials removed.');
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.signInWithChatGPT', async () => {
@@ -93,7 +121,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await authManager.signInWithBrowser();
         vscode.window.showInformationMessage('Signed in with ChatGPT.');
       } catch (error) {
-        outputChannel.error('ChatGPT sign-in failed', error);
+        logger.child('command').error('auth.sign-in.failed', error);
         vscode.window.showErrorMessage(error instanceof Error ? error.message : 'ChatGPT sign-in failed.');
       }
     }),

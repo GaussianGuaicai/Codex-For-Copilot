@@ -1,4 +1,4 @@
-export interface NativeToolSearchLogEntry {
+export interface NativeToolSearchLogEntry extends Record<string, unknown> {
   event: 'search_call' | 'search_output';
   execution: string | null;
   status: string | null;

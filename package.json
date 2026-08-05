@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -34,7 +34,7 @@
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",
     "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",
     "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs && node test/smokeNativeToolPolicy.mjs && node test/smokeNativeToolCatalog.mjs && node test/smokeNativeToolNamespaces.mjs && node test/smokeNativeToolCallMapper.mjs && node test/smokeNativeToolSearchEvents.mjs && node test/smokeNativeToolSearchLogging.mjs && node test/smokeNativeToolContinuation.mjs && node test/smokeNativeToolFallback.mjs && node test/smokeNativeToolGroupingBridge.mjs",
-    "test:smoke": "npm run test:codex-parity && node test/smokeReasoningEffort.mjs && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeReasoningStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
+    "test:smoke": "npm run test:codex-parity && node test/smokeCodexLogger.mjs && node test/smokeReasoningEffort.mjs && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeReasoningStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
@@ -75,7 +75,7 @@
       },
       {
         "command": "codexModelProvider.openDebugLogs",
-        "title": "Codex: Open Debug Logs"
+        "title": "Codex: Open Logs"
       },
       {
         "command": "codexModelProvider.openSettings",

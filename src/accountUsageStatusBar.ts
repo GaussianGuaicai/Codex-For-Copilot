@@ -3,6 +3,7 @@ import { buildCodexAccountUsageDisplay, fetchCodexAccountUsage, type CodexAccoun
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { getProviderConfig } from './config';
 import { getApiCredentials } from './secrets';
+import { type CodexLogSink, CodexLogger, createCodexLogger } from './codexLogger';
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -13,12 +14,14 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
   private lastSnapshot?: CodexAccountUsageSnapshot;
   private refreshInFlight?: Promise<void>;
   private selectedModel = getProviderConfig().model;
+  private readonly logger: CodexLogger;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly outputChannel: vscode.LogOutputChannel,
+    logger: CodexLogger | CodexLogSink,
     private readonly authManager?: CodexAuthManager
   ) {
+    this.logger = logger instanceof CodexLogger ? logger : createCodexLogger(logger, 'account-usage');
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
     this.statusBarItem.name = 'Codex Account Limits';
     this.statusBarItem.command = 'codexModelProvider.refreshAccountLimits';
@@ -86,12 +89,14 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
   }
 
   private async refreshNow(): Promise<void> {
+    const logger = this.logger.operation('account-usage.refresh');
     const config = getProviderConfig();
     const credentials = await getApiCredentials(this.context, this.authManager);
 
     if (!credentials || credentials.kind !== 'codexAccessToken') {
       this.lastSnapshot = undefined;
       this.statusBarItem.hide();
+      logger.debug('refresh.skipped', { reason: 'credentials-unavailable' });
       return;
     }
 
@@ -103,10 +108,13 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
       });
       this.lastSnapshot = snapshot;
       this.render(snapshot);
-    } catch (error) {
-      this.outputChannel.warn('Codex account usage refresh failed', {
-        message: error instanceof Error ? error.message : String(error)
+      logger.debug('refresh.completed', {
+        selectedModel: this.selectedModel,
+        rateLimitCount: snapshot.limits.length,
+        creditBudgetCount: snapshot.creditBudgets.length
       });
+    } catch (error) {
+      logger.warn('refresh.failed', { error });
 
       if (this.lastSnapshot) {
         this.render(this.lastSnapshot);
