@@ -324,12 +324,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       nativeToolSearchSupported: canUseNativeToolSearch(selectedModel.requestModel, nativeToolSearchKey)
     });
     if (hasVirtualToolPlaceholder(options.tools)) {
-      this.outputChannel.trace('native Tool Search unavailable because VS Code supplied virtual tool placeholders', {
+      this.outputChannel.debug('native Tool Search unavailable because VS Code supplied virtual tool placeholders', {
         virtualPlaceholderCount: options.tools?.filter((tool) => /^activate_group_/i.test(tool.name)).length ?? 0
       });
     }
     if (toolPlan.mode === 'native-hosted') {
-      this.outputChannel.trace('native Tool Search plan', {
+      this.outputChannel.debug('native Tool Search plan', {
         requestModel: selectedModel.requestModel,
         catalogHash: toolPlan.catalogHash,
         immediateFunctionCount: toolPlan.immediateToolCount,
@@ -760,7 +760,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         onRawResponseItem: (item) => {
           const toolSearchEvent = summarizeNativeToolSearchItem(item);
           if (toolSearchEvent) {
-            this.outputChannel.trace('native Tool Search event', toolSearchEvent);
+            this.outputChannel.debug('native Tool Search event', toolSearchEvent);
           }
           rawResponseItems.push(item);
         },
