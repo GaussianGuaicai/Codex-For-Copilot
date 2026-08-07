@@ -204,6 +204,13 @@
           ],
           "description": "Controls native OpenAI Responses Tool Search for selected VS Code Agent tools. It is unavailable while VS Code supplies virtual tool placeholders."
         },
+        "codexModelProvider.nativeToolSearchMaxToolsPerNamespace": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Maximum number of deferred functions in each Native Tool Search namespace. Lower values create smaller groups; 8 is the supported upper limit."
+        },
         "codexModelProvider.model": {
           "type": "string",
           "default": "gpt-5.5",

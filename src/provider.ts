@@ -322,6 +322,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       model: selectedModel.requestModel,
       compatibilityEnabled: compatibilityProfile.enabled,
       nativeToolSearch: config.nativeToolSearch,
+      maxToolsPerNamespace: config.nativeToolSearchMaxToolsPerNamespace,
       extensions: (vscode as typeof vscode & { extensions?: { all?: readonly vscode.Extension<any>[] } }).extensions?.all ?? [],
       nativeToolSearchSupported: canUseNativeToolSearch(selectedModel.requestModel, nativeToolSearchKey)
     });
@@ -955,6 +956,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           model: selectedModel.requestModel,
           compatibilityEnabled: compatibilityProfile.enabled,
           nativeToolSearch: 'disabled',
+          maxToolsPerNamespace: config.nativeToolSearchMaxToolsPerNamespace,
           extensions: (vscode as typeof vscode & { extensions?: { all?: readonly vscode.Extension<any>[] } }).extensions?.all ?? []
         });
         requestOptions = { ...requestOptions, toolPlan };

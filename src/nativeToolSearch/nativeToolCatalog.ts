@@ -10,6 +10,7 @@ export interface ResolveCodexToolPlanOptions {
   model: string;
   compatibilityEnabled: boolean;
   nativeToolSearch: 'auto' | 'enabled' | 'disabled';
+  maxToolsPerNamespace?: number;
   extensions: readonly vscode.Extension<any>[];
   nativeToolSearchSupported?: boolean;
 }
@@ -36,7 +37,7 @@ export function resolveCodexToolPlan(options: ResolveCodexToolPlanOptions): Code
   const immediateNames = chooseImmediateToolNames(tools);
   const immediate = records.filter((record) => immediateNames.has(record.originalName));
   const deferred = records.filter((record) => !immediateNames.has(record.originalName));
-  const groups = groupDeferredRecords(deferred);
+  const groups = groupDeferredRecords(deferred, normalizeMaxToolsPerNamespace(options.maxToolsPerNamespace));
   const mappings = new Map<string, { namespace?: string; backendName: string; vscodeName: string }>();
   const responseTools: OpenAIResponseTool[] = immediate.map((record) => {
     mappings.set(createToolCallMappingKey(undefined, record.originalName), {
@@ -68,7 +69,7 @@ export function resolveCodexToolPlan(options: ResolveCodexToolPlanOptions): Code
 
 interface NamespaceGroup { namespace: string; description: string; records: NativeToolRecord[] }
 
-function groupDeferredRecords(records: readonly NativeToolRecord[]): NamespaceGroup[] {
+function groupDeferredRecords(records: readonly NativeToolRecord[], maxToolsPerNamespace: number): NamespaceGroup[] {
   const byKey = new Map<string, NativeToolRecord[]>();
   for (const record of records) {
     const list = byKey.get(record.source.key) ?? [];
@@ -78,16 +79,23 @@ function groupDeferredRecords(records: readonly NativeToolRecord[]): NamespaceGr
   const groups: NamespaceGroup[] = [];
   for (const [key, sourceRecords] of [...byKey.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const sorted = [...sourceRecords].sort((left, right) => left.originalName.localeCompare(right.originalName));
-    for (let index = 0; index < sorted.length; index += MAX_NAMESPACE_FUNCTIONS) {
-      const part = sorted.slice(index, index + MAX_NAMESPACE_FUNCTIONS);
+    for (let index = 0; index < sorted.length; index += maxToolsPerNamespace) {
+      const part = sorted.slice(index, index + maxToolsPerNamespace);
       groups.push({
-        namespace: createNamespaceName(part[0], index / MAX_NAMESPACE_FUNCTIONS + 1),
+        namespace: createNamespaceName(part[0], index / maxToolsPerNamespace + 1),
         description: part[0].source.description,
         records: part
       });
     }
   }
   return groups.sort((left, right) => left.namespace.localeCompare(right.namespace));
+}
+
+function normalizeMaxToolsPerNamespace(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return MAX_NAMESPACE_FUNCTIONS;
+  }
+  return Math.min(MAX_NAMESPACE_FUNCTIONS, Math.max(1, Math.floor(value)));
 }
 
 function createNamespaceName(record: NativeToolRecord, part: number): string {

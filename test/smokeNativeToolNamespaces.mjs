@@ -27,5 +27,16 @@ try {
   assertEqual(privateNamespaces.length, 3, 'unattributed tools share the private namespace and are chunked');
   assertEqual(privateNamespaces.every((tool) => tool.name.startsWith('private_tools_')), true, 'private fallback keeps its namespace prefix');
   assertEqual(privateNamespaces.map((tool) => tool.tools.length).join(','), '8,8,6', 'private namespace chunks are capped at eight functions');
+  const configuredPlan = resolveCodexToolPlan({
+    tools: privateTools,
+    model: 'gpt-5.6-luna',
+    compatibilityEnabled: true,
+    nativeToolSearch: 'enabled',
+    maxToolsPerNamespace: 3,
+    extensions: []
+  });
+  const configuredNamespaces = configuredPlan.responseTools.filter((tool) => tool.type === 'namespace');
+  assertEqual(configuredNamespaces.every((tool) => tool.tools.length <= 3), true, 'configured namespace limit caps each deferred group');
+  assertEqual(configuredNamespaces.map((tool) => tool.tools.length).join(','), '3,3,3,3,3,3,3,1', 'configured namespace limit repartitions deferred tools deterministically');
   console.log('Smoke test passed: native namespaces are deterministic, bounded, and deferred.');
 } finally { await loaded.dispose(); }
