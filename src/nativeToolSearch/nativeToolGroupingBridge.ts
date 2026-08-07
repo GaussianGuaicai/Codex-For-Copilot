@@ -2,18 +2,17 @@ import * as vscode from 'vscode';
 
 const VIRTUAL_TOOLS_CONFIGURATION_SECTION = 'github.copilot.chat.virtualTools';
 const THRESHOLD_SETTING = 'threshold';
-const RELOAD_WINDOW_COMMAND = 'workbench.action.reloadWindow';
-const OWNER_KEY = 'nativeToolSearch.virtualToolsThresholdOwner';
+export const NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY = 'nativeToolSearch.virtualToolsThresholdOwner';
 const PREVIOUS_KEY = 'nativeToolSearch.virtualToolsThresholdPrevious';
 
 interface SavedThreshold { value: unknown; target: vscode.ConfigurationTarget }
 
 export async function enableNativeToolSearchGroupingBridge(context: vscode.ExtensionContext): Promise<void> {
   const accepted = await vscode.window.showWarningMessage(
-    'Enable Native Tool Search? This temporarily disables VS Code virtual tool grouping and reloads the window. The active Agent session will be reset.',
-    { modal: true }, 'Enable and Reload'
+    'Enable Native Tool Search? This temporarily disables VS Code virtual tool grouping. It takes effect on the next Agent request.',
+    { modal: true }, 'Enable'
   );
-  if (accepted !== 'Enable and Reload') {
+  if (accepted !== 'Enable') {
     return;
   }
   const configuration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
@@ -23,18 +22,20 @@ export async function enableNativeToolSearchGroupingBridge(context: vscode.Exten
   if (!savedThresholds.some((saved) => saved.target === target)) {
     savedThresholds.push({ value: getSettingValueAtTarget(inspected, target), target });
   }
-  await configuration.update(THRESHOLD_SETTING, 0, target);
-  if (configuration.get<number>(THRESHOLD_SETTING) !== 0) {
-    void vscode.window.showErrorMessage('Native Tool Search could not disable VS Code virtual tool grouping. Check that github.copilot.chat.virtualTools.threshold can be changed in Settings.');
+  try {
+    await configuration.update(THRESHOLD_SETTING, 0, target);
+  } catch (error) {
+    const reason = error instanceof Error ? ` ${error.message}` : '';
+    void vscode.window.showErrorMessage(`Native Tool Search could not update github.copilot.chat.virtualTools.threshold.${reason}`);
     return;
   }
   await context.globalState.update(PREVIOUS_KEY, savedThresholds);
-  await context.globalState.update(OWNER_KEY, true);
-  await resetToolGroupsAndReload('Native Tool Search enabled.');
+  await context.globalState.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, true);
+  await resetToolGroups('Native Tool Search enabled. It will be used on the next Agent request.');
 }
 
 export async function restoreVSCodeToolGrouping(context: vscode.ExtensionContext): Promise<void> {
-  if (context.globalState.get<boolean>(OWNER_KEY) !== true) {
+  if (context.globalState.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) !== true) {
     return;
   }
   const configuration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
@@ -44,9 +45,9 @@ export async function restoreVSCodeToolGrouping(context: vscode.ExtensionContext
       await configuration.update(THRESHOLD_SETTING, previous.value, previous.target);
     }
   }
-  await context.globalState.update(OWNER_KEY, undefined);
+  await context.globalState.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, undefined);
   await context.globalState.update(PREVIOUS_KEY, undefined);
-  await resetToolGroupsAndReload('VS Code tool grouping restored.');
+  await resetToolGroups('VS Code tool grouping restored. It will apply on the next Agent request.');
 }
 
 function getSettingValueAtTarget(
@@ -92,17 +93,12 @@ function isConfigurationTarget(value: unknown): value is vscode.ConfigurationTar
     || value === vscode.ConfigurationTarget.WorkspaceFolder;
 }
 
-async function resetToolGroupsAndReload(successMessage: string): Promise<void> {
-  let resetToolGroups = true;
+async function resetToolGroups(successMessage: string): Promise<void> {
   try {
     await vscode.commands.executeCommand('github.copilot.debug.resetVirtualToolGroups');
   } catch {
-    resetToolGroups = false;
+    void vscode.window.showWarningMessage(`${successMessage} Copilot tool groups could not be reset. Reload Window before starting a new Agent request.`);
+    return;
   }
-  try {
-    await vscode.commands.executeCommand(RELOAD_WINDOW_COMMAND);
-  } catch {
-    const resetStatus = resetToolGroups ? '' : ' Copilot tool groups could not be reset.';
-    void vscode.window.showWarningMessage(`${successMessage}${resetStatus} Reload Window before starting a new Agent request.`);
-  }
+  void vscode.window.showInformationMessage(successMessage);
 }

@@ -13,6 +13,7 @@ const moduleLoad = Module._load;
 const require = createRequire(import.meta.url);
 let performanceNow = () => Date.now();
 const performanceMock = { now: () => performanceNow() };
+const warningMessages = [];
 
 const configValues = {
   baseURL: '',
@@ -112,8 +113,8 @@ const vscodeMock = {
     Required: 2
   },
   window: {
-    async showWarningMessage() {
-      throw new Error('showWarningMessage should not be called during smokeProviderFallback.');
+    async showWarningMessage(message) {
+      warningMessages.push(message);
     }
   },
   commands: {
@@ -190,6 +191,7 @@ try {
   await runProviderAuthoritativeCatalogSmokeTest();
   await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
   await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
+  await runProviderVirtualToolFallbackNotificationSmokeTest();
   console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
 } finally {
   Module._load = moduleLoad;
@@ -2092,6 +2094,80 @@ async function closeServer(server) {
   await new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
+}
+
+async function runProviderVirtualToolFallbackNotificationSmokeTest() {
+  const savedConfig = { ...configValues };
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.5', 'GPT-5.5')] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    writeSseResponse(response, 'virtual fallback', `resp_virtual_${responseRequests.length}`);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  Object.assign(configValues, {
+    baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+    transport: 'http',
+    model: 'gpt-5.5',
+    nativeToolSearch: 'enabled',
+    disabledModels: [],
+    modelAliases: {}
+  });
+  const globalState = new Map();
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      globalState: { get: (key) => globalState.get(key), update: async (key, value) => globalState.set(key, value) },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  const virtualTool = { name: 'activate_group_workspace', description: 'Activate workspace tools', inputSchema: { type: 'object' } };
+  const warningCount = warningMessages.length;
+
+  try {
+    const [model] = await provider.provideLanguageModelChatInformation({ silent: true }, createCancellationToken());
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Inspect the workspace.')] }],
+      { tools: [virtualTool] },
+      { report() {} },
+      createCancellationToken()
+    );
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Inspect the workspace again.')] }],
+      { tools: [virtualTool] },
+      { report() {} },
+      createCancellationToken()
+    );
+
+    assertEqual(responseRequests[0].tools[0].name, 'activate_group_workspace', 'Virtual Tool fallback preserves the VS Code placeholder for this request');
+    assertEqual(warningMessages.length, warningCount + 1, 'Virtual Tool fallback warns once for a persistent placeholder set');
+    assertEqual(
+      warningMessages.at(-1)?.includes('falling back to VS Code Virtual Tools'),
+      true,
+      'Virtual Tool fallback explains the actual runtime behavior to the user'
+    );
+  } finally {
+    Object.assign(configValues, savedConfig);
+    delete configValues.nativeToolSearch;
+    await closeServer(server);
+  }
 }
 
 function assertEqual(actual, expected, label) {

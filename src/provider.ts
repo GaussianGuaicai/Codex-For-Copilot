@@ -39,13 +39,14 @@ import { createCodexContinuationSnapshot } from './codexContinuation';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
 import { resolveCodexToolPlan } from './nativeToolSearch/nativeToolCatalog';
 import { mapNativeToolCall } from './nativeToolSearch/nativeToolCallMapper';
+import { NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY } from './nativeToolSearch/nativeToolGroupingBridge';
 import {
   canUseNativeToolSearch,
   isNativeToolSearchUnsupportedError,
   markNativeToolSearchUnsupported,
   nativeToolSearchCapabilityKey
 } from './nativeToolSearch/nativeToolCapabilities';
-import { hasVirtualToolPlaceholder } from './nativeToolSearch/nativeToolPolicy';
+import { getVirtualToolPlaceholderNames } from './nativeToolSearch/nativeToolPolicy';
 import { buildCanonicalReplayInput, createCanonicalReplayRequest } from './nativeToolSearch/nativeToolReplay';
 import { summarizeNativeToolSearchItem } from './nativeToolSearch/nativeToolLogging';
 import { StreamPresenter, mergeStreamPresentationMetrics } from './streamPresenter';
@@ -166,6 +167,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     staleTtlMs: MODEL_CACHE_STALE_TTL_MS
   });
   private lastConnectionConfigurationKey?: string;
+  private lastVirtualToolFallbackSignature?: string;
   private readonly logger: CodexLogger;
 
   constructor(
@@ -323,10 +325,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       extensions: (vscode as typeof vscode & { extensions?: { all?: readonly vscode.Extension<any>[] } }).extensions?.all ?? [],
       nativeToolSearchSupported: canUseNativeToolSearch(selectedModel.requestModel, nativeToolSearchKey)
     });
-    if (hasVirtualToolPlaceholder(options.tools)) {
-      this.outputChannel.debug('native Tool Search unavailable because VS Code supplied virtual tool placeholders', {
-        virtualPlaceholderCount: options.tools?.filter((tool) => /^activate_group_/i.test(tool.name)).length ?? 0
+    const virtualToolPlaceholderNames = getVirtualToolPlaceholderNames(options.tools);
+    if (virtualToolPlaceholderNames.length > 0) {
+      this.outputChannel.warn('native Tool Search falling back to VS Code Virtual Tools', {
+        virtualPlaceholderCount: virtualToolPlaceholderNames.length,
+        virtualToolPlaceholderNames
       });
+      this.notifyVirtualToolFallback(
+        config.nativeToolSearch,
+        this.context.globalState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true,
+        virtualToolPlaceholderNames
+      );
+    } else {
+      this.lastVirtualToolFallbackSignature = undefined;
     }
     if (toolPlan.mode === 'native-hosted') {
       this.outputChannel.debug('native Tool Search plan', {
@@ -1084,6 +1095,26 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       };
       activeBranchId = this.responseBranchStore.recordSuccess(reuseEnvelope, input, finalResponseId, activeBranchId, branchState);
     }
+  }
+
+  private notifyVirtualToolFallback(
+    nativeToolSearch: 'auto' | 'enabled' | 'disabled',
+    nativeToolSearchGroupingBridgeEnabled: boolean,
+    virtualToolPlaceholderNames: readonly string[]
+  ): void {
+    if (nativeToolSearch === 'disabled' || (nativeToolSearch === 'auto' && !nativeToolSearchGroupingBridgeEnabled)) {
+      return;
+    }
+    const signature = JSON.stringify(virtualToolPlaceholderNames);
+    if (this.lastVirtualToolFallbackSignature === signature) {
+      return;
+    }
+    this.lastVirtualToolFallbackSignature = signature;
+    const groupCount = virtualToolPlaceholderNames.length;
+    const groupLabel = groupCount === 1 ? 'group' : 'groups';
+    void vscode.window.showWarningMessage(
+      `Native Tool Search is unavailable for this request because VS Code supplied ${groupCount} Virtual Tool ${groupLabel}. The request is falling back to VS Code Virtual Tools.`
+    );
   }
 
   private async resolveRequestIdentity(

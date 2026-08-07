@@ -16,5 +16,10 @@ try {
   assertEqual(plan.responseTools.at(-1).type, 'tool_search', 'hosted search is included once');
   assertEqual(plan.catalogHash, repeated.catalogHash, 'catalog construction is independent of incoming tool order');
   assertEqual(plan.originalToolCount, 13, 'only selected tools are catalogued');
+  const virtualPlan = resolveCodexToolPlan({
+    tools: [...tools, { name: 'activate_group_workspace', description: 'Activate workspace tools', inputSchema: { type: 'object' } }],
+    model: 'gpt-5.6-luna', compatibilityEnabled: true, nativeToolSearch: 'enabled', extensions: []
+  });
+  assertEqual(virtualPlan.mode, 'legacy', 'Virtual Tool placeholders take precedence and retain VS Code virtual-tool execution');
   console.log('Smoke test passed: native Tool Search catalog is selected-only and deterministic.');
 } finally { await loaded.dispose(); }

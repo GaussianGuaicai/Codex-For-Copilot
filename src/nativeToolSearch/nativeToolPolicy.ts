@@ -5,7 +5,14 @@ export const MAX_NAMESPACE_FUNCTIONS = 8;
 export const MAX_IMMEDIATE_FUNCTIONS = 8;
 
 export function hasVirtualToolPlaceholder(tools: readonly vscode.LanguageModelChatTool[] | undefined): boolean {
-  return (tools ?? []).some((tool) => /^activate_group_/i.test(tool.name));
+  return getVirtualToolPlaceholderNames(tools).length > 0;
+}
+
+export function getVirtualToolPlaceholderNames(tools: readonly vscode.LanguageModelChatTool[] | undefined): readonly string[] {
+  return Object.freeze((tools ?? [])
+    .filter((tool) => /^activate_group_/i.test(tool.name))
+    .map((tool) => tool.name)
+    .sort((left, right) => left.localeCompare(right)));
 }
 
 export function supportsNativeToolSearchModel(model: string): boolean {

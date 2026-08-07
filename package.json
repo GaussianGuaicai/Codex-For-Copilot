@@ -198,11 +198,11 @@
           "default": "auto",
           "enum": ["auto", "enabled", "disabled"],
           "enumDescriptions": [
-            "Use hosted Tool Search for compatible Codex requests with sufficiently many selected tools.",
-            "Try hosted Tool Search for compatible Codex requests, with a safe legacy fallback if unsupported.",
+            "Use hosted Tool Search only for compatible Codex requests with at least 12 selected tools; otherwise use legacy function tools.",
+            "Use hosted Tool Search for compatible Codex requests. Retry once with legacy function tools only when the backend explicitly rejects Tool Search.",
             "Always send selected VS Code tools as legacy function tools."
           ],
-          "description": "Controls native OpenAI Responses Tool Search for selected VS Code Agent tools."
+          "description": "Controls native OpenAI Responses Tool Search for selected VS Code Agent tools. It is unavailable while VS Code supplies virtual tool placeholders."
         },
         "codexModelProvider.model": {
           "type": "string",
