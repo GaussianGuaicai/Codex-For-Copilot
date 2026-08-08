@@ -49,6 +49,7 @@ import {
 import { getVirtualToolPlaceholderNames } from './nativeToolSearch/nativeToolPolicy';
 import { buildCanonicalReplayInput, createCanonicalReplayRequest } from './nativeToolSearch/nativeToolReplay';
 import { summarizeNativeToolSearchItem } from './nativeToolSearch/nativeToolLogging';
+import { recordNativeToolSearchRuntimeStatus } from './nativeToolSearch/nativeToolSearchStatus';
 import { StreamPresenter, mergeStreamPresentationMetrics } from './streamPresenter';
 import { ReasoningStreamPresenter } from './reasoningStreamPresenter';
 import {
@@ -340,6 +341,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     } else {
       this.lastVirtualToolFallbackSignature = undefined;
     }
+    recordNativeToolSearchRuntimeStatus({
+      model: selectedModel.requestModel,
+      setting: config.nativeToolSearch,
+      plan: toolPlan,
+      virtualToolPlaceholderCount: virtualToolPlaceholderNames.length
+    });
     if (toolPlan.mode === 'native-hosted') {
       this.outputChannel.debug('native Tool Search plan', {
         requestModel: selectedModel.requestModel,
@@ -972,6 +979,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         completedResponseId = undefined;
         activeBranchId = undefined;
         latency.recordContext({ toolPlanMode: 'legacy' });
+        recordNativeToolSearchRuntimeStatus({
+          model: selectedModel.requestModel,
+          setting: config.nativeToolSearch,
+          plan: toolPlan,
+          virtualToolPlaceholderCount: virtualToolPlaceholderNames.length,
+          reason: 'backend-rejected'
+        });
         this.outputChannel.warn('native Tool Search unsupported; retrying once with selected legacy function tools', {
           requestModel: selectedModel.requestModel,
           nativeToolSearchFallback: true

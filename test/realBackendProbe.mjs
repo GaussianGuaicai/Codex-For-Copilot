@@ -18,6 +18,7 @@ const requestedTransport = process.env.CODEX_TEST_TRANSPORT === 'websocket'
 const runContinuationProbe = process.env.CODEX_TEST_CONTINUATION === '1';
 const runPreconnectionProbe = process.env.CODEX_TEST_PRECONNECT === '1';
 const shouldRunToolContinuationProbe = process.env.CODEX_TEST_TOOL_CONTINUATION === '1';
+const shouldRunNativeToolSearchProbe = process.env.CODEX_TEST_NATIVE_TOOL_SEARCH === '1';
 const requestStore = process.env.CODEX_TEST_STORE === '1';
 const requestedPrewarm = parsePrewarmSetting(process.env.CODEX_TEST_PREWARM);
 const requestedReasoningEffort = parseReasoningEffort(process.env.CODEX_TEST_REASONING_EFFORT);
@@ -219,6 +220,7 @@ try {
   let continuationOutput = null;
   let continuationRecovered = false;
   let toolContinuation = null;
+  let nativeToolSearch = null;
 
   if (runContinuationProbe) {
     if (!previousResponseId) {
@@ -294,6 +296,18 @@ try {
       requestStore
     });
   }
+  if (shouldRunNativeToolSearchProbe) {
+    nativeToolSearch = await runNativeToolSearchProbe({
+      streamResponseText,
+      isResponsesContinuationMissError,
+      credentials,
+      authIdentity: `real-probe:${auth.tokens.account_id ?? 'default'}`,
+      requestedModel,
+      requestedTransport,
+      requestServiceTier,
+      requestStore
+    });
+  }
 
   console.log(JSON.stringify({
     model: requestedModel,
@@ -316,7 +330,8 @@ try {
     output: deltas.join('').trim(),
     continuationOutput,
     continuationRecovered,
-    toolContinuation
+    toolContinuation,
+    nativeToolSearch
   }));
 
   disposeReusableResponsesWebSockets();
@@ -464,6 +479,166 @@ async function runToolContinuationProbe({
     rawResponseItemCount: rawResponseItems.length,
     incrementalInputCount: metrics.find((metric) => typeof metric.incrementalInputCount === 'number')?.incrementalInputCount ?? null,
     previousResponseIdUsed: metrics.some((metric) => metric.previousResponseIdUsed === true)
+  };
+}
+
+async function runNativeToolSearchProbe({
+  streamResponseText,
+  isResponsesContinuationMissError,
+  credentials,
+  authIdentity,
+  requestedModel,
+  requestedTransport,
+  requestServiceTier,
+  requestStore
+}) {
+  const namespace = 'native_tool_search_probe';
+  const toolName = 'native_tool_search_echo';
+  const identity = {
+    installationId: randomUUID(),
+    sessionId: randomUUID(),
+    threadId: randomUUID(),
+    turnId: randomUUID(),
+    windowId: randomUUID()
+  };
+  const responseTools = [
+    {
+      type: 'namespace',
+      name: namespace,
+      description: 'A probe namespace containing the one echo tool required by this test.',
+      tools: [{
+        type: 'function',
+        name: toolName,
+        description: 'Echoes the supplied value for the Native Tool Search probe.',
+        defer_loading: true,
+        strict: false,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { value: { type: 'string' } },
+          required: ['value']
+        }
+      }]
+    },
+    { type: 'tool_search' }
+  ];
+  const toolPlan = {
+    mode: 'native-hosted',
+    responseTools,
+    toolSignatures: { [toolName]: 'native-tool-search-real-probe' },
+    callMappings: new Map([[JSON.stringify([namespace, toolName]), { namespace, backendName: toolName, vscodeName: toolName }]]),
+    catalogHash: 'native-tool-search-real-probe',
+    originalToolCount: 1,
+    immediateToolCount: 0,
+    deferredToolCount: 1,
+    namespaceCount: 1,
+    toolSchemaBytes: Buffer.byteLength(JSON.stringify(responseTools)),
+    deferredToolSchemaBytes: Buffer.byteLength(JSON.stringify(responseTools[0].tools)),
+    nativeToolSearchReason: 'native-enabled'
+  };
+  const initialInput = [{
+    type: 'message',
+    role: 'user',
+    content: `Use Tool Search to load ${toolName} from ${namespace}. Call it exactly once with value "ping". Do not answer with text before the function call. After its result, reply with NATIVE_TOOL_SEARCH_OK only.`
+  }];
+  const baseOptions = {
+    baseURL: 'https://chatgpt.com/backend-api/codex/responses',
+    apiKey: credentials.apiKey,
+    headers: credentials.headers,
+    transport: requestedTransport,
+    compatibilityProfile: {
+      enabled: true,
+      endpointKey: 'https://chatgpt.com/backend-api/codex/responses'
+    },
+    identity,
+    authIdentity,
+    extensionVersion: 'real-backend-native-tool-search-probe',
+    userAgent: 'codex-for-copilot/real-backend-native-tool-search-probe',
+    websocketPrewarm: 'disabled',
+    requestCompression: 'disabled',
+    store: requestStore,
+    omitMaxOutputTokens: credentials.omitMaxOutputTokens,
+    model: requestedModel,
+    instructions: 'You are a deterministic test assistant. Follow the user request exactly.',
+    ...(requestServiceTier ? { serviceTier: requestServiceTier } : {}),
+    toolPlan,
+    toolMode: 2,
+    maxOutputTokens: 64
+  };
+  const toolCalls = [];
+  const rawResponseItems = [];
+  const metrics = [];
+  let initialResponseId = null;
+  await runWithRequestTimeout('native Tool Search response', (token) => streamResponseText({
+    ...baseOptions,
+    input: initialInput,
+    token,
+    onTextDelta() {},
+    onToolCall: (call) => toolCalls.push(call),
+    onRawResponseItem: (item) => rawResponseItems.push(item),
+    onResponseCreated: (response) => {
+      initialResponseId = response.id ?? initialResponseId;
+    },
+    onResponseCompleted: (response) => {
+      initialResponseId = response.id ?? initialResponseId;
+    },
+    onTransportMetrics: (metric) => metrics.push(metric)
+  }));
+
+  assertEqual(rawResponseItems.some((item) => item?.type === 'tool_search_call' && item.execution === 'server'), true, 'native Tool Search server search event');
+  assertEqual(rawResponseItems.some((item) => item?.type === 'tool_search_output' && item.execution === 'server'), true, 'native Tool Search server load event');
+  assertEqual(toolCalls.length, 1, 'native Tool Search function call count');
+  assertEqual(toolCalls[0].name, toolName, 'native Tool Search function name');
+  assertEqual(toolCalls[0].namespace, namespace, 'native Tool Search function namespace');
+  assertEqual(toolCalls[0].input.value, 'ping', 'native Tool Search function arguments');
+  if (!initialResponseId) {
+    throw new Error('Native Tool Search probe requires an initial response id.');
+  }
+
+  const toolOutput = { type: 'function_call_output', call_id: toolCalls[0].callId, output: 'ping' };
+  const continuationOutput = [];
+  let continuationRecovered = false;
+  const continuationOptions = {
+    ...baseOptions,
+    input: [toolOutput],
+    previousResponseId: initialResponseId,
+    allowToolOutputContinuation: requestedTransport !== 'http',
+    toolMode: undefined,
+    onTextDelta: (text) => continuationOutput.push(text),
+    onTransportMetrics: (metric) => metrics.push(metric)
+  };
+  try {
+    await runWithRequestTimeout('native Tool Search continuation', (token) => streamResponseText({
+      ...continuationOptions,
+      token
+    }));
+  } catch (error) {
+    if (!isResponsesContinuationMissError(error)) {
+      throw error;
+    }
+    continuationRecovered = true;
+    continuationOutput.length = 0;
+    await runWithRequestTimeout('native Tool Search continuation recovery', (token) => streamResponseText({
+      ...baseOptions,
+      input: [...initialInput, ...rawResponseItems, toolOutput],
+      toolMode: undefined,
+      token,
+      onTextDelta: (text) => continuationOutput.push(text),
+      onTransportMetrics: (metric) => metrics.push(metric)
+    }));
+  }
+
+  assertEqual(continuationOutput.join('').trim().includes('NATIVE_TOOL_SEARCH_OK'), true, 'native Tool Search tool-output continuation');
+  return {
+    attempted: true,
+    transport: requestedTransport,
+    searchCallObserved: true,
+    searchOutputObserved: true,
+    namespacedFunctionCallObserved: true,
+    continuationRecovered,
+    rawResponseItemCount: rawResponseItems.length,
+    toolSchemaBytes: toolPlan.toolSchemaBytes,
+    requestToolSchemaBytes: metrics.find((metric) => typeof metric.toolSchemaBytes === 'number')?.toolSchemaBytes ?? null
   };
 }
 

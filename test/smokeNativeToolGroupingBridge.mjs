@@ -2,14 +2,25 @@ import { loadBundled, assertEqual } from './testBundleHelper.mjs';
 
 const updates = [];
 const commands = [];
+const errors = [];
 const state = new Map();
 let globalThreshold = 128;
 let workspaceThreshold = 64;
 let workspaceFolderThreshold = 32;
+let resetCommandAvailable = true;
+let resetCommandFails = false;
 const vscode = {
   ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
-  window: { showWarningMessage: async () => 'Enable', showInformationMessage: () => undefined },
-  commands: { executeCommand: async (...args) => commands.push(args) },
+  window: { showWarningMessage: async () => 'Enable', showInformationMessage: () => undefined, showErrorMessage: (message) => errors.push(message) },
+  commands: {
+    getCommands: async () => resetCommandAvailable ? ['github.copilot.debug.resetVirtualToolGroups'] : [],
+    executeCommand: async (...args) => {
+      if (resetCommandFails && args[0] === 'github.copilot.debug.resetVirtualToolGroups') {
+        throw new Error('Copilot reset failed');
+      }
+      commands.push(args);
+    }
+  },
   workspace: {
     getConfiguration: () => ({
       // Copilot owns this experimental setting and does not expose it through
@@ -47,5 +58,18 @@ try {
   assertEqual(updates[2][1], 32, 'bridge restores the original workspace-folder threshold after repeated enable');
   assertEqual(updates[2][2], vscode.ConfigurationTarget.WorkspaceFolder, 'bridge restores at the originally modified setting target');
   assertEqual(commands[2][0], 'github.copilot.debug.resetVirtualToolGroups', 'restore resets Copilot virtual tool groups after restoring the threshold');
+  const status = await loaded.exports.getNativeToolGroupingBridgeStatus(context);
+  assertEqual(status.enabledByThisExtension, false, 'status reports the restored bridge state');
+  assertEqual(status.resetCommandAvailable, true, 'status reports the available reset command');
+  resetCommandFails = true;
+  await loaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(updates[3][1], 0, 'bridge attempts the threshold update before the reset command executes');
+  assertEqual(updates[4][1], 32, 'bridge restores the threshold when resetting Copilot tool groups fails');
+  assertEqual(errors.at(-1).includes('no settings were left changed'), true, 'bridge reports that the failed enable was rolled back');
+  resetCommandFails = false;
+  resetCommandAvailable = false;
+  const updateCount = updates.length;
+  await loaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(updates.length, updateCount, 'bridge refuses to change settings when Copilot cannot reset groups');
   console.log('Smoke test passed: virtual tool grouping bridge saves and restores user settings safely.');
 } finally { await loaded.dispose(); }

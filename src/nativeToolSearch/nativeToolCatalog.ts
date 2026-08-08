@@ -1,9 +1,15 @@
 import type { FunctionTool, NamespaceTool, Tool as OpenAIResponseTool, ToolSearchTool } from 'openai/resources/responses/responses';
 import * as vscode from 'vscode';
 import { resolveCodexToolSchemas } from '../codexToolSchemaCache';
-import { chooseImmediateToolNames, hasVirtualToolPlaceholder, MAX_NAMESPACE_FUNCTIONS } from './nativeToolPolicy';
+import {
+  chooseImmediateToolNames,
+  hasVirtualToolPlaceholder,
+  MAX_NAMESPACE_FUNCTIONS,
+  NATIVE_TOOL_SEARCH_THRESHOLD,
+  shouldAutoEnableNativeToolSearch
+} from './nativeToolPolicy';
 import { createNativeToolRecords, shortHash, stableSerialize, type NativeToolRecord } from './nativeToolMetadata';
-import { createToolCallMappingKey, type CodexToolPlan } from './nativeToolTypes';
+import { createToolCallMappingKey, type CodexToolPlan, type NativeToolSearchPlanReason } from './nativeToolTypes';
 
 export interface ResolveCodexToolPlanOptions {
   tools: readonly vscode.LanguageModelChatTool[] | undefined;
@@ -18,23 +24,31 @@ export interface ResolveCodexToolPlanOptions {
 export function resolveCodexToolPlan(options: ResolveCodexToolPlanOptions): CodexToolPlan {
   const legacy = resolveCodexToolSchemas(options.tools);
   const tools = options.tools ?? [];
-  const canUseNative = options.compatibilityEnabled
-    && options.nativeToolSearch !== 'disabled'
+  const shouldEstimateDeferredSchemas = options.compatibilityEnabled
+    && options.nativeToolSearch === 'auto'
     && options.nativeToolSearchSupported !== false
     && !hasVirtualToolPlaceholder(tools)
-    && (options.nativeToolSearch === 'enabled' || tools.length >= 12);
+    && tools.length >= NATIVE_TOOL_SEARCH_THRESHOLD;
+  let immediateNames = shouldEstimateDeferredSchemas ? chooseImmediateToolNames(tools) : undefined;
+  let deferredToolSchemaBytes = immediateNames ? estimateDeferredToolSchemaBytes(tools, immediateNames) : 0;
+  const nativeToolSearchReason = getNativeToolSearchPlanReason(options, deferredToolSchemaBytes);
+  const canUseNative = nativeToolSearchReason === 'native-enabled';
   if (!canUseNative) {
     return {
       mode: 'legacy', responseTools: legacy.responseTools, toolSignatures: legacy.toolSignatures,
       callMappings: new Map(legacy.responseTools.map((tool) => [createToolCallMappingKey(undefined, tool.name), {
         backendName: tool.name, vscodeName: tool.name
       }])), catalogHash: shortHash(stableSerialize(legacy.responseTools)), originalToolCount: tools.length,
-      immediateToolCount: tools.length, deferredToolCount: 0, namespaceCount: 0, toolSchemaBytes: legacy.toolSchemaBytes
+      immediateToolCount: tools.length, deferredToolCount: 0, namespaceCount: 0, toolSchemaBytes: legacy.toolSchemaBytes,
+      deferredToolSchemaBytes, nativeToolSearchReason
     };
   }
 
   const records = createNativeToolRecords(tools, options.extensions);
-  const immediateNames = chooseImmediateToolNames(tools);
+  immediateNames ??= chooseImmediateToolNames(tools);
+  if (deferredToolSchemaBytes === 0) {
+    deferredToolSchemaBytes = estimateDeferredToolSchemaBytes(tools, immediateNames);
+  }
   const immediate = records.filter((record) => immediateNames.has(record.originalName));
   const deferred = records.filter((record) => !immediateNames.has(record.originalName));
   const groups = groupDeferredRecords(deferred, normalizeMaxToolsPerNamespace(options.maxToolsPerNamespace));
@@ -63,8 +77,47 @@ export function resolveCodexToolPlan(options: ResolveCodexToolPlanOptions): Code
     mode: 'native-hosted', responseTools: frozen, toolSignatures, callMappings: mappings,
     catalogHash: shortHash(stableSerialize(frozen)), originalToolCount: records.length,
     immediateToolCount: immediate.length, deferredToolCount: deferred.length,
-    namespaceCount: groups.length, toolSchemaBytes: Buffer.byteLength(JSON.stringify(frozen))
+    namespaceCount: groups.length, toolSchemaBytes: Buffer.byteLength(JSON.stringify(frozen)),
+    deferredToolSchemaBytes, nativeToolSearchReason
   };
+}
+
+function getNativeToolSearchPlanReason(
+  options: ResolveCodexToolPlanOptions,
+  deferredToolSchemaBytes: number
+): NativeToolSearchPlanReason {
+  const tools = options.tools ?? [];
+  if (!options.compatibilityEnabled) {
+    return 'compatibility-disabled';
+  }
+  if (options.nativeToolSearch === 'disabled') {
+    return 'disabled-by-setting';
+  }
+  if (options.nativeToolSearchSupported === false) {
+    return 'backend-unsupported';
+  }
+  if (hasVirtualToolPlaceholder(tools)) {
+    return 'virtual-tools-active';
+  }
+  if (options.nativeToolSearch === 'enabled') {
+    return 'native-enabled';
+  }
+  if (tools.length < NATIVE_TOOL_SEARCH_THRESHOLD) {
+    return 'auto-tool-count-below-threshold';
+  }
+  return shouldAutoEnableNativeToolSearch(tools.length, deferredToolSchemaBytes)
+    ? 'native-enabled'
+    : 'auto-deferred-schema-small';
+}
+
+function estimateDeferredToolSchemaBytes(
+  tools: readonly vscode.LanguageModelChatTool[],
+  immediateNames: ReadonlySet<string>
+): number {
+  const deferred = tools
+    .filter((tool) => !immediateNames.has(tool.name))
+    .map((tool) => ({ description: tool.description ?? '', inputSchema: tool.inputSchema ?? null }));
+  return Buffer.byteLength(stableSerialize(deferred));
 }
 
 interface NamespaceGroup { namespace: string; description: string; records: NativeToolRecord[] }

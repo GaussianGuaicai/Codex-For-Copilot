@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 
 export const NATIVE_TOOL_SEARCH_THRESHOLD = 12;
+export const NATIVE_TOOL_SEARCH_AUTO_DEFERRED_SCHEMA_BYTES = 4 * 1024;
+export const NATIVE_TOOL_SEARCH_AUTO_LARGE_CATALOG_THRESHOLD = 24;
 export const MAX_NAMESPACE_FUNCTIONS = 8;
 export const MAX_IMMEDIATE_FUNCTIONS = 8;
 
@@ -18,6 +20,12 @@ export function getVirtualToolPlaceholderNames(tools: readonly vscode.LanguageMo
 export function supportsNativeToolSearchModel(model: string): boolean {
   const match = /(?:^|[^0-9])gpt-5\.(\d+)(?:[^0-9]|$)/i.exec(model);
   return match !== null && Number(match[1]) >= 4;
+}
+
+export function shouldAutoEnableNativeToolSearch(toolCount: number, deferredToolSchemaBytes: number): boolean {
+  return toolCount >= NATIVE_TOOL_SEARCH_THRESHOLD
+    && (deferredToolSchemaBytes >= NATIVE_TOOL_SEARCH_AUTO_DEFERRED_SCHEMA_BYTES
+      || toolCount >= NATIVE_TOOL_SEARCH_AUTO_LARGE_CATALOG_THRESHOLD);
 }
 
 export function chooseImmediateToolNames(tools: readonly vscode.LanguageModelChatTool[]): ReadonlySet<string> {

@@ -2,6 +2,15 @@ import type { Tool as OpenAIResponseTool } from 'openai/resources/responses/resp
 
 export type CodexToolPlanMode = 'legacy' | 'native-hosted';
 
+export type NativeToolSearchPlanReason =
+  | 'native-enabled'
+  | 'compatibility-disabled'
+  | 'disabled-by-setting'
+  | 'backend-unsupported'
+  | 'virtual-tools-active'
+  | 'auto-tool-count-below-threshold'
+  | 'auto-deferred-schema-small';
+
 export interface CodexToolCallMapping {
   namespace?: string;
   backendName: string;
@@ -19,6 +28,8 @@ export interface CodexToolPlan {
   deferredToolCount: number;
   namespaceCount: number;
   toolSchemaBytes: number;
+  deferredToolSchemaBytes: number;
+  nativeToolSearchReason: NativeToolSearchPlanReason;
 }
 
 export interface CodexFunctionCallEvent {
