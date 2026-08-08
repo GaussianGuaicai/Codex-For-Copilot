@@ -89,6 +89,7 @@ const REPORTED_TOOL_CALL_TTL_MS = 10 * 60_000;
 const MAX_PENDING_REPORTED_TOOL_CALLS = 200;
 const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
 const MAX_TOOL_OUTPUT_CONTINUATION_CAPABILITIES = 64;
+const MAX_LOCAL_TOKEN_ESTIMATE_DIAGNOSTICS = 64;
 // The WebSocket tool-output continuation path passed the real-backend release
 // gate: five consecutive store:false tool loops completed with a matching
 // previous_response_id and a single incremental function_call_output.
@@ -163,6 +164,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private readonly identityManager: CodexIdentityManager;
   private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
   private readonly toolOutputContinuationCapabilities = new Map<string, ToolOutputContinuationCapability>();
+  private readonly localTokenEstimateDiagnostics = new Set<string>();
   private readonly modelCache = new CodexModelCache<ProviderModelCatalog>({
     freshTtlMs: MODEL_CACHE_FRESH_TTL_MS,
     staleTtlMs: MODEL_CACHE_STALE_TTL_MS
@@ -193,6 +195,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           disposeReusableResponsesWebSockets();
           resetCodexFetchCapabilities();
           this.lastConnectionConfigurationKey = undefined;
+          this.localTokenEstimateDiagnostics.clear();
           this.modelCache.clear();
           this.modelInfoChangedEmitter.fire();
         }
@@ -210,6 +213,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     disposeReusableResponsesWebSockets();
     resetCodexFetchCapabilities();
     this.lastConnectionConfigurationKey = undefined;
+    this.localTokenEstimateDiagnostics.clear();
     this.modelCache.clear();
     this.modelInfoChangedEmitter.fire();
   }
@@ -351,6 +355,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       this.outputChannel.debug('native Tool Search plan', {
         requestModel: selectedModel.requestModel,
         catalogHash: toolPlan.catalogHash,
+        nativeToolCatalogCacheHit: toolPlan.nativeToolCatalogCacheHit,
         immediateFunctionCount: toolPlan.immediateToolCount,
         deferredFunctionCount: toolPlan.deferredToolCount,
         includesToolSearch: toolPlan.responseTools.some((tool) => tool.type === 'tool_search'),
@@ -389,7 +394,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       fullInputCount: input.length,
       toolCount: options.tools?.length ?? 0,
       toolSchemaBytes: toolSchemas.toolSchemaBytes,
-      toolSchemaCacheHit: toolPlan.mode === 'legacy',
+      legacyToolSchemaCacheHit: toolPlan.legacyToolSchemaCacheHit,
+      nativeToolCatalogCacheHit: toolPlan.nativeToolCatalogCacheHit,
       toolPlanMode: toolPlan.mode,
       originalToolCount: toolPlan.originalToolCount,
       immediateToolCount: toolPlan.immediateToolCount,
@@ -978,7 +984,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         createdResponseId = undefined;
         completedResponseId = undefined;
         activeBranchId = undefined;
-        latency.recordContext({ toolPlanMode: 'legacy' });
+        latency.recordContext({
+          toolPlanMode: 'legacy',
+          legacyToolSchemaCacheHit: toolPlan.legacyToolSchemaCacheHit,
+          nativeToolCatalogCacheHit: false
+        });
         recordNativeToolSearchRuntimeStatus({
           model: selectedModel.requestModel,
           setting: config.nativeToolSearch,
@@ -1204,11 +1214,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
     if (!credentials || !supportsOfficialTokenCounting(config.baseURL)) {
       const estimated = estimateTokenCount(text);
-      this.outputChannel.trace('provideTokenCount local estimate', {
+      this.logLocalTokenEstimateDiagnosticOnce({
+        baseURL: config.baseURL,
         modelId: model.id,
         requestModel: parseModelIdentifier(model.id || config.model).requestModel,
         count: estimated,
-        reason: credentials ? 'unsupported-backend' : 'missing-credentials'
+        reason: credentials ? 'official-counting-unavailable-for-backend' : 'missing-credentials'
       });
       return estimated;
     }
@@ -1241,14 +1252,46 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       }
       const estimated = estimateTokenCount(text);
       const requestModel = parseModelIdentifier(model.id || config.model).requestModel;
-      this.outputChannel.warn('provideTokenCount fallback to local estimate', {
+      this.outputChannel.warn('provideTokenCount fell back to local estimate after counting request failure', {
         modelId: model.id,
         requestModel,
         count: estimated,
+        source: 'local-estimate',
+        officialCountingAvailable: true,
         durationMs: Date.now() - startedAt
       });
       return estimated;
     }
+  }
+
+  private logLocalTokenEstimateDiagnosticOnce(options: {
+    baseURL: string;
+    modelId: string;
+    requestModel: string;
+    count: number;
+    reason: 'official-counting-unavailable-for-backend' | 'missing-credentials';
+  }): void {
+    const diagnosticKey = JSON.stringify([
+      normalizeBaseURL(options.baseURL),
+      options.requestModel,
+      options.reason
+    ]);
+    if (this.localTokenEstimateDiagnostics.has(diagnosticKey)) {
+      return;
+    }
+    if (this.localTokenEstimateDiagnostics.size >= MAX_LOCAL_TOKEN_ESTIMATE_DIAGNOSTICS) {
+      this.localTokenEstimateDiagnostics.clear();
+    }
+    this.localTokenEstimateDiagnostics.add(diagnosticKey);
+    this.outputChannel.trace('provideTokenCount using local estimate (first occurrence)', {
+      modelId: options.modelId,
+      requestModel: options.requestModel,
+      count: options.count,
+      source: 'local-estimate',
+      officialCountingAvailable: false,
+      reason: options.reason,
+      subsequentOccurrencesSuppressed: true
+    });
   }
 
   private async getAvailableModelCatalog(
@@ -1957,6 +2000,8 @@ function readLatencyContextFromTransportMetrics(metrics: Record<string, unknown>
       ? readNonNegativeInteger(metrics.incrementalInputCount)
       : undefined,
     requestBodyBytes: readNonNegativeInteger(metrics.requestBodyBytes),
+    legacyToolSchemaCacheHit: readBoolean(metrics.legacyToolSchemaCacheHit),
+    nativeToolCatalogCacheHit: readBoolean(metrics.nativeToolCatalogCacheHit),
     websocketSerializeMs: readNonNegativeNumber(metrics.websocketSerializeMs),
     prewarmResult
   };
@@ -1984,4 +2029,8 @@ function readNonNegativeNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? value
     : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }

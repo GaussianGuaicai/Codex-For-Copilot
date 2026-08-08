@@ -51,7 +51,8 @@ export type CodexRequestEnvelopeOptions = Omit<
 export interface CodexRequestBuildMetrics {
   requestBuildMs: number;
   toolSchemaBytes: number;
-  toolSchemaCacheHit: boolean;
+  legacyToolSchemaCacheHit?: boolean;
+  nativeToolCatalogCacheHit?: boolean;
 }
 
 export interface CodexRequestBuildResult {
@@ -112,7 +113,8 @@ export function buildCodexResponsesRequestWithMetrics(
     metrics: {
       requestBuildMs: Math.max(0, performance.now() - startedAt),
       toolSchemaBytes: toolPlan?.toolSchemaBytes ?? legacyToolSchemas?.toolSchemaBytes ?? 0,
-      toolSchemaCacheHit: toolPlan === undefined && (legacyToolSchemas?.cacheHit ?? false)
+      legacyToolSchemaCacheHit: toolPlan?.legacyToolSchemaCacheHit ?? legacyToolSchemas?.cacheHit,
+      nativeToolCatalogCacheHit: toolPlan?.nativeToolCatalogCacheHit
     }
   };
 }

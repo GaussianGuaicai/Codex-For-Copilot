@@ -21,6 +21,14 @@ export interface ResolveCodexToolPlanOptions {
   nativeToolSearchSupported?: boolean;
 }
 
+interface CachedNativeToolCatalog {
+  plan: CodexToolPlan;
+  lastUsedAt: number;
+}
+
+const MAX_NATIVE_TOOL_CATALOG_CACHE_ENTRIES = 32;
+const nativeToolCatalogsByKey = new Map<string, CachedNativeToolCatalog>();
+
 export function resolveCodexToolPlan(options: ResolveCodexToolPlanOptions): CodexToolPlan {
   const legacy = resolveCodexToolSchemas(options.tools);
   const tools = options.tools ?? [];
@@ -40,8 +48,15 @@ export function resolveCodexToolPlan(options: ResolveCodexToolPlanOptions): Code
         backendName: tool.name, vscodeName: tool.name
       }])), catalogHash: shortHash(stableSerialize(legacy.responseTools)), originalToolCount: tools.length,
       immediateToolCount: tools.length, deferredToolCount: 0, namespaceCount: 0, toolSchemaBytes: legacy.toolSchemaBytes,
-      deferredToolSchemaBytes, nativeToolSearchReason
+      deferredToolSchemaBytes, legacyToolSchemaCacheHit: legacy.cacheHit, nativeToolSearchReason
     };
+  }
+
+  const cacheKey = createNativeToolCatalogCacheKey(options, tools);
+  const cached = nativeToolCatalogsByKey.get(cacheKey);
+  if (cached) {
+    cached.lastUsedAt = Date.now();
+    return { ...cached.plan, nativeToolCatalogCacheHit: true };
   }
 
   const records = createNativeToolRecords(tools, options.extensions);
@@ -73,13 +88,20 @@ export function resolveCodexToolPlan(options: ResolveCodexToolPlanOptions): Code
   responseTools.push({ type: 'tool_search' } satisfies ToolSearchTool);
   const toolSignatures = Object.freeze(Object.fromEntries(records.map((record) => [record.originalName, record.signature])));
   const frozen = Object.freeze(responseTools);
-  return {
+  const plan: CodexToolPlan = {
     mode: 'native-hosted', responseTools: frozen, toolSignatures, callMappings: mappings,
     catalogHash: shortHash(stableSerialize(frozen)), originalToolCount: records.length,
     immediateToolCount: immediate.length, deferredToolCount: deferred.length,
     namespaceCount: groups.length, toolSchemaBytes: Buffer.byteLength(JSON.stringify(frozen)),
-    deferredToolSchemaBytes, nativeToolSearchReason
+    deferredToolSchemaBytes, nativeToolCatalogCacheHit: false, nativeToolSearchReason
   };
+  nativeToolCatalogsByKey.set(cacheKey, { plan, lastUsedAt: Date.now() });
+  evictNativeToolCatalogCacheOverflow();
+  return plan;
+}
+
+export function resetNativeToolCatalogCache(): void {
+  nativeToolCatalogsByKey.clear();
 }
 
 function getNativeToolSearchPlanReason(
@@ -149,6 +171,38 @@ function normalizeMaxToolsPerNamespace(value: number | undefined): number {
     return MAX_NAMESPACE_FUNCTIONS;
   }
   return Math.min(MAX_NAMESPACE_FUNCTIONS, Math.max(1, Math.floor(value)));
+}
+
+function createNativeToolCatalogCacheKey(
+  options: ResolveCodexToolPlanOptions,
+  tools: readonly vscode.LanguageModelChatTool[]
+): string {
+  return stableSerialize({
+    maxToolsPerNamespace: normalizeMaxToolsPerNamespace(options.maxToolsPerNamespace),
+    tools: [...tools].sort((left, right) => left.name.localeCompare(right.name)).map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? '',
+      inputSchema: tool.inputSchema ?? null
+    })),
+    extensions: options.extensions.map((extension) => ({
+      id: extension.id,
+      displayName: extension.packageJSON?.displayName,
+      languageModelTools: (extension.packageJSON as { contributes?: { languageModelTools?: unknown } } | undefined)
+        ?.contributes?.languageModelTools ?? null
+    })).sort((left, right) => left.id.localeCompare(right.id))
+  });
+}
+
+function evictNativeToolCatalogCacheOverflow(): void {
+  if (nativeToolCatalogsByKey.size <= MAX_NATIVE_TOOL_CATALOG_CACHE_ENTRIES) {
+    return;
+  }
+  const oldest = [...nativeToolCatalogsByKey.entries()]
+    .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)
+    .slice(0, nativeToolCatalogsByKey.size - MAX_NATIVE_TOOL_CATALOG_CACHE_ENTRIES);
+  for (const [key] of oldest) {
+    nativeToolCatalogsByKey.delete(key);
+  }
 }
 
 function createNamespaceName(record: NativeToolRecord, part: number): string {

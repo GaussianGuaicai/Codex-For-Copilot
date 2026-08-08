@@ -29,6 +29,10 @@ export interface CodexToolPlan {
   namespaceCount: number;
   toolSchemaBytes: number;
   deferredToolSchemaBytes: number;
+  /** True only when a native catalog was reused from the local bounded cache. */
+  nativeToolCatalogCacheHit?: boolean;
+  /** True only when legacy function schemas were reused from their local cache. */
+  legacyToolSchemaCacheHit?: boolean;
   nativeToolSearchReason: NativeToolSearchPlanReason;
 }
 

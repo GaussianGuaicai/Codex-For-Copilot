@@ -192,6 +192,7 @@ try {
   await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
   await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
   await runProviderVirtualToolFallbackNotificationSmokeTest();
+  await runLocalTokenEstimateDiagnosticSmokeTest();
   console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
 } finally {
   Module._load = moduleLoad;
@@ -2987,6 +2988,46 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
   }
 }
 
+async function runLocalTokenEstimateDiagnosticSmokeTest() {
+  const originalBaseURL = configValues.baseURL;
+  const logs = [];
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(logs),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  const model = {
+    id: 'codex::gpt-5.6-luna',
+    name: 'GPT-5.6 Luna',
+    family: 'gpt-5.6-luna',
+    version: 'mock',
+    maxInputTokens: 258400
+  };
+
+  try {
+    const token = createCancellationToken();
+    await provider.provideTokenCount(model, '12345678', token);
+    await provider.provideTokenCount(model, '12345678', token);
+    const localEstimateLogs = logs.filter((entry) => entry.level === 'trace'
+      && entry.message.includes('provideTokenCount using local estimate (first occurrence)'));
+    assertEqual(localEstimateLogs.length, 1, 'known local token-count estimate is logged only once');
+    assertEqual(localEstimateLogs[0].message.includes('subsequentOccurrencesSuppressed'), true, 'local estimate log explains suppression');
+  } finally {
+    configValues.baseURL = originalBaseURL;
+  }
+}
+
 function createMockModel(slug, displayName, overrides = {}) {
   return {
     slug,
@@ -3006,11 +3047,13 @@ function createMockModel(slug, displayName, overrides = {}) {
   };
 }
 
-function createOutputChannel() {
+function createOutputChannel(logs) {
+  const record = (level) => (message) => logs?.push({ level, message });
   return {
-    debug() {},
-    info() {},
-    warn() {},
-    error() {}
+    trace: record('trace'),
+    debug: record('debug'),
+    info: record('info'),
+    warn: record('warn'),
+    error: record('error')
   };
 }

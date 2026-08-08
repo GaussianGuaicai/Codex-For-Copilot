@@ -93,8 +93,8 @@ try {
   assertEqual(event.generate, false, 'prewarm generate flag');
   assertEqual('stream' in event, false, 'WebSocket stream omitted');
   assertEqual(areCodexRequestsIncrementallyCompatible(request, appended), true, 'input ignored by request fingerprint');
-  assertEqual(firstBuild.metrics.toolSchemaCacheHit, false, 'first request build reports schema cache miss');
-  assertEqual(secondBuild.metrics.toolSchemaCacheHit, true, 'second request build reports schema cache hit');
+  assertEqual(firstBuild.metrics.legacyToolSchemaCacheHit, false, 'first legacy request build reports schema cache miss');
+  assertEqual(secondBuild.metrics.legacyToolSchemaCacheHit, true, 'second legacy request build reports schema cache hit');
   assertEqual(firstBuild.metrics.toolSchemaBytes > 0, true, 'request build reports tool schema bytes');
   assertEqual(secondBuild.metrics.requestBuildMs >= 0, true, 'request build reports duration');
   console.log('Smoke test passed: shared Codex request construction and incremental fingerprint are correct.');

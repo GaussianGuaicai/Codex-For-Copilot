@@ -53,7 +53,8 @@ export interface CodexLatencyContext {
   requestBodyBytes?: number;
   toolCount?: number;
   toolSchemaBytes?: number;
-  toolSchemaCacheHit?: boolean;
+  legacyToolSchemaCacheHit?: boolean;
+  nativeToolCatalogCacheHit?: boolean;
   toolPlanMode?: 'legacy' | 'native-hosted';
   originalToolCount?: number;
   immediateToolCount?: number;
@@ -131,8 +132,11 @@ export class CodexLatencyRecorder {
     if (context.toolSchemaBytes !== undefined) {
       this.context.toolSchemaBytes = context.toolSchemaBytes;
     }
-    if (context.toolSchemaCacheHit !== undefined) {
-      this.context.toolSchemaCacheHit = context.toolSchemaCacheHit;
+    if (context.legacyToolSchemaCacheHit !== undefined) {
+      this.context.legacyToolSchemaCacheHit = context.legacyToolSchemaCacheHit;
+    }
+    if (context.nativeToolCatalogCacheHit !== undefined) {
+      this.context.nativeToolCatalogCacheHit = context.nativeToolCatalogCacheHit;
     }
     if (context.toolPlanMode !== undefined) this.context.toolPlanMode = context.toolPlanMode;
     if (context.originalToolCount !== undefined) this.context.originalToolCount = context.originalToolCount;
