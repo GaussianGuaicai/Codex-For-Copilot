@@ -37,6 +37,8 @@ export interface ResponseBranchReuseEnvelope {
   requestFingerprint: string;
   effectiveInputBudget?: number;
   toolSignatures?: ResponseBranchToolSignatures;
+  catalogHash?: string;
+  toolPlanMode?: 'legacy' | 'native-hosted';
 }
 
 export interface ResponseBranchReuseMissDiagnostic {
@@ -311,8 +313,11 @@ function hasMatchingRequestFingerprint(
   envelope: ResponseBranchReuseEnvelope
 ): boolean {
   return branch.envelope.requestFingerprint === envelope.requestFingerprint
+    && branch.envelope.catalogHash === envelope.catalogHash
+    && branch.envelope.toolPlanMode === envelope.toolPlanMode
     && (branch.state?.continuation?.requestFingerprint === undefined
-      || branch.state.continuation.requestFingerprint === envelope.requestFingerprint);
+      || (branch.state.continuation.requestFingerprint === envelope.requestFingerprint
+        && branch.state.continuation.catalogHash === envelope.catalogHash));
 }
 
 function hasCompatibleInputBudget(previous: number | undefined, current: number | undefined): boolean {

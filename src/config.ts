@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { normalizeKnownReasoningEffort, type KnownReasoningEffort } from './reasoningEffort';
+import { MAX_NAMESPACE_FUNCTIONS } from './nativeToolSearch/nativeToolPolicy';
 
 export interface ModelPricing {
   input?: number;
@@ -14,6 +15,8 @@ export interface ProviderConfig {
   transport: 'auto' | 'http' | 'websocket';
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
+  nativeToolSearch: 'auto' | 'enabled' | 'disabled';
+  nativeToolSearchMaxToolsPerNamespace: number;
   model: string;
   includeHiddenModels: boolean;
   disabledModels: string[];
@@ -35,6 +38,10 @@ export function getProviderConfig(): ProviderConfig {
     transport: normalizeTransport(config.get('transport', 'auto')),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
+    nativeToolSearch: normalizeTriState(config.get('nativeToolSearch', 'auto')),
+    nativeToolSearchMaxToolsPerNamespace: normalizeNativeToolSearchMaxToolsPerNamespace(
+      config.get('nativeToolSearchMaxToolsPerNamespace', MAX_NAMESPACE_FUNCTIONS)
+    ),
     model: config.get('model', 'gpt-5.5'),
     includeHiddenModels: config.get('includeHiddenModels', false),
     disabledModels: normalizeStringList(config.get('disabledModels', [])),
@@ -49,6 +56,13 @@ export function getProviderConfig(): ProviderConfig {
 
 function normalizeTriState(value: string): 'auto' | 'enabled' | 'disabled' {
   return value === 'enabled' || value === 'disabled' ? value : 'auto';
+}
+
+function normalizeNativeToolSearchMaxToolsPerNamespace(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return MAX_NAMESPACE_FUNCTIONS;
+  }
+  return Math.min(MAX_NAMESPACE_FUNCTIONS, Math.max(1, Math.floor(value)));
 }
 
 function normalizeTransport(value: string): ProviderConfig['transport'] {

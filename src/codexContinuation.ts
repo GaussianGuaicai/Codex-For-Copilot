@@ -5,6 +5,8 @@ export interface CodexContinuationSnapshot {
   responseId: string;
   responseItems: unknown[];
   requestFingerprint: string;
+  catalogHash?: string;
+  toolPlanMode?: 'legacy' | 'native-hosted';
   turnId: string;
 }
 
@@ -16,6 +18,8 @@ export function createCodexContinuationSnapshot(
   options: {
     clone?: boolean;
     requestFingerprint?: string;
+    catalogHash?: string;
+    toolPlanMode?: 'legacy' | 'native-hosted';
   } = {}
 ): CodexContinuationSnapshot {
   const clone = options.clone !== false;
@@ -24,6 +28,8 @@ export function createCodexContinuationSnapshot(
     responseId,
     responseItems: clone ? structuredClone([...responseItems]) : [...responseItems],
     requestFingerprint: options.requestFingerprint ?? fingerprintCodexRequest(fullRequest),
+    ...(options.catalogHash ? { catalogHash: options.catalogHash } : {}),
+    ...(options.toolPlanMode ? { toolPlanMode: options.toolPlanMode } : {}),
     turnId
   };
 }
@@ -36,6 +42,8 @@ export function cloneCodexContinuationSnapshot(
     responseId: snapshot.responseId,
     responseItems: structuredClone(snapshot.responseItems),
     requestFingerprint: snapshot.requestFingerprint,
+    catalogHash: snapshot.catalogHash,
+    toolPlanMode: snapshot.toolPlanMode,
     turnId: snapshot.turnId
   };
 }

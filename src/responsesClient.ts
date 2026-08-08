@@ -40,6 +40,7 @@ import {
   type CodexConnectionScopeBase
 } from './codexConnectionManager';
 import type { CodexWebSocketHandshake, CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
+import type { CodexFunctionCallEvent, CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 2;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -126,6 +127,7 @@ export interface StreamResponseTextOptions {
   serviceTier?: 'default' | 'priority';
   input: ResponsesInputMessage[];
   tools?: readonly vscode.LanguageModelChatTool[];
+  toolPlan?: CodexToolPlan;
   toolMode?: vscode.LanguageModelChatToolMode;
   reasoning?: Reasoning;
   maxOutputTokens: number;
@@ -136,7 +138,7 @@ export interface StreamResponseTextOptions {
   onToolCallAdded?: (callId: string, name: string) => void;
   onToolCallArgumentsDelta?: (callId: string, name: string) => void;
   onToolCallArgumentsDone?: (callId: string, name: string) => void;
-  onToolCall?: (callId: string, name: string, input: object) => void;
+  onToolCall?: (call: CodexFunctionCallEvent) => void;
   onRawResponseItem?: (item: unknown) => void;
   onTurnState?: (turnState: string) => void;
   onWebSocketHandshake?: (handshake: CodexWebSocketHandshake) => void;
@@ -580,7 +582,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
             || event.type === 'response.reasoning_text.delta'
             || (event as unknown as { type?: string }).type === 'response.reasoning_summary_text.delta'
             || event.type === 'response.function_call_arguments.done'
-            || event.type === 'response.output_item.done') {
+            || (event.type === 'response.output_item.done' && event.item.type === 'function_call')) {
             visibleActivity = true;
           }
           handleEvent(event);
@@ -861,6 +863,7 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
     instructions: options.instructions,
     input: options.input,
     tools: options.tools,
+    toolPlan: options.toolPlan,
     toolMode: options.toolMode,
     reasoning: options.reasoning,
     serviceTier: options.serviceTier,
@@ -1005,16 +1008,22 @@ function getManagedPreconnectionScope(
   };
 }
 
-function createResponsesServerEventHandler(
+export function createResponsesServerEventHandler(
   options: StreamResponseTextOptions
 ): (event: ResponsesServerEvent) => void {
-  const functionCallsByItemId = new Map<string, { callId: string; name: string }>();
+  const functionCallsByItemId = new Map<string, { callId: string; name: string; namespace?: string }>();
   const reportedFunctionCallItemIds = new Set<string>();
   const summaryPresentationIdsByPart = new Map<string, string>();
   const startedReasoningPresentationIds = new Set<string>();
   let nextSummaryPresentationId = 0;
 
-  const reportFunctionCall = (itemId: string, callId: string, name: string, argumentsJson: string) => {
+  const reportFunctionCall = (
+    itemId: string,
+    callId: string,
+    name: string,
+    argumentsJson: string,
+    namespace?: string
+  ) => {
     const normalizedCallId = callId.trim();
     const normalizedName = name.trim();
     if (!normalizedCallId || !normalizedName || reportedFunctionCallItemIds.has(itemId)) {
@@ -1022,7 +1031,13 @@ function createResponsesServerEventHandler(
     }
 
     reportedFunctionCallItemIds.add(itemId);
-    options.onToolCall?.(normalizedCallId, normalizedName, parseToolCallInput(argumentsJson));
+    options.onToolCall?.({
+      itemId,
+      callId: normalizedCallId,
+      name: normalizedName,
+      ...(namespace ? { namespace } : {}),
+      input: parseToolCallInput(argumentsJson)
+    });
   };
 
   return (event) => {
@@ -1107,10 +1122,12 @@ function createResponsesServerEventHandler(
     }
 
     if (event.type === 'response.output_item.added' && event.item.type === 'function_call') {
+      const item = event.item as typeof event.item & { namespace?: string };
       if (event.item.id) {
         functionCallsByItemId.set(event.item.id, {
           callId: event.item.call_id,
-          name: event.item.name
+          name: event.item.name,
+          namespace: item.namespace
         });
         options.onToolCallAdded?.(event.item.call_id, event.item.name);
       }
@@ -1136,7 +1153,8 @@ function createResponsesServerEventHandler(
           event.item_id,
           functionCall.callId,
           firstNonEmptyString(functionCall.name, event.name),
-          event.arguments
+          event.arguments,
+          functionCall.namespace
         );
       }
       return;
@@ -1180,7 +1198,7 @@ function firstNonEmptyString(...values: string[]): string {
 function handleResponsesServerEvent(
   event: ResponsesServerEvent,
   options: StreamResponseTextOptions,
-  reportFunctionCall: (itemId: string, callId: string, name: string, argumentsJson: string) => void,
+  reportFunctionCall: (itemId: string, callId: string, name: string, argumentsJson: string, namespace?: string) => void,
   getSummaryPresentationId?: (itemId: string, outputIndex: number, summaryIndex: number) => string | undefined,
   reportReasoningTextStarted?: (event: ReasoningStreamLifecycleEvent) => void
 ): void {
@@ -1230,7 +1248,8 @@ function handleResponsesServerEvent(
   }
 
   if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
-    reportFunctionCall(event.item.id ?? event.item.call_id, event.item.call_id, event.item.name, event.item.arguments);
+    const item = event.item as typeof event.item & { namespace?: string };
+    reportFunctionCall(event.item.id ?? event.item.call_id, event.item.call_id, event.item.name, event.item.arguments, item.namespace);
     return;
   }
 
