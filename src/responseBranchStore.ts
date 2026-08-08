@@ -7,6 +7,7 @@ import {
 } from './convertMessages';
 import type { CodexRequestIdentity } from './codexProtocol';
 import { cloneCodexContinuationSnapshot, type CodexContinuationSnapshot } from './codexContinuation';
+import { fingerprintCodexRequest } from './codexRequestBuilder';
 
 export interface CodexTurnState {
   id: string;
@@ -29,6 +30,11 @@ export interface ReusableResponseBranchMatch {
   responseId: string;
   comparison: ResponsesInputHistoryComparison;
   state?: CodexBranchState;
+}
+
+export interface ResponseBranchMarkerHint {
+  responseId: string;
+  incrementalInput: readonly ResponsesInputMessage[];
 }
 
 export interface ResponseBranchReuseEnvelope {
@@ -93,12 +99,17 @@ export class ResponseBranchStore {
 
   findReusableBranch(
     envelope: ResponseBranchReuseEnvelope,
-    currentInput: readonly ResponsesInputMessage[]
+    currentInput: readonly ResponsesInputMessage[],
+    markerHint?: ResponseBranchMarkerHint
   ): ReusableResponseBranchMatch | undefined {
     this.evictExpiredEntries();
 
     if (this.disabledReuseKeys.has(envelope.identityKey)) {
       return undefined;
+    }
+
+    if (markerHint) {
+      return this.findMarkerBranch(envelope, currentInput, markerHint);
     }
 
     const currentContinuationInput = projectResponsesInputForContinuation(currentInput);
@@ -142,6 +153,43 @@ export class ResponseBranchStore {
       comparison: bestCandidate.comparison,
       state: bestCandidate.branch.state ? cloneBranchState(bestCandidate.branch.state) : undefined
     };
+  }
+
+  private findMarkerBranch(
+    envelope: ResponseBranchReuseEnvelope,
+    currentInput: readonly ResponsesInputMessage[],
+    markerHint: ResponseBranchMarkerHint
+  ): ReusableResponseBranchMatch | undefined {
+    if (markerHint.incrementalInput.length === 0
+      || !haveEquivalentResponsesInput(markerHint.incrementalInput, currentInput)) {
+      return undefined;
+    }
+
+    for (const branch of this.branches.values()) {
+      if (branch.responseId !== markerHint.responseId) {
+        continue;
+      }
+      if (branch.envelope.identityKey !== envelope.identityKey
+        || !hasMatchingRequestFingerprint(branch, envelope)
+        || !hasCompatibleInputBudget(branch.envelope.effectiveInputBudget, envelope.effectiveInputBudget)
+        || !compareToolSignatures(branch.envelope.toolSignatures, envelope.toolSignatures).compatible
+        || !hasMarkerContinuationIntegrity(branch, markerHint.incrementalInput)) {
+        return undefined;
+      }
+
+      return {
+        branchId: branch.id,
+        responseId: branch.responseId,
+        comparison: {
+          kind: 'append',
+          matchedPrefixCount: 0,
+          appendedInput: [...markerHint.incrementalInput]
+        },
+        state: branch.state ? cloneBranchState(branch.state) : undefined
+      };
+    }
+
+    return undefined;
   }
 
   explainReuseMiss(
@@ -276,6 +324,11 @@ export class ResponseBranchStore {
     });
   }
 
+  isReuseDisabled(envelope: ResponseBranchReuseEnvelope): boolean {
+    this.evictExpiredEntries();
+    return this.disabledReuseKeys.has(envelope.identityKey);
+  }
+
   private evictExpiredEntries(): void {
     const now = Date.now();
 
@@ -373,6 +426,57 @@ function hasContinuationIntegrity(
       .filter(Boolean)
   );
   return [...functionCallIds].every((callId) => outputCallIds.has(callId));
+}
+
+function hasMarkerContinuationIntegrity(
+  branch: ResponseBranchEntry,
+  appendedInput: readonly ResponsesInputMessage[]
+): boolean {
+  const state = branch.state;
+  return Boolean(
+    state?.continuation
+    && state.continuation.responseId === branch.responseId
+    && state.continuation.turnId === state.turn.id
+    && state.continuation.toolPlanMode === branch.envelope.toolPlanMode
+    && Array.isArray(state.continuation.fullRequest.input)
+    && hasMatchingStoredRequestFingerprint(branch, state.continuation.fullRequest)
+    && hasContinuationIntegrity(branch, appendedInput)
+  );
+}
+
+function hasMatchingStoredRequestFingerprint(
+  branch: ResponseBranchEntry,
+  fullRequest: CodexContinuationSnapshot['fullRequest']
+): boolean {
+  let envelopeFingerprint: unknown;
+  try {
+    envelopeFingerprint = JSON.parse(branch.envelope.requestFingerprint);
+  } catch {
+    return false;
+  }
+
+  if (typeof envelopeFingerprint !== 'object' || envelopeFingerprint === null) {
+    return false;
+  }
+
+  const record = envelopeFingerprint as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return keys.length === 2
+    && keys[0] === 'protocolSettings'
+    && keys[1] === 'requestFingerprint'
+    && typeof record.requestFingerprint === 'string'
+    && fingerprintCodexRequest(fullRequest) === record.requestFingerprint;
+}
+
+function haveEquivalentResponsesInput(
+  left: readonly ResponsesInputMessage[],
+  right: readonly ResponsesInputMessage[]
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return compareResponsesInputHistory(left, right).matchedPrefixCount === left.length;
 }
 
 function compareToolSignatures(

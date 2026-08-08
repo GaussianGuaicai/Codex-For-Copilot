@@ -32,6 +32,7 @@ class MockLanguageModelDataPart {
   static text(value, mimeType = 'text/plain') {
     return new MockLanguageModelDataPart(textEncoder.encode(value), mimeType);
   }
+
 }
 
 class MockLanguageModelToolResultPart {
@@ -56,7 +57,8 @@ const vscodeStub = {
   LanguageModelToolCallPart: MockLanguageModelToolCallPart,
   LanguageModelChatMessageRole: {
     User: 1,
-    Assistant: 2
+    Assistant: 2,
+    System: 3
   },
   LanguageModelChatToolMode: {
     Required: 2
@@ -101,7 +103,12 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { compareResponsesInputHistory, convertMessagesToResponsesInput, stableSerialize } = require(compareBundlePath);
+const {
+  compareResponsesInputHistory,
+  convertMessagesToResponsesInput,
+  convertMessagesToResponsesInputWithStatefulMarker,
+  stableSerialize
+} = require(compareBundlePath);
 const { ResponseBranchStore } = require(branchStoreBundlePath);
 const { buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, getReasoningEffort } = require(providerBundlePath);
 
@@ -110,6 +117,9 @@ try {
   runReasoningEffortOptionSmokeTest(getReasoningEffort);
   runCompareHistorySmokeTest(compareResponsesInputHistory);
   runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory);
+  runLegacyRuntimeSystemConversionSmokeTest(convertMessagesToResponsesInput);
+  runStatefulMarkerConversionSmokeTest(convertMessagesToResponsesInputWithStatefulMarker);
+  runStatefulMarkerBranchStoreSmokeTest(ResponseBranchStore);
   runBranchStoreSmokeTest(ResponseBranchStore);
   runInputBudgetReuseSmokeTest(buildResponseBranchReuseEnvelope, ResponseBranchStore);
   runBranchStoreDisableReuseSmokeTest(ResponseBranchStore);
@@ -236,6 +246,259 @@ function runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory) {
   assertEqual(comparison.kind, 'append', 'call id drift comparison kind');
   assertEqual(comparison.matchedPrefixCount, previousInput.length, 'call id drift matched prefix count');
   assertEqual(JSON.stringify(comparison.appendedInput), JSON.stringify([currentInput[4]]), 'call id drift delta');
+}
+
+function runLegacyRuntimeSystemConversionSmokeTest(convertMessagesToResponsesInput) {
+  const converted = convertMessagesToResponsesInput([{
+    role: vscodeStub.LanguageModelChatMessageRole.System,
+    content: [new vscodeStub.LanguageModelTextPart('Runtime instructions')]
+  }]);
+  assertEqual(JSON.stringify(converted), JSON.stringify([{
+    role: 'assistant',
+    content: 'Runtime instructions',
+    type: 'message'
+  }]), 'legacy conversion remains unchanged before provider marker integration');
+}
+
+function runStatefulMarkerConversionSmokeTest(convertMessagesToResponsesInputWithStatefulMarker) {
+  const official = convertMessagesToResponsesInputWithStatefulMarker([
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+      content: [vscodeStub.LanguageModelDataPart.text('codex::gpt-5.6-sol\\resp_official', 'Stateful_Marker')]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.System,
+      content: [new vscodeStub.LanguageModelTextPart(' Runtime Agent instructions. ')]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelTextPart('Only this delta')]
+    }
+  ]);
+  assertEqual(official.statefulMarker.kind, 'valid', 'official marker is valid');
+  assertEqual(official.statefulMarker.modelId, 'codex::gpt-5.6-sol', 'official marker model id');
+  assertEqual(official.statefulMarker.previousResponseId, 'resp_official', 'official marker response id');
+  assertEqual(official.statefulMarker.isLeadingStandalone, true, 'official marker is a leading standalone anchor');
+  assertEqual(official.systemInstructions, 'Runtime Agent instructions.', 'runtime System instructions are extracted');
+  assertEqual(JSON.stringify(official.input), JSON.stringify([
+    { role: 'user', content: 'Only this delta', type: 'message' }
+  ]), 'System and marker are excluded from current input');
+  assertEqual(JSON.stringify(official.statefulMarker.incrementalInput), JSON.stringify(official.input), 'official delta equals sanitized input');
+
+  const firstDelimiter = convertMessagesToResponsesInputWithStatefulMarker([{
+    role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+    content: [vscodeStub.LanguageModelDataPart.text('model-a\\resp\\with-delimiter', 'stateful_marker')]
+  }]);
+  assertEqual(firstDelimiter.statefulMarker.modelId, 'model-a', 'marker model ends at first delimiter');
+  assertEqual(firstDelimiter.statefulMarker.previousResponseId, 'resp\\with-delimiter', 'marker response id retains later delimiters');
+
+  const sameMessageRemainder = convertMessagesToResponsesInputWithStatefulMarker([
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+      content: [
+        vscodeStub.LanguageModelDataPart.text('model-a\\resp_same_message', 'stateful_marker'),
+        new vscodeStub.LanguageModelTextPart('assistant delta')
+      ]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [new vscodeStub.LanguageModelTextPart('later delta')]
+    }
+  ]);
+  assertEqual(JSON.stringify(sameMessageRemainder.statefulMarker.incrementalInput), JSON.stringify([
+    { role: 'assistant', content: 'assistant delta', type: 'message' },
+    { role: 'user', content: 'later delta', type: 'message' }
+  ]), 'structural delta includes the marker message remainder and later messages');
+
+  const invalidMarkers = [
+    vscodeStub.LanguageModelDataPart.text('missing-delimiter', 'stateful_marker'),
+    vscodeStub.LanguageModelDataPart.text('\\resp_empty_model', 'stateful_marker'),
+    vscodeStub.LanguageModelDataPart.text('model-empty-response\\', 'stateful_marker'),
+    new vscodeStub.LanguageModelDataPart(new Uint8Array([0xc3, 0x28]), 'stateful_marker'),
+    new vscodeStub.LanguageModelDataPart(new Uint8Array(4097), 'stateful_marker'),
+    vscodeStub.LanguageModelDataPart.text(`${'m'.repeat(513)}\\resp_large_model`, 'stateful_marker'),
+    vscodeStub.LanguageModelDataPart.text(`model-large-response\\${'r'.repeat(513)}`, 'stateful_marker'),
+    vscodeStub.LanguageModelDataPart.text('model-control\u0001\\resp_control', 'stateful_marker'),
+    vscodeStub.LanguageModelDataPart.text('model-whitespace\\ resp_whitespace', 'stateful_marker')
+  ];
+  for (const [index, marker] of invalidMarkers.entries()) {
+    const converted = convertMessagesToResponsesInputWithStatefulMarker([{
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [
+        new vscodeStub.LanguageModelTextPart('safe'),
+        marker,
+        new vscodeStub.LanguageModelTextPart(' input')
+      ]
+    }]);
+    assertEqual(converted.statefulMarker.kind, 'invalid', `invalid marker ${index} fails closed`);
+    assertEqual(converted.statefulMarker.reason, 'metadata', `invalid marker ${index} metadata reason`);
+    assertEqual(converted.statefulMarker.isLeadingStandalone, false, `invalid marker ${index} is embedded`);
+    assertEqual(JSON.stringify(converted.input), JSON.stringify([
+      { role: 'user', content: 'safe input', type: 'message' }
+    ]), `invalid marker ${index} is stripped`);
+  }
+
+  const duplicate = convertMessagesToResponsesInputWithStatefulMarker([{
+    role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+    content: [
+      vscodeStub.LanguageModelDataPart.text('model-one\\resp_one', 'stateful_marker'),
+      vscodeStub.LanguageModelDataPart.text('model-two\\resp_two', 'STATEFUL_MARKER')
+    ]
+  }]);
+  assertEqual(duplicate.statefulMarker.kind, 'invalid', 'duplicate markers fail closed');
+  assertEqual(duplicate.statefulMarker.reason, 'multiple', 'duplicate markers report multiple');
+  assertEqual(duplicate.statefulMarker.isLeadingStandalone, true, 'duplicate leading anchor is classified for local failure');
+  assertEqual(JSON.stringify(duplicate.input), '[]', 'duplicate markers are stripped');
+
+  const nested = convertMessagesToResponsesInputWithStatefulMarker([{
+    role: vscodeStub.LanguageModelChatMessageRole.User,
+    content: [new vscodeStub.LanguageModelToolResultPart('call_nested_marker', [
+      vscodeStub.LanguageModelDataPart.text('model-nested\\resp_nested', 'stateful_marker'),
+      new vscodeStub.LanguageModelTextPart('safe tool output')
+    ])]
+  }]);
+  assertEqual(nested.statefulMarker.kind, 'none', 'nested marker never anchors');
+  assertEqual(JSON.stringify(nested.input), JSON.stringify([
+    { type: 'function_call_output', call_id: 'call_nested_marker', output: 'safe tool output' }
+  ]), 'nested marker is suppressed from tool output');
+}
+
+function runStatefulMarkerBranchStoreSmokeTest(ResponseBranchStore) {
+  const envelope = reuseEnvelope('reuse-key-marker');
+  const previousInput = [{ type: 'message', role: 'user', content: 'seed' }];
+  const currentInput = [{ type: 'message', role: 'user', content: 'follow up' }];
+  const store = createTestResponseBranchStore(ResponseBranchStore);
+  const branchId = store.recordSuccess(envelope, previousInput, 'resp_marker_exact');
+  const exactMatch = store.findReusableBranch(envelope, currentInput, {
+    responseId: 'resp_marker_exact',
+    incrementalInput: currentInput
+  });
+  assertEqual(exactMatch?.branchId, branchId, 'exact marker branch id');
+  assertEqual(exactMatch?.responseId, 'resp_marker_exact', 'exact marker response id');
+  assertEqual(exactMatch?.comparison.matchedPrefixCount, 0, 'marker lookup does not require historical prefix');
+  assertEqual(JSON.stringify(exactMatch?.comparison.appendedInput), JSON.stringify(currentInput), 'exact marker returns complete delta');
+
+  const alternateInput = [{ type: 'message', role: 'user', content: 'alternate seed' }];
+  store.recordSuccess(envelope, alternateInput, 'resp_marker_alternate');
+  assertEqual(store.findReusableBranch(envelope, currentInput, {
+    responseId: 'resp_unknown',
+    incrementalInput: currentInput
+  }), undefined, 'unknown marker id never falls through');
+  assertEqual(store.findReusableBranch(envelope, currentInput, {
+    responseId: 'resp_marker_exact',
+    incrementalInput: [{ type: 'message', role: 'user', content: 'different delta' }]
+  }), undefined, 'marker suffix mismatch never falls through');
+
+  const compatibilityCases = [
+    { label: 'request envelope mismatch', envelope: { ...envelope, identityKey: 'changed-identity', requestFingerprint: 'changed-fingerprint' } },
+    { label: 'instruction mismatch', envelope: { ...envelope, identityKey: 'changed-instructions', requestFingerprint: 'changed-instructions' } },
+    { label: 'catalog mismatch', envelope: { ...envelope, catalogHash: 'changed-catalog' } },
+    { label: 'tool plan mismatch', envelope: { ...envelope, toolPlanMode: 'native-hosted' } },
+    { label: 'tool mismatch', envelope: { ...envelope, toolSignatures: { read_file: 'changed-tool' } } },
+    { label: 'budget downgrade', envelope: { ...envelope, effectiveInputBudget: 128000 } }
+  ];
+  for (const compatibilityCase of compatibilityCases) {
+    assertEqual(store.findReusableBranch(compatibilityCase.envelope, currentInput, {
+      responseId: 'resp_marker_exact',
+      incrementalInput: currentInput
+    }), undefined, `${compatibilityCase.label} rejects an exact marker`);
+  }
+
+  store.disableReuse(envelope, false);
+  assertEqual(store.findReusableBranch(envelope, currentInput, {
+    responseId: 'resp_marker_exact',
+    incrementalInput: currentInput
+  }), undefined, 'disabled reuse rejects an exact marker');
+
+  const expiredStore = new ResponseBranchStore(0);
+  expiredStore.recordSuccess(
+    envelope,
+    previousInput,
+    'resp_marker_expired',
+    undefined,
+    createCompletedBranchState(envelope, previousInput, 'resp_marker_expired')
+  );
+  const originalNow = Date.now;
+  Date.now = () => originalNow() + 1;
+  try {
+    assertEqual(expiredStore.findReusableBranch(envelope, currentInput, {
+      responseId: 'resp_marker_expired',
+      incrementalInput: currentInput
+    }), undefined, 'expired exact marker fails closed');
+  } finally {
+    Date.now = originalNow;
+  }
+
+  const incompleteStore = new ResponseBranchStore();
+  const incompleteState = createCompletedBranchState(envelope, previousInput, 'resp_marker_incomplete');
+  incompleteState.turn.completed = false;
+  incompleteStore.recordSuccess(envelope, previousInput, 'resp_marker_incomplete', undefined, incompleteState);
+  assertEqual(incompleteStore.findReusableBranch(envelope, currentInput, {
+    responseId: 'resp_marker_incomplete',
+    incrementalInput: currentInput
+  }), undefined, 'incomplete turn rejects an exact marker');
+
+  const missingSnapshotStore = new ResponseBranchStore();
+  const missingSnapshotState = createCompletedBranchState(envelope, previousInput, 'resp_marker_missing_snapshot');
+  delete missingSnapshotState.continuation;
+  missingSnapshotStore.recordSuccess(envelope, previousInput, 'resp_marker_missing_snapshot', undefined, missingSnapshotState);
+  assertEqual(missingSnapshotStore.findReusableBranch(envelope, currentInput, {
+    responseId: 'resp_marker_missing_snapshot',
+    incrementalInput: currentInput
+  }), undefined, 'missing continuation snapshot rejects an exact marker');
+
+  const malformedFingerprintEnvelope = {
+    ...envelope,
+    identityKey: 'reuse-key-marker-malformed-fingerprint',
+    requestFingerprint: JSON.stringify({ requestFingerprint: fingerprintFullRequest() })
+  };
+  const malformedFingerprintStore = new ResponseBranchStore();
+  malformedFingerprintStore.recordSuccess(
+    malformedFingerprintEnvelope,
+    previousInput,
+    'resp_marker_malformed_fingerprint',
+    undefined,
+    createCompletedBranchState(
+      malformedFingerprintEnvelope,
+      previousInput,
+      'resp_marker_malformed_fingerprint'
+    )
+  );
+  assertEqual(malformedFingerprintStore.findReusableBranch(malformedFingerprintEnvelope, currentInput, {
+    responseId: 'resp_marker_malformed_fingerprint',
+    incrementalInput: currentInput
+  }), undefined, 'malformed protocol fingerprint wrapper rejects an exact marker');
+
+  const pendingStore = createTestResponseBranchStore(ResponseBranchStore);
+  const pendingEnvelope = reuseEnvelope('reuse-key-marker-pending');
+  const pendingItems = [
+    { type: 'function_call', call_id: 'call_pending_one', name: 'read_file', arguments: '{}' },
+    { type: 'function_call', call_id: 'call_pending_two', name: 'list_dir', arguments: '{}' }
+  ];
+  pendingStore.recordSuccess(
+    pendingEnvelope,
+    previousInput,
+    'resp_marker_pending',
+    undefined,
+    createCompletedBranchState(pendingEnvelope, previousInput, 'resp_marker_pending', pendingItems)
+  );
+  const completeOutputs = [
+    { type: 'function_call_output', call_id: 'call_pending_one', output: 'one' },
+    { type: 'function_call_output', call_id: 'call_pending_two', output: 'two' }
+  ];
+  assertEqual(pendingStore.findReusableBranch(pendingEnvelope, completeOutputs, {
+    responseId: 'resp_marker_pending',
+    incrementalInput: completeOutputs
+  })?.responseId, 'resp_marker_pending', 'exact marker accepts complete pending-call outputs');
+  const noOutputs = [{ type: 'message', role: 'user', content: 'skip the calls' }];
+  assertEqual(pendingStore.findReusableBranch(pendingEnvelope, noOutputs, {
+    responseId: 'resp_marker_pending',
+    incrementalInput: noOutputs
+  }), undefined, 'exact marker rejects unanswered pending calls');
+  assertEqual(pendingStore.findReusableBranch(pendingEnvelope, [completeOutputs[0]], {
+    responseId: 'resp_marker_pending',
+    incrementalInput: [completeOutputs[0]]
+  }), undefined, 'exact marker rejects partial pending-call outputs');
 }
 
 function runBranchStoreSmokeTest(ResponseBranchStore) {
@@ -677,35 +940,40 @@ function createTestResponseBranchStore(ResponseBranchStore) {
     input,
     responseId,
     branchId,
-    state ?? {
-      identity: {
-        installationId: 'test-installation',
-        sessionId: 'test-session',
-        threadId: 'test-thread',
-        windowId: 'test-window'
-      },
-      turn: {
-        id: `turn-${responseId}`,
-        startedAt: Date.now(),
-        completed: true
-      },
-      continuation: {
-        fullRequest: {
-          model: 'test-model',
-          instructions: 'Smoke test instructions',
-          input,
-          store: false,
-          stream: true
-        },
-        responseId,
-        responseItems: [],
-        requestFingerprint: envelope.requestFingerprint,
-        turnId: `turn-${responseId}`
-      },
-      updatedAt: Date.now()
-    }
+    state ?? createCompletedBranchState(envelope, input, responseId)
   );
   return store;
+}
+
+function createCompletedBranchState(envelope, input, responseId, responseItems = []) {
+  return {
+    identity: {
+      installationId: 'test-installation',
+      sessionId: 'test-session',
+      threadId: 'test-thread',
+      windowId: 'test-window'
+    },
+    turn: {
+      id: `turn-${responseId}`,
+      startedAt: Date.now(),
+      completed: true
+    },
+    continuation: {
+      fullRequest: {
+        model: 'test-model',
+        instructions: 'Smoke test instructions',
+        input,
+        store: false,
+        stream: true
+      },
+      responseId,
+      responseItems,
+      requestFingerprint: envelope.requestFingerprint,
+      catalogHash: envelope.catalogHash,
+      turnId: `turn-${responseId}`
+    },
+    updatedAt: Date.now()
+  };
 }
 
 function assertEqual(actual, expected, label) {
@@ -715,5 +983,18 @@ function assertEqual(actual, expected, label) {
 }
 
 function reuseEnvelope(identityKey, toolSignatures) {
-  return { identityKey, effectiveInputBudget: 258400, toolSignatures };
+  return {
+    identityKey,
+    scopeKey: identityKey,
+    requestFingerprint: JSON.stringify({
+      protocolSettings: null,
+      requestFingerprint: fingerprintFullRequest()
+    }),
+    effectiveInputBudget: 258400,
+    toolSignatures
+  };
+}
+
+function fingerprintFullRequest() {
+  return '{"instructions":"Smoke test instructions","model":"test-model","store":false,"stream":true}';
 }
