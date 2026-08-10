@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.4.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.2...v1.4.3) (2026-08-10)
+
+
+### Bug Fixes
+
+* route HTTP requests through configured proxy ([#62](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/62)) ([9ac62a8](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/9ac62a8dc84e66f9743a7b946a6923319008d3b4))
+
 ## [1.4.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.1...v1.4.2) (2026-08-04)
 
 
