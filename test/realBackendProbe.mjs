@@ -38,6 +38,7 @@ const requestServiceTier = requestedServiceTier === 'fast'
 
 const tempDir = await mkdtemp(join(resolveTempDirectory(), 'codex-for-copilot-real-'));
 const secretsBundlePath = join(tempDir, 'secrets.cjs');
+const modelsBundlePath = join(tempDir, 'models.cjs');
 const responsesBundlePath = join(tempDir, 'responsesClient.cjs');
 const moduleLoad = Module._load;
 const require = createRequire(import.meta.url);
@@ -50,6 +51,16 @@ try {
     platform: 'node',
     target: 'node20',
     outfile: secretsBundlePath,
+    external: ['vscode']
+  });
+
+  await build({
+    entryPoints: ['src/models.ts'],
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    target: 'node20',
+    outfile: modelsBundlePath,
     external: ['vscode']
   });
 
@@ -83,6 +94,7 @@ try {
   };
 
   const { getApiCredentials, DEFAULT_USER_AGENT } = require(secretsBundlePath);
+  const { fetchAvailableModels } = require(modelsBundlePath);
   const {
     disposeReusableResponsesWebSockets,
     isResponsesContinuationMissError,
@@ -118,6 +130,19 @@ try {
     assertEqual(credentials.headers['ChatGPT-Account-ID'], auth.tokens.account_id, 'account id header');
   }
   assertEqual(credentials.omitMaxOutputTokens, true, 'omit max_output_tokens');
+  const discoveredModels = await fetchAvailableModels({
+    baseURL: 'https://chatgpt.com/backend-api/codex/responses',
+    clientVersion: '0.0.0',
+    includeHiddenModels: false
+  }, credentials, {
+    isCancellationRequested: false,
+    onCancellationRequested() {
+      return { dispose() {} };
+    }
+  });
+  if (discoveredModels.length === 0) {
+    throw new Error('Model discovery returned no callable models.');
+  }
 
   const deltas = [];
   const reasoningSources = new Set();
@@ -311,6 +336,7 @@ try {
 
   console.log(JSON.stringify({
     model: requestedModel,
+    discoveredModelCount: discoveredModels.length,
     transport: requestedTransport,
     continuationProbe: runContinuationProbe,
     preconnectionProbe: preconnection,

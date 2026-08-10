@@ -17,6 +17,7 @@ export interface CodexFetchAdapterOptions {
   endpointKey: string;
   compatibilityEnabled: boolean;
   compression: RequestCompressionPolicy;
+  performFetch?: typeof fetch;
   compressionThresholdBytes?: number;
   onObservation?: (observation: CodexFetchObservation) => void;
 }
@@ -27,6 +28,7 @@ const compressionDisabledEndpoints = new Map<string, number>();
 
 export function createCodexFetchAdapter(options: CodexFetchAdapterOptions): typeof fetch {
   const endpointKey = normalizeCodexEndpoint(options.endpointKey);
+  const performFetch = options.performFetch ?? fetch;
 
   return async (input, init) => {
     const startedAt = Date.now();
@@ -55,7 +57,7 @@ export function createCodexFetchAdapter(options: CodexFetchAdapterOptions): type
       compressedHeaders.set('Content-Length', String(compressedBody.byteLength));
     }
 
-    let response = await fetch(input, {
+    let response = await performFetch(input, {
       ...init,
       headers: compressedHeaders,
       body: shouldCompress ? compressedBody : body
@@ -67,7 +69,7 @@ export function createCodexFetchAdapter(options: CodexFetchAdapterOptions): type
       const retryHeaders = new Headers(headers);
       retryHeaders.delete('Content-Encoding');
       retryHeaders.set('Content-Length', String(bodyBuffer.byteLength));
-      response = await fetch(input, { ...init, headers: retryHeaders, body });
+      response = await performFetch(input, { ...init, headers: retryHeaders, body });
     }
 
     options.onObservation?.({
