@@ -9,7 +9,12 @@ export function resolveProxyForURL(targetURL: string, environment: NodeJS.Proces
   const workspace = (vscode as typeof vscode & {
     workspace?: { getConfiguration?(section?: string): { get?<T>(key: string): T | undefined } };
   }).workspace;
-  const configuredProxy = workspace?.getConfiguration?.('http').get?.<string>('proxy')?.trim();
+  let configuredProxy: string | undefined;
+  try {
+    configuredProxy = workspace?.getConfiguration?.('http').get?.<string>('proxy')?.trim();
+  } catch {
+    // Keep HTTP requests usable in minimal extension-host shims that do not expose the http section.
+  }
   return configuredProxy || environment.HTTPS_PROXY || environment.https_proxy
     || environment.HTTP_PROXY || environment.http_proxy;
 }
