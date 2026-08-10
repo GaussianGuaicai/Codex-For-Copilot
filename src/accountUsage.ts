@@ -1,6 +1,7 @@
 import { normalizeBaseURL } from './responsesClient';
 import type { ApiCredentials } from './secrets';
 import { codexFetch } from './auth/codexAuthRequest';
+import { proxyAwareFetch } from './proxyFetch';
 
 const FIVE_HOUR_WINDOW_MINUTES = 300;
 const WEEKLY_WINDOW_MINUTES = 10080;
@@ -69,8 +70,8 @@ export async function fetchCodexAccountUsage(options: {
       signal: options.signal
     };
     const response = options.credentials.authManager
-      ? await codexFetch(options.credentials.authManager, usageURL, requestInit)
-      : await fetch(usageURL, {
+      ? await codexFetch(options.credentials.authManager, usageURL, requestInit, proxyAwareFetch)
+      : await proxyAwareFetch(usageURL, {
           ...requestInit,
           headers: {
             Authorization: `Bearer ${options.credentials.apiKey}`,

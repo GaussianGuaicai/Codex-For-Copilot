@@ -3,6 +3,7 @@ import type { ProviderConfig } from './config';
 import type { ApiCredentials } from './secrets';
 import { normalizeBaseURL } from './responsesClient';
 import { codexFetch } from './auth/codexAuthRequest';
+import { proxyAwareFetch } from './proxyFetch';
 import {
   getReasoningEffortDescription,
   getReasoningEffortLabel,
@@ -119,8 +120,8 @@ export async function fetchAvailableModels(
     signal: toAbortSignal(token)
   };
   const response = credentials.authManager
-    ? await codexFetch(credentials.authManager, modelsURL, init)
-    : await fetch(modelsURL, {
+    ? await codexFetch(credentials.authManager, modelsURL, init, proxyAwareFetch)
+    : await proxyAwareFetch(modelsURL, {
         ...init,
         headers: {
           Authorization: `Bearer ${credentials.apiKey}`,

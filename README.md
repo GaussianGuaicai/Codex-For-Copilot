@@ -80,6 +80,8 @@ Most users can keep the defaults. Advanced settings are available under **Settin
 - reasoning effort and service tier
 - request compression and WebSocket prewarming
 
+For a proxy-required network, set VS Code's `http.proxy` setting or the Extension Host's `HTTPS_PROXY`/`HTTP_PROXY` environment variable. The provider applies that proxy consistently to model discovery, account usage, HTTP Responses requests, token counting, and WebSocket requests; `NO_PROXY` remains honored.
+
 ## Develop locally
 
 ```bash
