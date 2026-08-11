@@ -2,7 +2,15 @@ import * as vscode from 'vscode';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { ResponseUsage } from 'openai/resources/responses/responses';
-import { compareResponsesInputHistory, convertMessagesToResponsesInput, estimateTokenCount, stableSerialize, type ResponsesInputMessage } from './convertMessages';
+import {
+  compareResponsesInputHistory,
+  convertMessagesToResponsesInput,
+  convertMessagesToResponsesInputWithStatefulMarker,
+  estimateTokenCount,
+  STATEFUL_MARKER_DATA_PART_MIME,
+  stableSerialize,
+  type ResponsesInputMessage
+} from './convertMessages';
 import { getProviderConfig, type ProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, isProviderModelIdentifier, parseModelIdentifier, type ParsedModelIdentifier, type ResolvedProviderModel } from './models';
 import {
@@ -90,6 +98,7 @@ const MAX_PENDING_REPORTED_TOOL_CALLS = 200;
 const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
 const MAX_TOOL_OUTPUT_CONTINUATION_CAPABILITIES = 64;
 const MAX_LOCAL_TOKEN_ESTIMATE_DIAGNOSTICS = 64;
+const STATEFUL_MARKER_LOCAL_ERROR = 'Stateful continuation marker could not be resolved locally.';
 // The WebSocket tool-output continuation path passed the real-backend release
 // gate: five consecutive store:false tool loops completed with a matching
 // previous_response_id and a single incremental function_call_output.
@@ -283,6 +292,17 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       throw new Error('Codex credentials are missing. Run "Codex for Copilot: Import Codex auth.json".');
     }
 
+    const convertedMessages = convertMessagesToResponsesInputWithStatefulMarker(messages);
+    if (convertedMessages.statefulMarker.kind === 'invalid'
+      && convertedMessages.statefulMarker.isLeadingStandalone) {
+      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+    }
+    if (convertedMessages.statefulMarker.kind === 'valid'
+      && convertedMessages.statefulMarker.isLeadingStandalone
+      && convertedMessages.statefulMarker.modelId !== model.id) {
+      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+    }
+
     const authIdentity = getCredentialIdentity(credentials);
     this.handleConnectionConfiguration(config, authIdentity);
     const compatibilityProfile = getCodexCompatibilityProfile(config.baseURL, credentials, config.protocol.profile);
@@ -323,7 +343,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     );
     const reasoningEffort = reasoning.effort;
     const requestStartedAt = latency.entryAt;
-    const input = convertMessagesToResponsesInput(messages);
+    const input = convertedMessages.input;
     const observedToolResults = this.consumeReportedToolResults(input);
     latency.mark('messagesConverted');
     const requestBuildStartedAt = performance.now();
@@ -385,7 +405,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     let requestOptions: CodexRequestEnvelopeOptions = {
       compatibilityEnabled: compatibilityProfile.enabled,
       model: selectedModel.requestModel,
-      instructions: config.instructions,
+      instructions: combineRequestInstructions(config.instructions, convertedMessages.systemInstructions),
       tools: options.tools,
       toolPlan,
       toolMode: options.toolMode,
@@ -422,8 +442,22 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       ...requestOptions
     });
     latency.recordContext({ requestBuildMs: Math.max(0, performance.now() - requestBuildStartedAt) });
-    const reusableBranch = this.responseBranchStore.findReusableBranch(reuseEnvelope, input);
-    const reuseMissDiagnostic = reusableBranch
+    const markerHint = convertedMessages.statefulMarker.kind === 'valid'
+      && convertedMessages.statefulMarker.isLeadingStandalone
+      ? {
+          responseId: convertedMessages.statefulMarker.previousResponseId,
+          incrementalInput: convertedMessages.statefulMarker.incrementalInput
+        }
+      : undefined;
+    const reusableBranch = convertedMessages.statefulMarker.kind === 'none'
+      ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input)
+      : markerHint
+        ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input, markerHint)
+        : undefined;
+    if (markerHint && !reusableBranch) {
+      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+    }
+    const reuseMissDiagnostic = reusableBranch || convertedMessages.statefulMarker.kind !== 'none'
       ? undefined
       : this.responseBranchStore.explainReuseMiss(reuseEnvelope, input);
     latency.mark('branchResolved');
@@ -431,6 +465,20 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       reusableBranch?.comparison.appendedInput.some((item) => item.type === 'function_call_output')
     );
     const appendedInput = reusableBranch?.comparison.appendedInput ?? [];
+    const isMarkerContinuation = Boolean(markerHint && reusableBranch);
+    const markerContinuationSnapshot = isMarkerContinuation
+      ? reusableBranch?.state?.continuation
+      : undefined;
+    if (isMarkerContinuation && !markerContinuationSnapshot) {
+      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+    }
+    const markerCanonicalReplayInput = isMarkerContinuation
+      ? buildCanonicalReplayInput({
+          previousSnapshot: markerContinuationSnapshot,
+          convertedInput: input,
+          appendedInput
+        })
+      : undefined;
     const hasOnlyToolOutputAppend = requiresFullInputForToolOutput
       && appendedInput.length > 0
       && appendedInput.every((item) => item.type === 'function_call_output');
@@ -458,7 +506,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       && (!requiresFullInputForToolOutput || shouldAttemptToolOutputContinuation);
     const initialRequestInput = usePreviousResponseId
       ? appendedInput
-      : input;
+      : markerCanonicalReplayInput ?? input;
     const initialPreviousResponseId = usePreviousResponseId
       ? reusableBranch?.responseId
       : undefined;
@@ -1010,7 +1058,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           requestModel: selectedModel.requestModel,
           nativeToolSearchFallback: true
         });
-        await streamRequest(input);
+        await streamRequest(markerCanonicalReplayInput ?? input);
       } else if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
         if (reportedVisibleOutput) {
           this.responseBranchStore.invalidateResponseId(error.previousResponseId);
@@ -1035,12 +1083,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           requestModel: selectedModel.requestModel,
           branchId: reusableBranch?.branchId ?? null,
           previousResponseId: initialPreviousResponseId,
-          reason: error.message
+          reason: error.message,
+          reuseDisabledUntilExpiry: error.disableReuseUntilExpiry
         });
 
         completedResponseId = undefined;
         rawResponseItems.length = 0;
-        await streamRequest(input);
+        this.responseBranchStore.disableReuse(reuseEnvelope, !error.disableReuseUntilExpiry);
+        this.responseBranchStore.invalidateResponseId(error.previousResponseId);
+        if (reusableBranch) {
+          this.responseBranchStore.invalidate(reusableBranch.branchId);
+        }
+        activeBranchId = undefined;
+        await streamRequest(markerCanonicalReplayInput ?? input);
       } else {
         if (!initialPreviousResponseId || !isResponsesContinuationMissError(error)) {
           const unavailableModel = getExactModelNotFoundName(error, selectedModel.requestModel);
@@ -1092,18 +1147,21 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         completedResponseId = undefined;
         rawResponseItems.length = 0;
         activeBranchId = undefined;
-        await streamRequest(input);
+        await streamRequest(markerCanonicalReplayInput ?? input);
       }
     }
 
     const finalResponseId = completedResponseId;
     if (finalResponseId) {
+      const recordedInput = markerCanonicalReplayInput ?? input;
       const builtFullRequest = buildCodexResponsesRequest({
         ...requestOptions,
         identity: requestIdentity,
-        input,
+        input: recordedInput,
       });
-      const fullRequest = toolPlan.mode === 'native-hosted'
+      const fullRequest = isMarkerContinuation
+        ? builtFullRequest
+        : toolPlan.mode === 'native-hosted'
         ? createCanonicalReplayRequest(builtFullRequest, buildCanonicalReplayInput({
             previousSnapshot: reusableBranch?.state?.continuation,
             convertedInput: input,
@@ -1127,7 +1185,16 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         ),
         updatedAt: Date.now()
       };
-      activeBranchId = this.responseBranchStore.recordSuccess(reuseEnvelope, input, finalResponseId, activeBranchId, branchState);
+      activeBranchId = this.responseBranchStore.recordSuccess(
+        reuseEnvelope,
+        recordedInput,
+        finalResponseId,
+        activeBranchId,
+        branchState
+      );
+      if (!token.isCancellationRequested && !this.responseBranchStore.isReuseDisabled(reuseEnvelope)) {
+        progress.report(createStatefulMarkerDataPart(model.id, finalResponseId));
+      }
     }
   }
 
@@ -1989,6 +2056,19 @@ function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.La
     },
     USAGE_DATA_PART_MIME
   ) as vscode.LanguageModelResponsePart;
+}
+
+function createStatefulMarkerDataPart(modelId: string, previousResponseId: string): vscode.LanguageModelResponsePart {
+  return vscode.LanguageModelDataPart.text(
+    `${modelId}\\${previousResponseId}`,
+    STATEFUL_MARKER_DATA_PART_MIME
+  ) as vscode.LanguageModelResponsePart;
+}
+
+function combineRequestInstructions(configuredInstructions: string, systemInstructions: string | undefined): string {
+  return systemInstructions
+    ? `${configuredInstructions}\n\n${systemInstructions}`
+    : configuredInstructions;
 }
 
 function createTemporarilyUnavailableModelError(model: string, cause: unknown): Error {

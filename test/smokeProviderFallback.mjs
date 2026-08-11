@@ -72,6 +72,14 @@ class LanguageModelDataPart {
     this.data = data;
     this.mimeType = mimeType;
   }
+
+  static json(value, mimeType = 'application/json') {
+    return new LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(value)), mimeType);
+  }
+
+  static text(value, mimeType = 'text/plain') {
+    return new LanguageModelDataPart(new TextEncoder().encode(value), mimeType);
+  }
 }
 
 class LanguageModelThinkingPart {
@@ -106,8 +114,9 @@ const vscodeMock = {
   LanguageModelToolCallPart,
   LanguageModelToolResultPart,
   LanguageModelChatMessageRole: {
-    User: 'user',
-    Assistant: 'assistant'
+    User: 1,
+    Assistant: 2,
+    System: 3
   },
   LanguageModelChatToolMode: {
     Required: 2
@@ -178,6 +187,12 @@ try {
   await runProviderLongContextSelectionSmokeTest();
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
+  await runStatefulMarkerRoundTripSmokeTest();
+  await runStatefulMarkerContinuationRecoverySmokeTest();
+  await runStatefulMarkerOpaqueRecoverySmokeTest();
+  await runStatefulMarkerToolOutputReplaySmokeTest();
+  await runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest();
+  await runStatefulMarkerRecordFailureSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
   await runStructuredHttpContinuationRecoverySmokeTest();
   await runContinuationMissAfterVisibleOutputSmokeTest();
@@ -1067,6 +1082,765 @@ async function runInterleavedResponsePresentationSmokeTest() {
       { type: 'text', value: '我先看一下仓库的' },
       { type: 'text', value: '结构。' }
     ]), 'raw reasoning falls back as one bounded Thinking part before visible text');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerRoundTripSmokeTest() {
+  const responseRequests = [];
+  const replies = [
+    ['seed reply', 'resp_marker_seed', 'msg_marker_seed'],
+    ['second reply', 'resp_marker_second', 'msg_marker_second'],
+    ['third reply', 'resp_marker_third', 'msg_marker_third']
+  ];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const reply = replies[responseRequests.length - 1];
+    if (!reply) {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Unexpected extra marker request.' } }));
+      return;
+    }
+    writeSseResponseWithOutputItem(response, reply[0], reply[1], reply[2]);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for official stateful marker coverage.');
+    }
+    const systemMessage = createSystemMessage('Agent Host instructions');
+
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        systemMessage,
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Initial input')] }
+      ],
+      {},
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    assertEqual(responseRequests[0].instructions, 'Smoke test instructions\n\nAgent Host instructions', 'configured and Agent Host instructions are preserved');
+    assertEqual(JSON.stringify(responseRequests[0].input), JSON.stringify([
+      { role: 'user', content: 'Initial input', type: 'message' }
+    ]), 'first Agent Host call sends only Responses input');
+    const seedMarkerPart = getSingleStatefulMarkerPart(seedParts, 'seed completion');
+    assertEqual(decodeStatefulMarker(seedMarkerPart), `${model.id}\\resp_marker_seed`, 'seed marker uses official text encoding');
+
+    const invalidCases = [
+      {
+        label: 'changed System instructions',
+        messages: createAgentHostContinuationMessages(seedMarkerPart, 'Changed Agent Host instructions', 'Changed instruction delta')
+      },
+      {
+        label: 'forged unknown response id',
+        messages: createAgentHostContinuationMessages(createStatefulMarkerPart(`${model.id}\\resp_forged`), 'Agent Host instructions', 'Forged delta')
+      },
+      {
+        label: 'model-mismatched marker',
+        messages: createAgentHostContinuationMessages(createStatefulMarkerPart('codex::gpt-5.6-luna\\resp_marker_seed'), 'Agent Host instructions', 'Wrong model delta')
+      },
+      {
+        label: 'malformed marker',
+        messages: createAgentHostContinuationMessages(createStatefulMarkerPart('missing-delimiter'), 'Agent Host instructions', 'Malformed delta')
+      },
+      {
+        label: 'duplicate leading marker',
+        messages: [
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [seedMarkerPart, createStatefulMarkerPart(`${model.id}\\resp_other`)]
+          },
+          systemMessage,
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Duplicate delta')] }
+        ]
+      }
+    ];
+    for (const invalidCase of invalidCases) {
+      await assertLocalMarkerFailure(
+        () => provider.provideLanguageModelChatResponse(model, invalidCase.messages, {}, { report() {} }, token),
+        responseRequests,
+        1,
+        invalidCase.label
+      );
+    }
+
+    const secondParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      createAgentHostContinuationMessages(seedMarkerPart, 'Agent Host instructions', 'Second delta'),
+      {},
+      { report(part) { secondParts.push(part); } },
+      token
+    );
+    const secondMarkerPart = getSingleStatefulMarkerPart(secondParts, 'second completion');
+
+    const thirdParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      createAgentHostContinuationMessages(secondMarkerPart, 'Agent Host instructions', 'Third delta'),
+      {},
+      { report(part) { thirdParts.push(part); } },
+      token
+    );
+    const thirdMarkerPart = getSingleStatefulMarkerPart(thirdParts, 'third completion');
+
+    assertEqual(responseRequests.length, 3, 'only valid official marker calls reach Responses');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_marker_seed', 'second call selects exact local seed response');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Second delta', type: 'message' }
+    ]), 'second call sends marker-free delta only');
+    assertEqual(responseRequests[2].previous_response_id, 'resp_marker_second', 'third call selects accumulated second response');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
+      { role: 'user', content: 'Third delta', type: 'message' }
+    ]), 'third call sends marker-free delta only');
+    assertEqual(decodeStatefulMarker(secondMarkerPart), `${model.id}\\resp_marker_second`, 'second marker uses official text encoding');
+    assertEqual(decodeStatefulMarker(thirdMarkerPart), `${model.id}\\resp_marker_third`, 'third marker proves repeated accumulated continuation');
+
+    const originalNow = Date.now;
+    Date.now = () => originalNow() + 10 * 60 * 1000 + 1;
+    try {
+      await assertLocalMarkerFailure(
+        () => provider.provideLanguageModelChatResponse(
+          model,
+          createAgentHostContinuationMessages(thirdMarkerPart, 'Agent Host instructions', 'Expired delta'),
+          {},
+          { report() {} },
+          token
+        ),
+        responseRequests,
+        3,
+        'expired marker'
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerContinuationRecoverySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    if (responseRequests.length === 1) {
+      writeSseResponseWithOutputItem(response, 'recovery seed reply', 'resp_marker_recovery_seed', 'msg_marker_recovery_seed');
+      return;
+    }
+    if (responseRequests.length === 2 && body.previous_response_id) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          code: 'previous_response_not_found',
+          message: 'Untrusted remote detail.',
+          param: 'previous_response_id'
+        }
+      }));
+      return;
+    }
+    if (responseRequests.length === 3) {
+      writeSseResponseWithOutputItem(response, 'recovered reply', 'resp_marker_recovered', 'msg_marker_recovered');
+      return;
+    }
+    if (responseRequests.length === 4) {
+      writeSseResponseWithOutputItem(response, 'post-recovery reply', 'resp_marker_after_recovery', 'msg_marker_after_recovery');
+      return;
+    }
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Unexpected marker recovery request.' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for official stateful marker recovery coverage.');
+    }
+
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [createSystemMessage('Recovery instructions'), {
+        role: vscodeMock.LanguageModelChatMessageRole.User,
+        content: [new vscodeMock.LanguageModelTextPart('Recovery seed')]
+      }],
+      {},
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    const seedMarkerPart = getSingleStatefulMarkerPart(seedParts, 'recovery seed');
+
+    const recoveredParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      createAgentHostContinuationMessages(seedMarkerPart, 'Recovery instructions', 'Recovery delta'),
+      {},
+      { report(part) { recoveredParts.push(part); } },
+      token
+    );
+    const recoveredMarkerPart = getSingleStatefulMarkerPart(recoveredParts, 'recovered completion');
+
+    assertEqual(responseRequests.length, 3, 'marker continuation miss retries once');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_marker_recovery_seed', 'marker continuation attempts exact stored response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Recovery delta', type: 'message' }
+    ]), 'marker continuation attempt is incremental');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'marker recovery full replay omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
+      { role: 'user', content: 'Recovery seed', type: 'message' },
+      { id: 'msg_marker_recovery_seed', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'recovery seed reply' }] },
+      { role: 'user', content: 'Recovery delta', type: 'message' }
+    ]), 'marker recovery uses canonical local snapshot input plus response item plus delta');
+    assertEqual(decodeStatefulMarker(recoveredMarkerPart), `${model.id}\\resp_marker_recovered`, 'only recovered completion emits a marker');
+
+    const finalParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      createAgentHostContinuationMessages(recoveredMarkerPart, 'Recovery instructions', 'After recovery delta'),
+      {},
+      { report(part) { finalParts.push(part); } },
+      token
+    );
+    assertEqual(responseRequests.length, 4, 'post-recovery marker reaches backend once');
+    assertEqual(responseRequests[3].previous_response_id, 'resp_marker_recovered', 'post-recovery marker selects the newly accumulated snapshot');
+    assertEqual(JSON.stringify(responseRequests[3].input), JSON.stringify([
+      { role: 'user', content: 'After recovery delta', type: 'message' }
+    ]), 'post-recovery continuation remains delta only');
+    assertEqual(decodeStatefulMarker(getSingleStatefulMarkerPart(finalParts, 'post-recovery completion')), `${model.id}\\resp_marker_after_recovery`, 'post-recovery marker is emitted');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerToolOutputReplaySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    if (responseRequests.length === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'fc_marker_tool',
+          type: 'function_call',
+          call_id: 'call_marker_tool',
+          name: 'read_file',
+          arguments: '{"filePath":"src/provider.ts"}'
+        }
+      });
+      send({ type: 'response.completed', response: { id: 'resp_marker_tool_seed', status: 'completed' } });
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+    writeSseResponseWithOutputItem(response, 'tool result accepted', 'resp_marker_tool_done', 'msg_marker_tool_done');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for stateful marker tool-output replay coverage.');
+    }
+
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [createSystemMessage('Tool marker instructions'), {
+        role: vscodeMock.LanguageModelChatMessageRole.User,
+        content: [new vscodeMock.LanguageModelTextPart('Read the provider file')]
+      }],
+      { tools: [{ name: 'read_file', description: 'Reads a file.', inputSchema: { type: 'object' } }] },
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    const markerPart = getSingleStatefulMarkerPart(seedParts, 'tool marker seed');
+
+    const resultParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [markerPart]
+        },
+        createSystemMessage('Tool marker instructions'),
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelToolResultPart(
+            'call_marker_tool',
+            [new vscodeMock.LanguageModelTextPart('provider source')]
+          )]
+        }
+      ],
+      { tools: [{ name: 'read_file', description: 'Reads a file.', inputSchema: { type: 'object' } }] },
+      { report(part) { resultParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'HTTP marker tool-output request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'HTTP marker tool output uses canonical full replay');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Read the provider file', type: 'message' },
+      {
+        id: 'fc_marker_tool',
+        type: 'function_call',
+        call_id: 'call_marker_tool',
+        name: 'read_file',
+        arguments: '{"filePath":"src/provider.ts"}'
+      },
+      { type: 'function_call_output', call_id: 'call_marker_tool', output: 'provider source' }
+    ]), 'HTTP marker tool output replays prior input, stored call, and current output');
+    assertEqual(
+      decodeStatefulMarker(getSingleStatefulMarkerPart(resultParts, 'tool marker completion')),
+      `${model.id}\\resp_marker_tool_done`,
+      'HTTP marker tool replay emits the completed marker'
+    );
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+    if (request.method === 'GET') {
+      response.writeHead(426);
+      response.end();
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    if (responseRequests.length === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+      const item = {
+        id: 'fc_marker_auto_opaque',
+        type: 'function_call',
+        call_id: 'call_marker_auto_opaque',
+        name: 'read_file',
+        arguments: '{"filePath":"src/provider.ts"}'
+      };
+      send({ type: 'response.output_item.added', output_index: 0, item });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: item.id,
+        output_index: 0,
+        name: item.name,
+        arguments: item.arguments
+      });
+      send({ type: 'response.output_item.done', output_index: 0, item });
+      send({ type: 'response.completed', response: { id: 'resp_marker_auto_opaque_seed', status: 'completed' } });
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+    if (responseRequests.length === 2 && body.previous_response_id) {
+      response.writeHead(400);
+      response.end();
+      return;
+    }
+    const responseIndex = responseRequests.length;
+    writeSseResponseWithOutputItem(
+      response,
+      responseIndex === 3 ? 'opaque tool recovery accepted' : 'opaque disable follow-up accepted',
+      responseIndex === 3 ? 'resp_marker_auto_opaque_recovered' : 'resp_marker_auto_opaque_followup',
+      responseIndex === 3 ? 'msg_marker_auto_opaque_recovered' : 'msg_marker_auto_opaque_followup'
+    );
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'auto';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  const tools = [{ name: 'read_file', description: 'Reads a file.', inputSchema: { type: 'object' } }];
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for auto-fallback opaque tool-output recovery coverage.');
+    }
+
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [createSystemMessage('Auto opaque tool instructions'), {
+        role: vscodeMock.LanguageModelChatMessageRole.User,
+        content: [new vscodeMock.LanguageModelTextPart('Read through auto fallback')]
+      }],
+      { tools },
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    const markerPart = getSingleStatefulMarkerPart(seedParts, 'auto opaque tool seed');
+
+    const recoveredParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [markerPart]
+        },
+        createSystemMessage('Auto opaque tool instructions'),
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelToolResultPart(
+            'call_marker_auto_opaque',
+            [new vscodeMock.LanguageModelTextPart('provider source through auto fallback')]
+          )]
+        }
+      ],
+      { tools },
+      { report(part) { recoveredParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 3, 'auto opaque tool recovery sends seed, incremental, and canonical HTTP requests');
+    assertEqual(
+      responseRequests[1].previous_response_id,
+      'resp_marker_auto_opaque_seed',
+      'auto fallback first attempts incremental tool-output continuation'
+    );
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { type: 'function_call_output', call_id: 'call_marker_auto_opaque', output: 'provider source through auto fallback' }
+    ]), 'auto fallback sends only the incremental tool output before opaque rejection');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'auto opaque tool recovery omits the rejected response id');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
+      { role: 'user', content: 'Read through auto fallback', type: 'message' },
+      {
+        id: 'fc_marker_auto_opaque',
+        type: 'function_call',
+        call_id: 'call_marker_auto_opaque',
+        name: 'read_file',
+        arguments: '{"filePath":"src/provider.ts"}'
+      },
+      { type: 'function_call_output', call_id: 'call_marker_auto_opaque', output: 'provider source through auto fallback' }
+    ]), 'auto opaque tool recovery replays the canonical call and output exactly once');
+    assertEqual(
+      getStatefulMarkers(recoveredParts).length,
+      0,
+      'auto opaque tool recovery emits no marker while reuse remains disabled until expiry'
+    );
+
+    const followUpParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        createSystemMessage('Auto opaque tool instructions'),
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelTextPart('Read through auto fallback')]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart(
+            'call_marker_auto_opaque',
+            'read_file',
+            { filePath: 'src/provider.ts' }
+          )]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelToolResultPart(
+            'call_marker_auto_opaque',
+            [new vscodeMock.LanguageModelTextPart('provider source through auto fallback')]
+          )]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelTextPart('opaque tool recovery accepted')]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelTextPart('Continue after opaque tool recovery')]
+        }
+      ],
+      { tools },
+      { report(part) { followUpParts.push(part); } },
+      token
+    );
+    assertEqual(responseRequests.length, 4, 'opaque disable follow-up reaches HTTP once');
+    assertEqual(
+      'previous_response_id' in responseRequests[3],
+      false,
+      'opaque disable follow-up does not reuse the recovered response before expiry'
+    );
+    assertEqual(
+      getStatefulMarkers(followUpParts).length,
+      0,
+      'opaque disable follow-up still emits no marker before expiry'
+    );
+  } finally {
+    configValues.transport = 'http';
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerOpaqueRecoverySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    if (responseRequests.length === 1) {
+      writeSseResponseWithOutputItem(response, 'opaque seed reply', 'resp_marker_opaque_seed', 'msg_marker_opaque_seed');
+      return;
+    }
+    if (responseRequests.length === 2 && body.previous_response_id) {
+      response.writeHead(400);
+      response.end();
+      return;
+    }
+    writeSseResponseWithOutputItem(response, 'opaque recovery reply', 'resp_marker_opaque_recovered', 'msg_marker_opaque_recovered');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for opaque stateful marker recovery coverage.');
+    }
+
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [createSystemMessage('Opaque recovery instructions'), {
+        role: vscodeMock.LanguageModelChatMessageRole.User,
+        content: [new vscodeMock.LanguageModelTextPart('Opaque seed')]
+      }],
+      {},
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    const seedMarkerPart = getSingleStatefulMarkerPart(seedParts, 'opaque recovery seed');
+
+    const recoveredParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      createAgentHostContinuationMessages(seedMarkerPart, 'Opaque recovery instructions', 'Opaque delta'),
+      {},
+      { report(part) { recoveredParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 3, 'opaque marker continuation retries once');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_marker_opaque_seed', 'opaque recovery first attempts the stored response');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'opaque recovery replays without previous response id');
+    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
+      { role: 'user', content: 'Opaque seed', type: 'message' },
+      { id: 'msg_marker_opaque_seed', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'opaque seed reply' }] },
+      { role: 'user', content: 'Opaque delta', type: 'message' }
+    ]), 'opaque recovery uses the canonical local snapshot');
+    assertEqual(getStatefulMarkers(recoveredParts).length, 0, 'opaque HTTP rejection emits no marker while reuse remains disabled');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerRecordFailureSmokeTest() {
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    for await (const _chunk of request) {
+      // Drain the request body before completing the response.
+    }
+    writeSseResponse(response, 'completed before local record failure', 'resp_marker_record_failure');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for stateful marker record-failure coverage.');
+    }
+
+    provider.responseBranchStore.recordSuccess = () => {
+      throw new Error('Synthetic branch record failure');
+    };
+    const parts = [];
+    let failureMessage = '';
+    try {
+      await provider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Do not emit an unrecorded marker.')] }],
+        {},
+        { report(part) { parts.push(part); } },
+        token
+      );
+    } catch (error) {
+      failureMessage = error instanceof Error ? error.message : String(error);
+    }
+
+    assertEqual(failureMessage, 'Synthetic branch record failure', 'branch record failure is surfaced');
+    assertEqual(getStatefulMarkers(parts).length, 0, 'branch record failure emits no stateful marker');
   } finally {
     await closeServer(server);
   }
@@ -2089,14 +2863,16 @@ async function runCreatedResponseCancellationDoesNotRecordBranchSmokeTest() {
     }
 
     canceledToken = createMutableCancellationToken();
+    const createdOnlyParts = [];
     await provider.provideLanguageModelChatResponse(
       model,
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Cancel this turn.')] }],
       {},
-      { report() {} },
+      { report(part) { createdOnlyParts.push(part); } },
       canceledToken
     );
     assertEqual(canceledToken.isCancellationRequested, true, 'response.created triggers deterministic cancellation');
+    assertEqual(getStatefulMarkers(createdOnlyParts).length, 0, 'created-only cancellation emits no marker');
 
     await provider.provideLanguageModelChatResponse(
       model,
@@ -2320,6 +3096,28 @@ function writeSseResponse(response, text, responseId) {
   response.end();
 }
 
+function writeSseResponseWithOutputItem(response, text, responseId, itemId) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive'
+  });
+  response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: text })}\n\n`);
+  response.write(`data: ${JSON.stringify({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      id: itemId,
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text }]
+    }
+  })}\n\n`);
+  response.write(`data: ${JSON.stringify({ type: 'response.completed', response: { id: responseId, object: 'response', status: 'completed' } })}\n\n`);
+  response.write('data: [DONE]\n\n');
+  response.end();
+}
+
 async function closeServer(server) {
   await new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
@@ -2404,6 +3202,62 @@ function assertEqual(actual, expected, label) {
   if (actual !== expected) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
+}
+
+function isStatefulMarkerPart(part) {
+  return part instanceof LanguageModelDataPart && part.mimeType.toLowerCase() === 'stateful_marker';
+}
+
+function getStatefulMarkers(parts) {
+  return parts
+    .filter(isStatefulMarkerPart)
+    .map((part) => decodeStatefulMarker(part));
+}
+
+function getSingleStatefulMarkerPart(parts, label) {
+  const markers = parts.filter(isStatefulMarkerPart);
+  assertEqual(markers.length, 1, `${label} emits exactly one marker`);
+  return markers[0];
+}
+
+function decodeStatefulMarker(part) {
+  return new TextDecoder('utf-8', { fatal: true }).decode(part.data);
+}
+
+function createStatefulMarkerPart(value) {
+  return vscodeMock.LanguageModelDataPart.text(value, 'stateful_marker');
+}
+
+function createSystemMessage(instructions) {
+  return {
+    role: vscodeMock.LanguageModelChatMessageRole.System,
+    content: [new vscodeMock.LanguageModelTextPart(instructions)]
+  };
+}
+
+function createAgentHostContinuationMessages(markerPart, instructions, delta) {
+  return [
+    {
+      role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+      content: [markerPart]
+    },
+    createSystemMessage(instructions),
+    {
+      role: vscodeMock.LanguageModelChatMessageRole.User,
+      content: [new vscodeMock.LanguageModelTextPart(delta)]
+    }
+  ];
+}
+
+async function assertLocalMarkerFailure(request, responseRequests, expectedRequestCount, label) {
+  let failureMessage = '';
+  try {
+    await request();
+  } catch (error) {
+    failureMessage = error instanceof Error ? error.message : String(error);
+  }
+  assertEqual(failureMessage, 'Stateful continuation marker could not be resolved locally.', `${label} uses the fixed local error`);
+  assertEqual(responseRequests.length, expectedRequestCount, `${label} sends zero backend requests`);
 }
 
 async function runProviderModelDiscoveryPolicySmokeTest() {
