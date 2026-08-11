@@ -12,11 +12,12 @@ import { clearApiKey, setApiKey } from './secrets';
 import {
   enableNativeToolSearchGroupingBridge,
   getNativeToolGroupingBridgeStatus,
+  migrateNativeToolSearchOptIn,
   restoreVSCodeToolGrouping
 } from './nativeToolSearch/nativeToolGroupingBridge';
 import { getNativeToolSearchRuntimeStatus } from './nativeToolSearch/nativeToolSearchStatus';
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
   const logger = createCodexLogger(outputChannel, 'extension');
   logger.info('extension.activated', {
@@ -26,6 +27,16 @@ export function activate(context: vscode.ExtensionContext): void {
     architecture: process.arch,
     logLevel: outputChannel.logLevel
   });
+  try {
+    if (await migrateNativeToolSearchOptIn(context)) {
+      logger.info('native-tool-search.opt-in-migrated', { policy: 'auto' });
+    }
+  } catch (error) {
+    logger.warn('native-tool-search.opt-in-migration-failed', { error });
+    void vscode.window.showWarningMessage(
+      'Native Tool Search was previously enabled, but its opt-in setting could not be migrated. Run Codex: Enable Native Tool Search to try again.'
+    );
+  }
   const config = getProviderConfig();
   logger.debug('configuration.loaded', {
     baseURL: config.baseURL,
@@ -162,14 +173,18 @@ export function activate(context: vscode.ExtensionContext): void {
         runtime: runtime ?? null
       };
       logger.info('native-tool-search.status', status);
-      const runtimeSummary = runtime
+      const runtimeSummary = status.setting === 'disabled'
+        ? 'Native Tool Search is disabled.'
+        : runtime
         ? `${runtime.mode === 'native-hosted' ? 'Active' : 'Fallback'}: ${formatNativeToolSearchReason(runtime.reason)}; ${runtime.selectedToolCount} selected, ${runtime.deferredToolCount} deferred, ${runtime.deferredToolSchemaBytes} deferred schema bytes.`
         : 'No Agent request has run since this extension activated.';
-      const bridgeSummary = bridge.enabledByThisExtension
-        ? `VS Code Virtual Tool bridge: enabled (threshold ${formatSettingValue(bridge.effectiveThreshold)}).`
-        : `VS Code Virtual Tool bridge: not enabled (reset command ${bridge.resetCommandAvailable ? 'available' : 'unavailable'}).`;
+      const discoverySummary = status.setting === 'disabled'
+        ? 'Tool discovery: VS Code Virtual Tool Groups (default).'
+        : bridge.enabledByThisExtension
+          ? `Tool discovery: Codex Native Tool Search; VS Code Virtual Tool Groups are temporarily disabled (threshold ${formatSettingValue(bridge.effectiveThreshold)}).`
+          : `Native Tool Search policy: ${status.setting}; VS Code Virtual Tool Groups were not disabled by this extension.`;
       const action = await vscode.window.showInformationMessage(
-        `Native Tool Search setting: ${status.setting}. ${runtimeSummary} ${bridgeSummary}`,
+        `${discoverySummary} ${runtimeSummary}`,
         'Open Debug Logs',
         'Open Settings'
       );
@@ -181,7 +196,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json (Legacy)', 'Refresh Account Limits', 'Enable Native Tool Search', 'Restore VS Code Tool Grouping', 'Show Native Tool Search Status', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json (Legacy)', 'Refresh Account Limits', 'Enable Native Tool Search', 'Use VS Code Virtual Tool Groups', 'Show Native Tool Search Status', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex' }
       );
 
@@ -199,7 +214,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand('codexModelProvider.refreshAccountLimits');
       } else if (action === 'Enable Native Tool Search') {
         await vscode.commands.executeCommand('codexModelProvider.enableNativeToolSearch');
-      } else if (action === 'Restore VS Code Tool Grouping') {
+      } else if (action === 'Use VS Code Virtual Tool Groups') {
         await vscode.commands.executeCommand('codexModelProvider.restoreVSCodeToolGrouping');
       } else if (action === 'Show Native Tool Search Status') {
         await vscode.commands.executeCommand('codexModelProvider.showNativeToolSearchStatus');

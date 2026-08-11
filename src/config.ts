@@ -38,7 +38,7 @@ export function getProviderConfig(): ProviderConfig {
     transport: normalizeTransport(config.get('transport', 'auto')),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
-    nativeToolSearch: normalizeTriState(config.get('nativeToolSearch', 'auto')),
+    nativeToolSearch: normalizeTriState(config.get('nativeToolSearch', 'disabled'), 'disabled'),
     nativeToolSearchMaxToolsPerNamespace: normalizeNativeToolSearchMaxToolsPerNamespace(
       config.get('nativeToolSearchMaxToolsPerNamespace', MAX_NAMESPACE_FUNCTIONS)
     ),
@@ -54,8 +54,11 @@ export function getProviderConfig(): ProviderConfig {
   };
 }
 
-function normalizeTriState(value: string): 'auto' | 'enabled' | 'disabled' {
-  return value === 'enabled' || value === 'disabled' ? value : 'auto';
+function normalizeTriState(
+  value: string,
+  fallback: 'auto' | 'enabled' | 'disabled' = 'auto'
+): 'auto' | 'enabled' | 'disabled' {
+  return value === 'auto' || value === 'enabled' || value === 'disabled' ? value : fallback;
 }
 
 function normalizeNativeToolSearchMaxToolsPerNamespace(value: unknown): number {
