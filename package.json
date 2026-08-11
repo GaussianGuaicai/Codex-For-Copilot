@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.4.3",
+  "version": "1.5.0",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -201,14 +201,20 @@
         "codexModelProvider.nativeToolSearch": {
           "type": "string",
           "default": "disabled",
-          "enum": ["disabled", "auto", "enabled"],
+          "enum": [
+            "disabled",
+            "auto",
+            "enabled"
+          ],
           "enumDescriptions": [
             "Leave tool discovery to VS Code. Preserve Virtual Tool Groups when VS Code supplies them; otherwise use standard function tools. This is the default.",
             "After Native Tool Search is enabled, use hosted Tool Search for compatible requests with at least 12 selected tools and either substantial deferred schemas or 24 tools.",
             "Use hosted Tool Search for compatible Codex requests. Retry once with legacy function tools only when the backend explicitly rejects Tool Search."
           ],
           "description": "Advanced Native Tool Search policy. Use 'Codex: Enable Native Tool Search' to opt in and 'Codex: Use VS Code Virtual Tool Groups' to restore the default.",
-          "tags": ["advanced"]
+          "tags": [
+            "advanced"
+          ]
         },
         "codexModelProvider.nativeToolSearchMaxToolsPerNamespace": {
           "type": "number",
@@ -216,7 +222,9 @@
           "minimum": 1,
           "maximum": 8,
           "description": "Maximum number of deferred functions in each Native Tool Search namespace. Lower values create smaller groups; 8 is the supported upper limit. Values below 3 are mainly useful for diagnostics.",
-          "tags": ["advanced"]
+          "tags": [
+            "advanced"
+          ]
         },
         "codexModelProvider.model": {
           "type": "string",
