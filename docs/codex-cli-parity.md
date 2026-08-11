@@ -191,6 +191,8 @@ generation phases rather than local request preparation, which remains below
 
 ## Real-backend functional validation
 
+Set `CODEX_TEST_NATIVE_TOOL_SEARCH=1` when running `npm run test:real-backend` to opt into a hosted Tool Search probe. It verifies the server-side search and load events, a namespaced deferred function call, and the function-output continuation. It uses the selected model and local Codex credentials, so it is intentionally not part of the default smoke suite. For example in PowerShell: `$env:CODEX_TEST_MODEL='gpt-5.5'; $env:CODEX_TEST_NATIVE_TOOL_SEARCH='1'; npm run test:real-backend`.
+
 - `gpt-5.5`, HTTP, low reasoning, disabled prewarm: initial response succeeded; `store: false` ordinary continuation rejected `previous_response_id` and recovered to `PONG` with full input.
 - `gpt-5.5`, WebSocket, medium reasoning, enabled prewarm: identity-free preconnection was claimed by the formal request, the 400 ms prewarm timed out and was discarded, and the next turn reused the response session without fallback.
 - `gpt-5.5`, `auto`, high reasoning, auto prewarm: `skipped-auto` was recorded, the preconnected socket was claimed, and the next turn reused the response session without fallback.

@@ -33,7 +33,7 @@
     "test:real-backend": "node test/realBackendProbe.mjs",
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",
     "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",
-    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs",
+    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs && node test/smokeNativeToolPolicy.mjs && node test/smokeNativeToolCatalog.mjs && node test/smokeNativeToolNamespaces.mjs && node test/smokeNativeToolCallMapper.mjs && node test/smokeNativeToolSearchEvents.mjs && node test/smokeNativeToolSearchLogging.mjs && node test/smokeNativeToolContinuation.mjs && node test/smokeNativeToolFallback.mjs && node test/smokeNativeToolOptIn.mjs && node test/smokeNativeToolGroupingBridge.mjs && node test/smokeNativeToolSearchStatus.mjs",
     "test:smoke": "npm run test:codex-parity && node test/smokeCodexLogger.mjs && node test/smokeReasoningEffort.mjs && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeReasoningStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
@@ -97,6 +97,18 @@
       {
         "command": "codexForCopilot.auth.signInWithChatGPT",
         "title": "Codex for Copilot: Sign in with ChatGPT"
+      },
+      {
+        "command": "codexModelProvider.enableNativeToolSearch",
+        "title": "Codex: Enable Native Tool Search"
+      },
+      {
+        "command": "codexModelProvider.restoreVSCodeToolGrouping",
+        "title": "Codex: Use VS Code Virtual Tool Groups"
+      },
+      {
+        "command": "codexModelProvider.showNativeToolSearchStatus",
+        "title": "Codex: Show Native Tool Search Status"
       },
       {
         "command": "codexForCopilot.auth.importAuthJson",
@@ -185,6 +197,26 @@
             "disabled"
           ],
           "description": "Controls Zstandard compression for large ChatGPT Codex Responses requests."
+        },
+        "codexModelProvider.nativeToolSearch": {
+          "type": "string",
+          "default": "disabled",
+          "enum": ["disabled", "auto", "enabled"],
+          "enumDescriptions": [
+            "Leave tool discovery to VS Code. Preserve Virtual Tool Groups when VS Code supplies them; otherwise use standard function tools. This is the default.",
+            "After Native Tool Search is enabled, use hosted Tool Search for compatible requests with at least 12 selected tools and either substantial deferred schemas or 24 tools.",
+            "Use hosted Tool Search for compatible Codex requests. Retry once with legacy function tools only when the backend explicitly rejects Tool Search."
+          ],
+          "description": "Advanced Native Tool Search policy. Use 'Codex: Enable Native Tool Search' to opt in and 'Codex: Use VS Code Virtual Tool Groups' to restore the default.",
+          "tags": ["advanced"]
+        },
+        "codexModelProvider.nativeToolSearchMaxToolsPerNamespace": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Maximum number of deferred functions in each Native Tool Search namespace. Lower values create smaller groups; 8 is the supported upper limit. Values below 3 are mainly useful for diagnostics.",
+          "tags": ["advanced"]
         },
         "codexModelProvider.model": {
           "type": "string",

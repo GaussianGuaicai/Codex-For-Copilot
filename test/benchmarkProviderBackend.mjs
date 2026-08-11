@@ -214,7 +214,8 @@ async function benchmark(scenario, operation) {
     totalMedianMs: percentile(samples.map((sample) => sample.trace.totalMs), 0.5),
     totalP95Ms: percentile(samples.map((sample) => sample.trace.totalMs), 0.95),
     connectionReuseRate: samples.filter((sample) => sample.context.connectionReused === true).length / samples.length,
-    toolSchemaCacheHitRate: samples.filter((sample) => sample.context.toolSchemaCacheHit === true).length / samples.length
+    legacyToolSchemaCacheHitRate: samples.filter((sample) => sample.context.legacyToolSchemaCacheHit === true).length / samples.length,
+    nativeToolCatalogCacheHitRate: samples.filter((sample) => sample.context.nativeToolCatalogCacheHit === true).length / samples.length
   });
 }
 

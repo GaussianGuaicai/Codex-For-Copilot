@@ -4,6 +4,7 @@ import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
+import type { CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
 import {
   CodexHeader,
   createCodexTurnMetadata,
@@ -28,6 +29,7 @@ export interface CodexRequestBuilderOptions {
   instructions: string;
   input: ResponsesInputMessage[];
   tools?: readonly vscode.LanguageModelChatTool[];
+  toolPlan?: CodexToolPlan;
   toolMode?: vscode.LanguageModelChatToolMode;
   reasoning?: Reasoning;
   serviceTier?: 'default' | 'priority';
@@ -49,7 +51,8 @@ export type CodexRequestEnvelopeOptions = Omit<
 export interface CodexRequestBuildMetrics {
   requestBuildMs: number;
   toolSchemaBytes: number;
-  toolSchemaCacheHit: boolean;
+  legacyToolSchemaCacheHit?: boolean;
+  nativeToolCatalogCacheHit?: boolean;
 }
 
 export interface CodexRequestBuildResult {
@@ -65,8 +68,9 @@ export function buildCodexResponsesRequestWithMetrics(
   options: CodexRequestBuilderOptions
 ): CodexRequestBuildResult {
   const startedAt = performance.now();
-  const toolSchemas = resolveCodexToolSchemas(options.tools);
-  const tools = toolSchemas.responseTools;
+  const legacyToolSchemas = options.toolPlan ? undefined : resolveCodexToolSchemas(options.tools);
+  const toolPlan = options.toolPlan;
+  const tools = toolPlan?.responseTools ?? legacyToolSchemas?.responseTools ?? [];
   const metadata = options.compatibilityEnabled && options.identity
     ? buildCodexClientMetadata(options.identity, options.requestKind ?? 'turn', options.websocketRequestStartedAt)
     : undefined;
@@ -108,8 +112,9 @@ export function buildCodexResponsesRequestWithMetrics(
     request,
     metrics: {
       requestBuildMs: Math.max(0, performance.now() - startedAt),
-      toolSchemaBytes: toolSchemas.toolSchemaBytes,
-      toolSchemaCacheHit: toolSchemas.cacheHit
+      toolSchemaBytes: toolPlan?.toolSchemaBytes ?? legacyToolSchemas?.toolSchemaBytes ?? 0,
+      legacyToolSchemaCacheHit: toolPlan?.legacyToolSchemaCacheHit ?? legacyToolSchemas?.cacheHit,
+      nativeToolCatalogCacheHit: toolPlan?.nativeToolCatalogCacheHit
     }
   };
 }

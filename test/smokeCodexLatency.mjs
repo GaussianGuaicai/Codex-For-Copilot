@@ -51,7 +51,8 @@ try {
     requestBodyBytes: 456,
     toolCount: 2,
     toolSchemaBytes: 123,
-    toolSchemaCacheHit: true,
+    legacyToolSchemaCacheHit: true,
+    nativeToolCatalogCacheHit: true,
     requestBuildMs: 4.5,
     modelDiscoveryCacheState: 'stale',
     prewarmResult: 'success',
@@ -94,7 +95,8 @@ try {
   assertEqual(snapshot.context.modelDiscoveryCacheState, 'stale', 'model cache context');
   assertEqual(snapshot.context.requestBodyBytes, 456, 'request bytes context');
   assertEqual(snapshot.context.toolSchemaBytes, 123, 'tool schema bytes context');
-  assertEqual(snapshot.context.toolSchemaCacheHit, true, 'tool schema cache context');
+  assertEqual(snapshot.context.legacyToolSchemaCacheHit, true, 'legacy tool schema cache context');
+  assertEqual(snapshot.context.nativeToolCatalogCacheHit, true, 'native tool catalog cache context');
   assertEqual(snapshot.context.requestBuildMs, 4.5, 'request build context');
   assertEqual(snapshot.context.metricVersion, 2, 'metric version context');
   assertEqual(snapshot.context.backendDeltaCount, 12, 'backend delta count context');
