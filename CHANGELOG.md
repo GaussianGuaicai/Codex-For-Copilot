@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.5.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.3...v1.5.0) (2026-08-11)
+
+
+### Features
+
+* Add native OpenAI Tool Search for VS Code Agent tools ([#38](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/38)) ([8bc211a](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/8bc211ab7717a330946d61422ce6f9d9c3dbbd23))
+
 ## [1.4.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.2...v1.4.3) (2026-08-10)
 
 
