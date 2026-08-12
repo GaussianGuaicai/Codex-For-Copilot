@@ -2079,11 +2079,12 @@ async function runCreatedResponseCancellationDoesNotRecordBranchSmokeTest() {
       subscriptions: []
     },
     {
-      debug(message, data) {
-        if (message === 'response created' && data?.responseId === 'resp_created_only') {
+      trace(message) {
+        if (message.startsWith('[provider] response created ')) {
           canceledToken?.cancel();
         }
       },
+      debug() {},
       info(message) {
         infoMessages.push(message);
       },

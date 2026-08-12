@@ -979,7 +979,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           ...requestOptions
         });
         rawResponseItems.length = 0;
-        createdResponseId = undefined;
         completedResponseId = undefined;
         activeBranchId = undefined;
         latency.recordContext({
