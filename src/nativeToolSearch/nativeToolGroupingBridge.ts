@@ -10,10 +10,27 @@ const PREVIOUS_KEY = 'nativeToolSearch.virtualToolsThresholdPrevious';
 
 interface SavedThreshold { value: unknown; target: vscode.ConfigurationTarget }
 
+type ThresholdStateScope = 'legacy-global' | 'workspace';
+
+interface ThresholdState {
+  state: vscode.Memento;
+  scope: ThresholdStateScope;
+}
+
+interface NativeToolGroupingBridgeOwnershipContext {
+  globalState?: Pick<vscode.Memento, 'get'>;
+  workspaceState?: Pick<vscode.Memento, 'get'>;
+}
+
 export interface NativeToolGroupingBridgeStatus {
   enabledByThisExtension: boolean;
   effectiveThreshold: unknown;
   resetCommandAvailable: boolean;
+}
+
+export function hasNativeToolGroupingBridgeOwnership(context: NativeToolGroupingBridgeOwnershipContext): boolean {
+  return context.globalState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true
+    || context.workspaceState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true;
 }
 
 export async function migrateNativeToolSearchOptIn(context: vscode.ExtensionContext): Promise<boolean> {
@@ -49,10 +66,11 @@ export async function enableNativeToolSearchGroupingBridge(context: vscode.Exten
   const inspectedNativeToolSearch = nativeToolSearchConfiguration.inspect<string>(NATIVE_TOOL_SEARCH_SETTING);
   const thresholdTarget = getEffectiveSettingTarget(inspectedThreshold);
   const nativeToolSearchTarget = getEffectiveSettingTarget(inspectedNativeToolSearch);
-  const thresholdState = getStateForTarget(context, thresholdTarget);
+  const thresholdStore = getStateForTarget(context, thresholdTarget);
+  const thresholdState = thresholdStore.state;
   const savedThresholds = getSavedThresholds(
     thresholdState,
-    thresholdTarget === vscode.ConfigurationTarget.Global
+    thresholdStore.scope
   );
   if (!savedThresholds.some((saved) => saved.target === thresholdTarget)) {
     savedThresholds.push({
@@ -63,54 +81,68 @@ export async function enableNativeToolSearchGroupingBridge(context: vscode.Exten
 
   const previousThreshold = getSettingValueAtTarget(inspectedThreshold, thresholdTarget);
   const previousNativeToolSearch = getSettingValueAtTarget(inspectedNativeToolSearch, nativeToolSearchTarget);
-  let thresholdUpdated = false;
-  let nativeToolSearchUpdated = false;
+  const previousSavedThresholds = thresholdState.get<unknown>(PREVIOUS_KEY);
+  const previousOwner = thresholdState.get<unknown>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY);
+  let phase: 'persistence' | 'settings' | 'reset' = 'persistence';
+  let thresholdUpdateAttempted = false;
+  let nativeToolSearchUpdateAttempted = false;
+  let resetAttempted = false;
+  let savedThresholdsUpdateAttempted = false;
+  let ownerUpdateAttempted = false;
   try {
+    savedThresholdsUpdateAttempted = true;
+    await thresholdState.update(PREVIOUS_KEY, savedThresholds);
+    ownerUpdateAttempted = true;
+    await thresholdState.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, true);
+    phase = 'settings';
+    thresholdUpdateAttempted = true;
     await virtualToolsConfiguration.update(THRESHOLD_SETTING, 0, thresholdTarget);
-    thresholdUpdated = true;
+    nativeToolSearchUpdateAttempted = true;
     await nativeToolSearchConfiguration.update(NATIVE_TOOL_SEARCH_SETTING, 'auto', nativeToolSearchTarget);
-    nativeToolSearchUpdated = true;
+    phase = 'reset';
+    resetAttempted = true;
+    const resetError = await resetToolGroups();
+    if (resetError !== undefined) {
+      throw resetError;
+    }
   } catch (error) {
-    const rollbackError = await rollbackNativeToolSearchEnable({
+    const rollbackErrors = await rollbackNativeToolSearchEnable({
       virtualToolsConfiguration,
       nativeToolSearchConfiguration,
+      thresholdState,
       thresholdTarget,
       nativeToolSearchTarget,
       previousThreshold,
       previousNativeToolSearch,
-      thresholdUpdated,
-      nativeToolSearchUpdated
+      previousSavedThresholds,
+      previousOwner,
+      savedThresholds,
+      thresholdUpdateAttempted,
+      nativeToolSearchUpdateAttempted,
+      resetAttempted,
+      savedThresholdsUpdateAttempted,
+      ownerUpdateAttempted
     });
-    const reason = error instanceof Error ? ` ${error.message}` : '';
-    const rollbackReason = rollbackError instanceof Error ? ` Rollback also failed: ${rollbackError.message}` : '';
-    void vscode.window.showErrorMessage(`Native Tool Search could not update its tool-discovery settings.${reason}${rollbackReason}`);
-    return;
-  }
-  if (!await resetToolGroups()) {
-    const rollbackError = await rollbackNativeToolSearchEnable({
-      virtualToolsConfiguration,
-      nativeToolSearchConfiguration,
-      thresholdTarget,
-      nativeToolSearchTarget,
-      previousThreshold,
-      previousNativeToolSearch,
-      thresholdUpdated,
-      nativeToolSearchUpdated
-    });
-    if (rollbackError) {
-      const reason = rollbackError instanceof Error ? ` ${rollbackError.message}` : '';
+    const reason = formatErrorReason(error);
+    const rollbackReason = formatRollbackErrors(rollbackErrors);
+    if (phase === 'reset') {
+      if (rollbackErrors.length > 0) {
+        void vscode.window.showErrorMessage(
+          `Native Tool Search could not reset Copilot tool groups, and restoring its tool-discovery settings also failed.${reason}${rollbackReason}`
+        );
+        return;
+      }
       void vscode.window.showErrorMessage(
-        `Native Tool Search could not reset Copilot tool groups, and restoring its tool-discovery settings also failed.${reason}`
+        'Native Tool Search could not reset Copilot virtual tool groups. Its settings were rolled back and no changes were left behind.'
       );
       return;
     }
-    void vscode.window.showErrorMessage(
-      'Native Tool Search could not reset Copilot virtual tool groups. Its settings were rolled back and no changes were left behind.'
-    );
+    const failure = phase === 'persistence'
+      ? 'Native Tool Search could not save its tool-discovery ownership state.'
+      : 'Native Tool Search could not update its tool-discovery settings.';
+    void vscode.window.showErrorMessage(`${failure}${reason}${rollbackReason}`);
     return;
   }
-  await thresholdState.update(PREVIOUS_KEY, savedThresholds);
-  await thresholdState.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, true);
   void vscode.window.showInformationMessage('Native Tool Search enabled. Codex will use it automatically when it is beneficial and supported.');
 }
 
@@ -123,35 +155,35 @@ export async function restoreVSCodeToolGrouping(context: vscode.ExtensionContext
   const nativeToolSearchTarget = getEffectiveSettingTarget(inspectedNativeToolSearch);
   const previousNativeToolSearch = getSettingValueAtTarget(inspectedNativeToolSearch, nativeToolSearchTarget);
   const restoredThresholds: Array<SavedThreshold & { currentValue: unknown }> = [];
-  let nativeToolSearchUpdated = false;
+  let nativeToolSearchUpdateAttempted = false;
   try {
     if (nativeToolSearchConfiguration.get<string>(NATIVE_TOOL_SEARCH_SETTING, 'disabled') !== 'disabled') {
+      nativeToolSearchUpdateAttempted = true;
       await nativeToolSearchConfiguration.update(NATIVE_TOOL_SEARCH_SETTING, 'disabled', nativeToolSearchTarget);
-      nativeToolSearchUpdated = true;
     }
     if (bridgeEnabled) {
       for (const owned of ownedStates) {
-        for (const previous of getSavedThresholds(owned.state, owned.global)) {
+        for (const previous of getSavedThresholds(owned.state, owned.scope)) {
           const inspectedThreshold = virtualToolsConfiguration.inspect<number>(THRESHOLD_SETTING);
           const currentValue = getSettingValueAtTarget(inspectedThreshold, previous.target);
           if (currentValue === 0) {
-            await virtualToolsConfiguration.update(THRESHOLD_SETTING, previous.value, previous.target);
             restoredThresholds.push({ ...previous, currentValue });
+            await virtualToolsConfiguration.update(THRESHOLD_SETTING, previous.value, previous.target);
           }
         }
       }
     }
   } catch (error) {
-    const rollbackError = await rollbackVSCodeToolGroupingRestore({
+    const rollbackErrors = await rollbackVSCodeToolGroupingRestore({
       virtualToolsConfiguration,
       nativeToolSearchConfiguration,
       nativeToolSearchTarget,
       previousNativeToolSearch,
-      nativeToolSearchUpdated,
+      nativeToolSearchUpdateAttempted,
       restoredThresholds
     });
-    const reason = error instanceof Error ? ` ${error.message}` : '';
-    const rollbackReason = rollbackError instanceof Error ? ` Rollback also failed: ${rollbackError.message}` : '';
+    const reason = formatErrorReason(error);
+    const rollbackReason = formatRollbackErrors(rollbackErrors);
     void vscode.window.showErrorMessage(`VS Code Virtual Tool Groups could not be restored.${reason}${rollbackReason}`);
     return;
   }
@@ -160,13 +192,13 @@ export async function restoreVSCodeToolGrouping(context: vscode.ExtensionContext
     void vscode.window.showInformationMessage('VS Code remains responsible for tool discovery. Native Tool Search is disabled.');
     return;
   }
+  if (await resetToolGroups() !== undefined) {
+    void vscode.window.showWarningMessage('VS Code Virtual Tool Groups were restored, but Copilot tool groups could not be reset. Reload Window before starting a new Agent request.');
+    return;
+  }
   for (const owned of ownedStates) {
     await owned.state.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, undefined);
     await owned.state.update(PREVIOUS_KEY, undefined);
-  }
-  if (!await resetToolGroups()) {
-    void vscode.window.showWarningMessage('VS Code Virtual Tool Groups were restored, but Copilot tool groups could not be reset. Reload Window before starting a new Agent request.');
-    return;
   }
   void vscode.window.showInformationMessage('VS Code Virtual Tool Groups restored as the default tool-discovery method.');
 }
@@ -223,24 +255,33 @@ function hasExplicitSettingValue(
     || inspected?.globalValue !== undefined;
 }
 
-function getStateForTarget(context: vscode.ExtensionContext, target: vscode.ConfigurationTarget): vscode.Memento {
-  return target === vscode.ConfigurationTarget.Global ? context.globalState : context.workspaceState;
+function getStateForTarget(context: vscode.ExtensionContext, target: vscode.ConfigurationTarget): ThresholdState {
+  if (target === vscode.ConfigurationTarget.Global) {
+    return { state: context.globalState, scope: 'legacy-global' };
+  }
+  const legacyGlobalThresholds = context.globalState.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true
+    ? getSavedThresholds(context.globalState, 'legacy-global')
+    : [];
+  if (legacyGlobalThresholds.some((saved) => saved.target === target)) {
+    return { state: context.globalState, scope: 'legacy-global' };
+  }
+  return { state: context.workspaceState, scope: 'workspace' };
 }
 
-function getOwnedThresholdStates(context: vscode.ExtensionContext): Array<{ state: vscode.Memento; global: boolean }> {
+function getOwnedThresholdStates(context: vscode.ExtensionContext): ThresholdState[] {
   return [
-    { state: context.globalState, global: true },
-    { state: context.workspaceState, global: false }
+    { state: context.globalState, scope: 'legacy-global' as const },
+    { state: context.workspaceState, scope: 'workspace' as const }
   ].filter(({ state }) => state.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true);
 }
 
-function getSavedThresholds(state: vscode.Memento, global: boolean): SavedThreshold[] {
+function getSavedThresholds(state: vscode.Memento, scope: ThresholdStateScope): SavedThreshold[] {
   const saved = state.get<SavedThreshold | SavedThreshold[]>(PREVIOUS_KEY);
   const entries = Array.isArray(saved) ? saved : saved ? [saved] : [];
   return entries.flatMap((entry) => {
     const target = isConfigurationTarget(entry.target) ? entry.target : vscode.ConfigurationTarget.Global;
-    const isGlobalTarget = target === vscode.ConfigurationTarget.Global;
-    return isGlobalTarget === global ? [{ value: entry.value, target }] : [];
+    const accepted = scope === 'legacy-global' || target !== vscode.ConfigurationTarget.Global;
+    return accepted ? [{ value: entry.value, target }] : [];
   });
 }
 
@@ -253,17 +294,24 @@ function isConfigurationTarget(value: unknown): value is vscode.ConfigurationTar
 interface NativeToolSearchEnableRollbackOptions {
   virtualToolsConfiguration: vscode.WorkspaceConfiguration;
   nativeToolSearchConfiguration: vscode.WorkspaceConfiguration;
+  thresholdState: vscode.Memento;
   thresholdTarget: vscode.ConfigurationTarget;
   nativeToolSearchTarget: vscode.ConfigurationTarget;
   previousThreshold: unknown;
   previousNativeToolSearch: unknown;
-  thresholdUpdated: boolean;
-  nativeToolSearchUpdated: boolean;
+  previousSavedThresholds: unknown;
+  previousOwner: unknown;
+  savedThresholds: SavedThreshold[];
+  thresholdUpdateAttempted: boolean;
+  nativeToolSearchUpdateAttempted: boolean;
+  resetAttempted: boolean;
+  savedThresholdsUpdateAttempted: boolean;
+  ownerUpdateAttempted: boolean;
 }
 
-async function rollbackNativeToolSearchEnable(options: NativeToolSearchEnableRollbackOptions): Promise<unknown> {
-  let rollbackError: unknown;
-  if (options.nativeToolSearchUpdated) {
+async function rollbackNativeToolSearchEnable(options: NativeToolSearchEnableRollbackOptions): Promise<unknown[]> {
+  const rollbackErrors: unknown[] = [];
+  if (options.nativeToolSearchUpdateAttempted) {
     try {
       await options.nativeToolSearchConfiguration.update(
         NATIVE_TOOL_SEARCH_SETTING,
@@ -271,10 +319,10 @@ async function rollbackNativeToolSearchEnable(options: NativeToolSearchEnableRol
         options.nativeToolSearchTarget
       );
     } catch (error) {
-      rollbackError = error;
+      rollbackErrors.push(error);
     }
   }
-  if (options.thresholdUpdated) {
+  if (options.thresholdUpdateAttempted) {
     try {
       await options.virtualToolsConfiguration.update(
         THRESHOLD_SETTING,
@@ -282,10 +330,43 @@ async function rollbackNativeToolSearchEnable(options: NativeToolSearchEnableRol
         options.thresholdTarget
       );
     } catch (error) {
-      rollbackError ??= error;
+      rollbackErrors.push(error);
     }
   }
-  return rollbackError;
+  if (options.resetAttempted) {
+    const resetError = await resetToolGroups();
+    if (resetError !== undefined) {
+      rollbackErrors.push(resetError);
+    }
+  }
+  if (options.ownerUpdateAttempted) {
+    try {
+      await options.thresholdState.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, options.previousOwner);
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  }
+  if (options.savedThresholdsUpdateAttempted) {
+    try {
+      await options.thresholdState.update(PREVIOUS_KEY, options.previousSavedThresholds);
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  }
+  if ((options.thresholdUpdateAttempted || options.nativeToolSearchUpdateAttempted || options.resetAttempted)
+    && rollbackErrors.length > 0) {
+    try {
+      await options.thresholdState.update(PREVIOUS_KEY, options.savedThresholds);
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+    try {
+      await options.thresholdState.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, true);
+    } catch (error) {
+      rollbackErrors.push(error);
+    }
+  }
+  return rollbackErrors;
 }
 
 interface VSCodeToolGroupingRestoreRollbackOptions {
@@ -293,20 +374,20 @@ interface VSCodeToolGroupingRestoreRollbackOptions {
   nativeToolSearchConfiguration: vscode.WorkspaceConfiguration;
   nativeToolSearchTarget: vscode.ConfigurationTarget;
   previousNativeToolSearch: unknown;
-  nativeToolSearchUpdated: boolean;
+  nativeToolSearchUpdateAttempted: boolean;
   restoredThresholds: ReadonlyArray<SavedThreshold & { currentValue: unknown }>;
 }
 
-async function rollbackVSCodeToolGroupingRestore(options: VSCodeToolGroupingRestoreRollbackOptions): Promise<unknown> {
-  let rollbackError: unknown;
+async function rollbackVSCodeToolGroupingRestore(options: VSCodeToolGroupingRestoreRollbackOptions): Promise<unknown[]> {
+  const rollbackErrors: unknown[] = [];
   for (const restored of [...options.restoredThresholds].reverse()) {
     try {
       await options.virtualToolsConfiguration.update(THRESHOLD_SETTING, restored.currentValue, restored.target);
     } catch (error) {
-      rollbackError ??= error;
+      rollbackErrors.push(error);
     }
   }
-  if (options.nativeToolSearchUpdated) {
+  if (options.nativeToolSearchUpdateAttempted) {
     try {
       await options.nativeToolSearchConfiguration.update(
         NATIVE_TOOL_SEARCH_SETTING,
@@ -314,19 +395,31 @@ async function rollbackVSCodeToolGroupingRestore(options: VSCodeToolGroupingRest
         options.nativeToolSearchTarget
       );
     } catch (error) {
-      rollbackError ??= error;
+      rollbackErrors.push(error);
     }
   }
-  return rollbackError;
+  return rollbackErrors;
 }
 
-async function resetToolGroups(): Promise<boolean> {
+function formatErrorReason(error: unknown): string {
+  return error instanceof Error ? ` ${error.message}` : '';
+}
+
+function formatRollbackErrors(errors: readonly unknown[]): string {
+  if (errors.length === 0) {
+    return '';
+  }
+  const messages = errors.map((error) => error instanceof Error ? error.message : String(error));
+  return ` Rollback also failed: ${messages.join('; ')}`;
+}
+
+async function resetToolGroups(): Promise<Error | undefined> {
   try {
     await vscode.commands.executeCommand(RESET_VIRTUAL_TOOL_GROUPS_COMMAND);
-  } catch {
-    return false;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
   }
-  return true;
+  return undefined;
 }
 
 async function isVirtualToolGroupResetCommandAvailable(): Promise<boolean> {

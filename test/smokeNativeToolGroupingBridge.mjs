@@ -7,12 +7,16 @@ const commands = [];
 const errors = [];
 const informationMessages = [];
 const state = new Map();
+const OWNER_KEY = 'nativeToolSearch.virtualToolsThresholdOwner';
+const PREVIOUS_KEY = 'nativeToolSearch.virtualToolsThresholdPrevious';
 let globalThreshold = 128;
 let workspaceThreshold = 64;
 let workspaceFolderThreshold = 32;
 let nativeToolSearchGlobalValue;
 let resetCommandAvailable = true;
 let resetCommandFails = false;
+let configurationUpdateFails;
+let operationSequence;
 
 const vscode = {
   ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
@@ -24,7 +28,9 @@ const vscode = {
   commands: {
     getCommands: async () => resetCommandAvailable ? ['github.copilot.debug.resetVirtualToolGroups'] : [],
     executeCommand: async (...args) => {
+      operationSequence?.push(`reset:${args[0]}`);
       if (resetCommandFails && args[0] === 'github.copilot.debug.resetVirtualToolGroups') {
+        resetCommandFails = false;
         throw new Error('Copilot reset failed');
       }
       commands.push(args);
@@ -37,8 +43,12 @@ const vscode = {
           inspect: () => ({ globalValue: nativeToolSearchGlobalValue }),
           update: async (setting, value, target) => {
             updates.push({ section, setting, value, target });
+            operationSequence?.push(`setting:${section}.${setting}:${String(value)}`);
             if (target === vscode.ConfigurationTarget.Global) {
               nativeToolSearchGlobalValue = value;
+            }
+            if (configurationUpdateFails?.(section, setting, value, target)) {
+              throw new Error(`Configuration update failed for ${section}.${setting}`);
             }
           }
         }
@@ -53,12 +63,16 @@ const vscode = {
           }),
           update: async (setting, value, target) => {
             updates.push({ section, setting, value, target });
+            operationSequence?.push(`setting:${section}.${setting}:${String(value)}`);
             if (target === vscode.ConfigurationTarget.WorkspaceFolder) {
               workspaceFolderThreshold = value;
             } else if (target === vscode.ConfigurationTarget.Workspace) {
               workspaceThreshold = value;
             } else if (target === vscode.ConfigurationTarget.Global) {
               globalThreshold = value;
+            }
+            if (configurationUpdateFails?.(section, setting, value, target)) {
+              throw new Error(`Configuration update failed for ${section}.${setting}`);
             }
           }
         }
@@ -67,9 +81,18 @@ const vscode = {
 
 const loaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
 try {
-  const memento = { get: (key) => state.get(key), update: async (key, value) => state.set(key, value) };
+  const memento = createState([], { values: state, label: 'state' });
   const context = { globalState: memento, workspaceState: memento };
+  operationSequence = [];
   await loaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(JSON.stringify(operationSequence), JSON.stringify([
+    `memento:state:${PREVIOUS_KEY}`,
+    `memento:state:${OWNER_KEY}`,
+    `setting:${VIRTUAL_TOOLS_SECTION}.threshold:0`,
+    `setting:${PROVIDER_SECTION}.nativeToolSearch:auto`,
+    'reset:github.copilot.debug.resetVirtualToolGroups'
+  ]), 'opt-in persists recovery metadata before settings and resets groups last');
+  operationSequence = undefined;
   assertEqual(updates[0].section, VIRTUAL_TOOLS_SECTION, 'opt-in changes the VS Code Virtual Tool setting');
   assertEqual(updates[0].value, 0, 'opt-in disables VS Code Virtual Tool grouping after confirmation');
   assertEqual(updates[0].target, vscode.ConfigurationTarget.WorkspaceFolder, 'opt-in changes the effective workspace-folder setting before lower-priority settings');
@@ -156,15 +179,398 @@ try {
   await scopedLoaded.dispose();
 }
 
-function createState() {
-  const values = new Map();
+const legacyLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const legacyGlobalState = createState([
+    [OWNER_KEY, true],
+    [PREVIOUS_KEY, [
+      { value: 71, target: vscode.ConfigurationTarget.Workspace },
+      { value: 47, target: vscode.ConfigurationTarget.WorkspaceFolder }
+    ]]
+  ]);
+  const legacyWorkspaceState = createState();
+  const legacyContext = { globalState: legacyGlobalState, workspaceState: legacyWorkspaceState };
+  nativeToolSearchGlobalValue = 'auto';
+  resetCommandAvailable = true;
+  resetCommandFails = true;
+  workspaceThreshold = 0;
+  workspaceFolderThreshold = 0;
+
+  await legacyLoaded.exports.restoreVSCodeToolGrouping(legacyContext);
+  assertEqual(workspaceThreshold, 71, 'legacy global Workspace ownership restores its saved threshold');
+  assertEqual(workspaceFolderThreshold, 47, 'legacy global WorkspaceFolder ownership restores its saved threshold');
+  assertEqual(legacyGlobalState.get(OWNER_KEY), true, 'legacy global ownership remains after Copilot reset fails');
+  assertEqual(Array.isArray(legacyGlobalState.get(PREVIOUS_KEY)), true, 'legacy global thresholds remain after Copilot reset fails');
+
+  resetCommandFails = false;
+  await legacyLoaded.exports.restoreVSCodeToolGrouping(legacyContext);
+  assertEqual(legacyGlobalState.get(OWNER_KEY), undefined, 'legacy global ownership clears only after restoration succeeds');
+  assertEqual(legacyGlobalState.get(PREVIOUS_KEY), undefined, 'legacy global thresholds clear only after restoration succeeds');
+  console.log('Smoke test passed: legacy global workspace ownership survives until restoration succeeds.');
+} finally {
+  await legacyLoaded.dispose();
+}
+
+const upgradedLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const upgradedGlobalState = createState([
+    [OWNER_KEY, true],
+    [PREVIOUS_KEY, [{ value: 53, target: vscode.ConfigurationTarget.WorkspaceFolder }]]
+  ]);
+  const upgradedWorkspaceState = createState();
+  const upgradedContext = { globalState: upgradedGlobalState, workspaceState: upgradedWorkspaceState };
+  nativeToolSearchGlobalValue = 'auto';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 0;
+
+  await upgradedLoaded.exports.enableNativeToolSearchGroupingBridge(upgradedContext);
+  assertEqual(
+    JSON.stringify(upgradedGlobalState.get(PREVIOUS_KEY)),
+    JSON.stringify([{ value: 53, target: vscode.ConfigurationTarget.WorkspaceFolder }]),
+    'repeated enable after upgrade preserves the legacy pre-enable threshold'
+  );
+  assertEqual(upgradedWorkspaceState.get(OWNER_KEY), undefined, 'repeated enable after upgrade does not split legacy ownership across Mementos');
+
+  await upgradedLoaded.exports.restoreVSCodeToolGrouping(upgradedContext);
+  assertEqual(workspaceFolderThreshold, 53, 'repeated enable after upgrade still restores the legacy threshold');
+  console.log('Smoke test passed: repeated enable after upgrade preserves legacy global ownership.');
+} finally {
+  await upgradedLoaded.dispose();
+}
+
+const globalLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const globalState = createState();
+  const workspaceState = createState();
+  const context = { globalState, workspaceState };
+  nativeToolSearchGlobalValue = 'disabled';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  globalThreshold = 91;
+  workspaceThreshold = undefined;
+  workspaceFolderThreshold = undefined;
+
+  await globalLoaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(globalState.get(OWNER_KEY), true, 'Global threshold ownership is stored in globalState');
+  assertEqual(workspaceState.get(OWNER_KEY), undefined, 'Global threshold ownership is not stored in workspaceState');
+  assertEqual(
+    JSON.stringify(globalState.get(PREVIOUS_KEY)),
+    JSON.stringify([{ value: 91, target: vscode.ConfigurationTarget.Global }]),
+    'Global threshold ownership preserves the prior Global value'
+  );
+
+  await globalLoaded.exports.restoreVSCodeToolGrouping(context);
+  assertEqual(globalThreshold, 91, 'Global threshold ownership restores the prior Global value');
+  console.log('Smoke test passed: Global grouping ownership remains global.');
+} finally {
+  await globalLoaded.dispose();
+}
+
+const mementoFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const previousMementoThresholds = [{ value: 67, target: vscode.ConfigurationTarget.Workspace }];
+  const workspaceState = createState([
+    [OWNER_KEY, false],
+    [PREVIOUS_KEY, previousMementoThresholds]
+  ], {
+    label: 'workspace',
+    failOnceAfterUpdate(key, value) {
+      return key === OWNER_KEY && value === true;
+    }
+  });
+  const context = { globalState: createState(), workspaceState };
+  nativeToolSearchGlobalValue = 'disabled';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  globalThreshold = 128;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 39;
+  configurationUpdateFails = undefined;
+  operationSequence = [];
+  const updateCount = updates.length;
+  const commandCount = commands.length;
+
+  await mementoFailureLoaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(updates.length, updateCount, 'pre-persistence Memento failure does not attempt setting updates');
+  assertEqual(commands.length, commandCount, 'pre-persistence Memento failure does not reset Copilot groups');
+  assertEqual(JSON.stringify(operationSequence), JSON.stringify([
+    `memento:workspace:${PREVIOUS_KEY}`,
+    `memento:workspace:${OWNER_KEY}`,
+    `memento:workspace:${OWNER_KEY}`,
+    `memento:workspace:${PREVIOUS_KEY}`
+  ]), 'pre-persistence failure rolls back only attempted Memento writes in reverse order');
+  assertEqual(workspaceFolderThreshold, 39, 'pre-persistence Memento failure leaves the Virtual Tool threshold untouched');
+  assertEqual(nativeToolSearchGlobalValue, 'disabled', 'pre-persistence Memento failure leaves the Native Tool Search setting untouched');
+  assertEqual(workspaceState.get(OWNER_KEY), false, 'Memento failure restores the prior ownership value');
+  assertEqual(workspaceState.get(PREVIOUS_KEY), previousMementoThresholds, 'Memento failure restores the prior saved thresholds value');
+  assertEqual(errors.at(-1).includes('could not save its tool-discovery ownership state'), true, 'Memento failure is reported to the user');
+  operationSequence = undefined;
+  console.log('Smoke test passed: pre-persistence failure compensates Memento writes without touching settings or reset.');
+} finally {
+  await mementoFailureLoaded.dispose();
+}
+
+const firstMementoFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const workspaceState = createState([], {
+    label: 'workspace',
+    failOnceAfterUpdate(key) {
+      return key === PREVIOUS_KEY;
+    }
+  });
+  const context = { globalState: createState(), workspaceState };
+  nativeToolSearchGlobalValue = 'disabled';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 37;
+  operationSequence = [];
+  const updateCount = updates.length;
+  const commandCount = commands.length;
+
+  await firstMementoFailureLoaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(updates.length, updateCount, 'first Memento failure does not attempt setting updates');
+  assertEqual(commands.length, commandCount, 'first Memento failure does not reset Copilot groups');
+  assertEqual(JSON.stringify(operationSequence), JSON.stringify([
+    `memento:workspace:${PREVIOUS_KEY}`,
+    `memento:workspace:${PREVIOUS_KEY}`
+  ]), 'first Memento failure compensates its mutate-then-reject write');
+  assertEqual(workspaceState.get(PREVIOUS_KEY), undefined, 'first Memento failure restores the absent prior recovery metadata');
+  assertEqual(workspaceState.get(OWNER_KEY), undefined, 'first Memento failure never writes ownership');
+  console.log('Smoke test passed: first recovery metadata write failure stops before settings and reset.');
+} finally {
+  operationSequence = undefined;
+  await firstMementoFailureLoaded.dispose();
+}
+
+const settingFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const previousMementoThresholds = [{ value: 73, target: vscode.ConfigurationTarget.Workspace }];
+  const workspaceState = createState([
+    [OWNER_KEY, false],
+    [PREVIOUS_KEY, previousMementoThresholds]
+  ], { label: 'workspace' });
+  const context = { globalState: createState(), workspaceState };
+  nativeToolSearchGlobalValue = 'disabled';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  globalThreshold = 128;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 41;
+  configurationUpdateFails = (section, setting, value) => (
+    section === PROVIDER_SECTION && setting === 'nativeToolSearch' && value === 'auto'
+  );
+  operationSequence = [];
+  const commandCount = commands.length;
+
+  await settingFailureLoaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(JSON.stringify(operationSequence), JSON.stringify([
+    `memento:workspace:${PREVIOUS_KEY}`,
+    `memento:workspace:${OWNER_KEY}`,
+    `setting:${VIRTUAL_TOOLS_SECTION}.threshold:0`,
+    `setting:${PROVIDER_SECTION}.nativeToolSearch:auto`,
+    `setting:${PROVIDER_SECTION}.nativeToolSearch:disabled`,
+    `setting:${VIRTUAL_TOOLS_SECTION}.threshold:41`,
+    `memento:workspace:${OWNER_KEY}`,
+    `memento:workspace:${PREVIOUS_KEY}`
+  ]), 'later setting failure compensates settings and then restores pre-persistence Memento values');
+  assertEqual(commands.length, commandCount, 'setting failure before reset does not reset Copilot groups');
+  assertEqual(workspaceFolderThreshold, 41, 'later setting failure restores the prior Virtual Tool threshold');
+  assertEqual(nativeToolSearchGlobalValue, 'disabled', 'later setting failure restores the prior Native Tool Search setting');
+  assertEqual(workspaceState.get(OWNER_KEY), false, 'later setting failure restores the prior ownership value');
+  assertEqual(workspaceState.get(PREVIOUS_KEY), previousMementoThresholds, 'later setting failure restores the prior recovery metadata');
+  assertEqual(errors.at(-1).includes('could not update its tool-discovery settings'), true, 'later setting failure is reported to the user');
+  console.log('Smoke test passed: later setting failure rolls back pre-persisted recovery metadata.');
+} finally {
+  configurationUpdateFails = undefined;
+  operationSequence = undefined;
+  await settingFailureLoaded.dispose();
+}
+
+const compensationFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const workspaceState = createState([], { label: 'workspace' });
+  const context = { globalState: createState(), workspaceState };
+  nativeToolSearchGlobalValue = 'disabled';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  globalThreshold = 128;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 43;
+  configurationUpdateFails = (section, setting, value) => (
+    (section === PROVIDER_SECTION && setting === 'nativeToolSearch')
+    || (section === VIRTUAL_TOOLS_SECTION && setting === 'threshold' && value === 43)
+  );
+  operationSequence = [];
+
+  await compensationFailureLoaded.exports.enableNativeToolSearchGroupingBridge(context);
+  assertEqual(workspaceState.get(OWNER_KEY), true, 'failed setting compensation retains ownership for later recovery');
+  assertEqual(
+    JSON.stringify(workspaceState.get(PREVIOUS_KEY)),
+    JSON.stringify([{ value: 43, target: vscode.ConfigurationTarget.WorkspaceFolder }]),
+    'failed setting compensation retains the recovery threshold for later restoration'
+  );
+  assertEqual(
+    errors.at(-1).includes(
+      `Rollback also failed: Configuration update failed for ${PROVIDER_SECTION}.nativeToolSearch; Configuration update failed for ${VIRTUAL_TOOLS_SECTION}.threshold`
+    ),
+    true,
+    'failed setting compensations are all retained and reported in execution order'
+  );
+  assertEqual(JSON.stringify(operationSequence.slice(-4)), JSON.stringify([
+    `memento:workspace:${OWNER_KEY}`,
+    `memento:workspace:${PREVIOUS_KEY}`,
+    `memento:workspace:${PREVIOUS_KEY}`,
+    `memento:workspace:${OWNER_KEY}`
+  ]), 'compensation failure restores prior Memento values before retaining recovery metadata');
+  console.log('Smoke test passed: compensation failures remain recoverable and observable.');
+} finally {
+  configurationUpdateFails = undefined;
+  operationSequence = undefined;
+  await compensationFailureLoaded.dispose();
+}
+
+const restoreNativeSettingFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const savedThresholds = [{ value: 59, target: vscode.ConfigurationTarget.WorkspaceFolder }];
+  const workspaceState = createState([
+    [OWNER_KEY, true],
+    [PREVIOUS_KEY, savedThresholds]
+  ]);
+  const context = { globalState: createState(), workspaceState };
+  nativeToolSearchGlobalValue = 'auto';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 0;
+  configurationUpdateFails = (section, setting, value) => (
+    section === PROVIDER_SECTION && setting === 'nativeToolSearch' && value === 'disabled'
+  );
+  operationSequence = [];
+  const commandCount = commands.length;
+
+  await restoreNativeSettingFailureLoaded.exports.restoreVSCodeToolGrouping(context);
+  assertEqual(JSON.stringify(operationSequence), JSON.stringify([
+    `setting:${PROVIDER_SECTION}.nativeToolSearch:disabled`,
+    `setting:${PROVIDER_SECTION}.nativeToolSearch:auto`
+  ]), 'restore compensates a Native Tool Search setting that mutates then rejects');
+  assertEqual(nativeToolSearchGlobalValue, 'auto', 'restore returns the rejected Native Tool Search update to its pre-restore value');
+  assertEqual(workspaceFolderThreshold, 0, 'Native Tool Search restore failure stops before threshold restoration');
+  assertEqual(commands.length, commandCount, 'Native Tool Search restore failure does not reset Copilot groups');
+  assertEqual(workspaceState.get(OWNER_KEY), true, 'Native Tool Search restore failure preserves ownership');
+  assertEqual(workspaceState.get(PREVIOUS_KEY), savedThresholds, 'Native Tool Search restore failure preserves recovery metadata');
+  assertEqual(errors.at(-1).includes('VS Code Virtual Tool Groups could not be restored'), true, 'Native Tool Search restore failure is reported');
+  console.log('Smoke test passed: restore compensates a mutate-then-reject Native Tool Search setting.');
+} finally {
+  configurationUpdateFails = undefined;
+  operationSequence = undefined;
+  await restoreNativeSettingFailureLoaded.dispose();
+}
+
+const restoreThresholdFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const savedThresholds = [
+    { value: 71, target: vscode.ConfigurationTarget.Workspace },
+    { value: 47, target: vscode.ConfigurationTarget.WorkspaceFolder }
+  ];
+  const globalState = createState([
+    [OWNER_KEY, true],
+    [PREVIOUS_KEY, savedThresholds]
+  ]);
+  const context = { globalState, workspaceState: createState() };
+  nativeToolSearchGlobalValue = 'auto';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  workspaceThreshold = 0;
+  workspaceFolderThreshold = 0;
+  configurationUpdateFails = (section, setting, value, target) => (
+    section === VIRTUAL_TOOLS_SECTION
+    && setting === 'threshold'
+    && value === 47
+    && target === vscode.ConfigurationTarget.WorkspaceFolder
+  );
+  operationSequence = [];
+  const commandCount = commands.length;
+
+  await restoreThresholdFailureLoaded.exports.restoreVSCodeToolGrouping(context);
+  assertEqual(JSON.stringify(operationSequence), JSON.stringify([
+    `setting:${PROVIDER_SECTION}.nativeToolSearch:disabled`,
+    `setting:${VIRTUAL_TOOLS_SECTION}.threshold:71`,
+    `setting:${VIRTUAL_TOOLS_SECTION}.threshold:47`,
+    `setting:${VIRTUAL_TOOLS_SECTION}.threshold:0`,
+    `setting:${VIRTUAL_TOOLS_SECTION}.threshold:0`,
+    `setting:${PROVIDER_SECTION}.nativeToolSearch:auto`
+  ]), 'restore rolls back a rejected later threshold and an earlier successful threshold in reverse order');
+  assertEqual(workspaceThreshold, 0, 'restore rolls the earlier successful Workspace threshold back to its pre-restore value');
+  assertEqual(workspaceFolderThreshold, 0, 'restore rolls the mutate-then-reject WorkspaceFolder threshold back to its pre-restore value');
+  assertEqual(nativeToolSearchGlobalValue, 'auto', 'restore rolls Native Tool Search back after a later threshold failure');
+  assertEqual(commands.length, commandCount, 'threshold restore failure does not reset Copilot groups');
+  assertEqual(globalState.get(OWNER_KEY), true, 'threshold restore failure preserves legacy global ownership');
+  assertEqual(globalState.get(PREVIOUS_KEY), savedThresholds, 'threshold restore failure preserves all legacy recovery metadata');
+  assertEqual(errors.at(-1).includes('VS Code Virtual Tool Groups could not be restored'), true, 'threshold restore failure is reported');
+  console.log('Smoke test passed: restore compensates successful and mutate-then-reject thresholds in reverse order.');
+} finally {
+  configurationUpdateFails = undefined;
+  operationSequence = undefined;
+  await restoreThresholdFailureLoaded.dispose();
+}
+
+const restoreCompensationFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const savedThresholds = [
+    { value: 79, target: vscode.ConfigurationTarget.Workspace },
+    { value: 49, target: vscode.ConfigurationTarget.WorkspaceFolder }
+  ];
+  const globalState = createState([
+    [OWNER_KEY, true],
+    [PREVIOUS_KEY, savedThresholds]
+  ]);
+  const context = { globalState, workspaceState: createState() };
+  nativeToolSearchGlobalValue = 'auto';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  workspaceThreshold = 0;
+  workspaceFolderThreshold = 0;
+  configurationUpdateFails = (section, setting, value) => (
+    (section === VIRTUAL_TOOLS_SECTION && setting === 'threshold' && (value === 49 || value === 0))
+    || (section === PROVIDER_SECTION && setting === 'nativeToolSearch' && value === 'auto')
+  );
+
+  await restoreCompensationFailureLoaded.exports.restoreVSCodeToolGrouping(context);
+  assertEqual(
+    errors.at(-1).includes(
+      `Rollback also failed: Configuration update failed for ${VIRTUAL_TOOLS_SECTION}.threshold; Configuration update failed for ${VIRTUAL_TOOLS_SECTION}.threshold; Configuration update failed for ${PROVIDER_SECTION}.nativeToolSearch`
+    ),
+    true,
+    'restore reports every threshold and Native Tool Search compensation failure in rollback order'
+  );
+  assertEqual(globalState.get(OWNER_KEY), true, 'restore compensation failure preserves ownership for retry');
+  assertEqual(globalState.get(PREVIOUS_KEY), savedThresholds, 'restore compensation failure preserves complete recovery metadata');
+  console.log('Smoke test passed: restore reports all compensation failures and preserves recoverability.');
+} finally {
+  configurationUpdateFails = undefined;
+  await restoreCompensationFailureLoaded.dispose();
+}
+
+function createState(entries = [], options = {}) {
+  const values = options.values ?? new Map(entries);
+  let failed = false;
   return {
     get: (key) => values.get(key),
     update: async (key, value) => {
+      if (options.label) {
+        operationSequence?.push(`memento:${options.label}:${key}`);
+      }
       if (value === undefined) {
         values.delete(key);
       } else {
         values.set(key, value);
+      }
+      if (!failed && options.failOnceAfterUpdate?.(key, value)) {
+        failed = true;
+        throw new Error(`Memento update failed for ${key}`);
       }
     }
   };
