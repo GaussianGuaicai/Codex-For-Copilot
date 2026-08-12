@@ -1436,7 +1436,7 @@ function normalizeResponsesError(error: unknown, baseURL: string): Error {
   }
 
   if (error instanceof APIConnectionError) {
-    const causeMessage = getCauseMessage(error);
+    const causeMessage = getDeepestCauseSummary(error);
     return new Error(
       `Connection failure while contacting ${endpoint}. The OpenAI SDK automatically retried transient connection errors, but the request still failed.${causeMessage ? ` Root cause: ${causeMessage}` : ''}`,
       { cause: error }
@@ -1500,21 +1500,46 @@ function formatStatusAndRequestId(error: Pick<APIError, 'status' | 'requestID'>)
   return `${status}${requestId}`;
 }
 
-function getCauseMessage(error: Error & { cause?: unknown }): string | undefined {
-  const cause = error.cause;
-  if (!cause) {
-    return undefined;
+function getDeepestCauseSummary(error: Error & { cause?: unknown }): string | undefined {
+  let cause = readOwnErrorProperty(error, 'cause');
+  const seen = new WeakSet<object>();
+  let summary: string | undefined;
+
+  for (let depth = 0; depth < MAX_ERROR_TRAVERSAL_DEPTH; depth += 1) {
+    if (cause === undefined || cause === null || cause === UNREADABLE_ERROR_PROPERTY) {
+      break;
+    }
+
+    if (typeof cause === 'string') {
+      summary = cause.trim() || summary;
+      break;
+    }
+
+    if (typeof cause !== 'object') {
+      break;
+    }
+
+    if (seen.has(cause)) {
+      break;
+    }
+    seen.add(cause);
+
+    const message = readOwnErrorProperty(cause, 'message');
+    const code = readOwnErrorProperty(cause, 'code');
+    const messageText = typeof message === 'string' ? message.trim() : '';
+    const codeText = typeof code === 'string' || typeof code === 'number' ? String(code).trim() : '';
+    if (messageText) {
+      summary = codeText && !messageText.toLowerCase().includes(codeText.toLowerCase())
+        ? `${messageText} (${codeText})`
+        : messageText;
+    } else if (codeText) {
+      summary = codeText;
+    }
+
+    cause = readOwnErrorProperty(cause, 'cause');
   }
 
-  if (cause instanceof Error && cause.message.trim()) {
-    return cause.message.trim();
-  }
-
-  if (typeof cause === 'string' && cause.trim()) {
-    return cause.trim();
-  }
-
-  return undefined;
+  return summary;
 }
 
 async function safeReadResponseBody(response: Response): Promise<string> {
