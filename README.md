@@ -20,6 +20,7 @@ Codex For Copilot is a lightweight VS Code Language Model Provider that connects
 - **Automatic model discovery** — exposes available upstream Codex models with configurable fallbacks.
 - **Fast streaming transport** — supports reusable WebSocket sessions with HTTP fallback.
 - **VS Code tool support** — forwards built-in, extension, and MCP tool calls through the Responses API.
+- **Optional Native Tool Search** — lets compatible Codex models search selected Agent tools on demand when you explicitly enable it.
 - **Conversation continuity** — reuses compatible response branches for efficient follow-up turns.
 - **Usage visibility** — shows available account limits or Credits in the status bar when supplied by the backend.
 
@@ -44,6 +45,14 @@ The extension stores its own ChatGPT credentials in VS Code SecretStorage and re
 
 Open VS Code Chat, choose **Codex** from the model picker, and start chatting or using Agent mode.
 
+## Tool discovery
+
+The extension uses **VS Code Virtual Tool Groups by default**. VS Code organizes selected Agent tools into groups and reveals a group when the model needs it.
+
+**Native Tool Search is optional.** When enabled, it temporarily disables VS Code Virtual Tool Groups and instead lets the Codex backend search the selected tool catalog and load matching tools on demand. Both methods solve the same problem—avoiding loading every tool into the model at once—but VS Code performs the grouping in the default mode, while Codex performs the search in Native Tool Search mode.
+
+Use **`Codex: Enable Native Tool Search`** to opt in. The extension saves the previous VS Code grouping setting. Use **`Codex: Use VS Code Virtual Tool Groups`** to disable Native Tool Search and restore that setting. Tool execution, confirmation, workspace trust, and permissions remain handled by VS Code in both modes.
+
 ## Requirements
 
 - VS Code 1.104.0 or newer.
@@ -55,6 +64,9 @@ Open VS Code Chat, choose **Codex** from the model picker, and start chatting or
 - `Codex: Open Settings`
 - `Codex: Open Logs`
 - `Codex: Refresh Account Limits`
+- `Codex: Enable Native Tool Search`
+- `Codex: Use VS Code Virtual Tool Groups`
+- `Codex: Show Native Tool Search Status`
 - `Codex for Copilot: Sign in with ChatGPT`
 - `Codex for Copilot: Sign in with Device Code`
 - `Codex for Copilot: Import Codex auth.json`

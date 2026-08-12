@@ -83,7 +83,8 @@ async function benchmark(scenario, operation) {
     compressedBytesMedian: percentile(samples.map((sample) => sample.compressedBytes), 0.5),
     requestBuildMedianMs: percentile(samples.map((sample) => sample.requestBuildMs), 0.5),
     toolSchemaBytesMedian: percentile(samples.map((sample) => sample.toolSchemaBytes), 0.5),
-    toolSchemaCacheHitRate: samples.filter((sample) => sample.toolSchemaCacheHit).length / samples.length,
+    legacyToolSchemaCacheHitRate: samples.filter((sample) => sample.legacyToolSchemaCacheHit).length / samples.length,
+    nativeToolCatalogCacheHitRate: samples.filter((sample) => sample.nativeToolCatalogCacheHit).length / samples.length,
     reuseRate: samples.filter((sample) => sample.connectionReused).length / samples.length,
     fallbackRate: samples.filter((sample) => sample.fallback).length / samples.length
   });
@@ -102,7 +103,8 @@ async function runRequest({
   let compressedBytes = 0;
   let requestBuildMs = 0;
   let toolSchemaBytes = 0;
-  let toolSchemaCacheHit = false;
+  let legacyToolSchemaCacheHit = false;
+  let nativeToolCatalogCacheHit = false;
   let connectionReused = false;
   let fallback = false;
   const identity = providedIdentity ?? {
@@ -144,7 +146,8 @@ async function runRequest({
       compressedBytes = Number(metrics.compressedBodyBytes ?? compressedBytes);
       requestBuildMs = Number(metrics.requestBuildMs ?? requestBuildMs);
       toolSchemaBytes = Number(metrics.toolSchemaBytes ?? toolSchemaBytes);
-      toolSchemaCacheHit ||= metrics.toolSchemaCacheHit === true;
+      legacyToolSchemaCacheHit ||= metrics.legacyToolSchemaCacheHit === true;
+      nativeToolCatalogCacheHit ||= metrics.nativeToolCatalogCacheHit === true;
       connectionReused ||= metrics.connectionReused === true;
     }
   });
@@ -155,7 +158,8 @@ async function runRequest({
     compressedBytes,
     requestBuildMs,
     toolSchemaBytes,
-    toolSchemaCacheHit,
+    legacyToolSchemaCacheHit,
+    nativeToolCatalogCacheHit,
     connectionReused,
     fallback
   };
