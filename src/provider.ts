@@ -39,7 +39,7 @@ import { createCodexContinuationSnapshot } from './codexContinuation';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
 import { resolveCodexToolPlan } from './nativeToolSearch/nativeToolCatalog';
 import { mapNativeToolCall } from './nativeToolSearch/nativeToolCallMapper';
-import { NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY } from './nativeToolSearch/nativeToolGroupingBridge';
+import { hasNativeToolGroupingBridgeOwnership } from './nativeToolSearch/nativeToolGroupingBridge';
 import {
   canUseNativeToolSearch,
   isNativeToolSearchUnsupportedError,
@@ -339,7 +339,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       this.notifyVirtualToolFallback(
         config.nativeToolSearch,
-        this.context.globalState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true,
+        hasNativeToolGroupingBridgeOwnership(this.context),
         virtualToolPlaceholderNames
       );
     } else {

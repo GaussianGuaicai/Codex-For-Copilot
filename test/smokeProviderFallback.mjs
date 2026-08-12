@@ -2707,15 +2707,19 @@ async function runProviderVirtualToolFallbackNotificationSmokeTest() {
     baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
     transport: 'http',
     model: 'gpt-5.5',
-    nativeToolSearch: 'enabled',
+    nativeToolSearch: 'auto',
     disabledModels: [],
     modelAliases: {}
   });
   const globalState = new Map();
+  const workspaceState = new Map([
+    ['nativeToolSearch.virtualToolsThresholdOwner', true]
+  ]);
   const provider = new CodexModelProvider(
     {
       secrets: { async get() { return 'test-api-key'; } },
       globalState: { get: (key) => globalState.get(key), update: async (key, value) => globalState.set(key, value) },
+      workspaceState: { get: (key) => workspaceState.get(key), update: async (key, value) => workspaceState.set(key, value) },
       subscriptions: []
     },
     createOutputChannel(),
@@ -2745,7 +2749,7 @@ async function runProviderVirtualToolFallbackNotificationSmokeTest() {
     );
 
     assertEqual(responseRequests[0].tools[0].name, 'activate_group_workspace', 'Virtual Tool fallback preserves the VS Code placeholder for this request');
-    assertEqual(warningMessages.length, warningCount + 1, 'Virtual Tool fallback warns once for a persistent placeholder set');
+    assertEqual(warningMessages.length, warningCount + 1, 'automatic Virtual Tool fallback warns once under workspace ownership');
     assertEqual(
       warningMessages.at(-1)?.includes('falling back to VS Code Virtual Tools'),
       true,
