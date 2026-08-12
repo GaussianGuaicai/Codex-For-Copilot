@@ -100,6 +100,40 @@ try {
     undefined,
     'unsafe most-specific branch blocks fallback to an older predecessor'
   );
+
+  const nativeEnvelope = {
+    ...envelope,
+    requestFingerprint: 'native-fingerprint',
+    catalogHash: 'native-catalog',
+    toolPlanMode: 'native-hosted'
+  };
+  const nativeState = {
+    ...state,
+    continuation: {
+      ...state.continuation,
+      responseId: 'resp-native-pending',
+      responseItems: [{
+        type: 'function_call',
+        call_id: 'call-native-pending',
+        name: 'read_file',
+        namespace: 'workspace',
+        arguments: '{"filePath":"src/provider.ts"}'
+      }],
+      requestFingerprint: 'native-fingerprint',
+      catalogHash: 'native-catalog',
+      toolPlanMode: 'native-hosted'
+    }
+  };
+  const nativeStore = new ResponseBranchStore();
+  nativeStore.recordSuccess(nativeEnvelope, initial, 'resp-native-pending', undefined, nativeState);
+  assertEqual(
+    nativeStore.findReusableBranch(nativeEnvelope, [
+      ...initial,
+      { type: 'message', role: 'user', content: 'continue without the namespaced tool result' }
+    ]),
+    undefined,
+    'namespaced native tool call without output is not reusable'
+  );
   console.log('Smoke test passed: branch state preserves thread/turn data across tool and user continuations.');
 } finally {
   await loaded.dispose();
