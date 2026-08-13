@@ -2057,8 +2057,11 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
 
   try {
     const token = createCancellationToken();
-    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = buildProviderModels(
+      configValues,
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      'codexAccessToken'
+    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
     if (!model) {
       throw new Error('Expected model for native canonical replay coverage.');
     }
@@ -2333,12 +2336,11 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
   const token = createMutableCancellationToken();
 
   try {
-    const models = await withSmokeTimeout(
-      provider.provideLanguageModelChatInformation({ silent: true }, token),
-      token,
-      'native WebSocket model discovery'
-    );
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = buildProviderModels(
+      configValues,
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      'codexAccessToken'
+    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
     if (!model) {
       throw new Error('Expected model for native WebSocket replay coverage.');
     }
