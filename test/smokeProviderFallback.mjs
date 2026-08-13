@@ -2046,11 +2046,14 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
     undefined,
     undefined,
     {
-      async getStatus() {
-        return { accountId: 'native-replay-account' };
-      },
-      async getAccessToken() {
-        return 'native-replay-token';
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'native-replay-token',
+          accountId: 'native-replay-account',
+          revision: 'native-replay-revision',
+          refreshable: false
+        };
       }
     }
   );
@@ -2325,11 +2328,14 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
     undefined,
     undefined,
     {
-      async getStatus() {
-        return { accountId: 'native-ws-replay-account' };
-      },
-      async getAccessToken() {
-        return 'native-ws-replay-token';
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'native-ws-replay-token',
+          accountId: 'native-ws-replay-account',
+          revision: 'native-ws-replay-revision',
+          refreshable: false
+        };
       }
     }
   );
