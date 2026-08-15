@@ -44,6 +44,7 @@ const {
 
 try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
+  await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
@@ -64,6 +65,47 @@ try {
   disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+async function runNestedConnectionCauseSmokeTest(streamResponseText) {
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  let capturedError;
+  const dnsError = Object.assign(new Error('getaddrinfo ENOTFOUND chatgpt.invalid'), {
+    code: 'ENOTFOUND'
+  });
+
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    throw new TypeError('fetch failed', { cause: dnsError });
+  };
+
+  try {
+    await streamResponseText({
+      baseURL: 'https://chatgpt.invalid/backend-api/codex/responses',
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'http',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Ping' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta() {}
+    });
+  } catch (error) {
+    capturedError = error;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assertEqual(requestCount, 3, 'connection failure uses the SDK retry budget');
+  assertEqual(
+    capturedError?.message,
+    'Connection failure while contacting https://chatgpt.invalid/backend-api/codex/responses. The OpenAI SDK automatically retried transient connection errors, but the request still failed. Root cause: getaddrinfo ENOTFOUND chatgpt.invalid',
+    'connection failure reports the deepest useful cause'
+  );
 }
 
 function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
