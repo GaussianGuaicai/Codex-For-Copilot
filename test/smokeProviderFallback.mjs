@@ -16,6 +16,8 @@ let performanceNow = () => Date.now();
 const performanceMock = { now: () => performanceNow() };
 const warningMessages = [];
 let rewriteWebSocketURL;
+const originalSuiteNoProxy = process.env.NO_PROXY;
+process.env.NO_PROXY = [originalSuiteNoProxy, 'chatgpt.com'].filter(Boolean).join(',');
 
 class RewritingWebSocket extends WebSocket {
   constructor(address, protocols, options) {
@@ -215,6 +217,8 @@ try {
   await runModelGeneratedToolLoopFullReplaySmokeTest();
   await runNativeHostedCanonicalReplaySmokeTest();
   await runNativeHostedToolOutputContinuationRecoverySmokeTest();
+  await runDanglingCompletedToolCallFullReplaySmokeTest();
+  await runCreatedResponseCancellationDoesNotRecordBranchSmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
@@ -227,6 +231,11 @@ try {
   console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
 } finally {
   Module._load = moduleLoad;
+  if (originalSuiteNoProxy === undefined) {
+    delete process.env.NO_PROXY;
+  } else {
+    process.env.NO_PROXY = originalSuiteNoProxy;
+  }
   await rm(tempDir, { recursive: true, force: true });
 }
 
@@ -2013,10 +2022,12 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
   const originalBaseURL = configValues.baseURL;
   const originalCredentialsSource = configValues.credentialsSource;
   const originalNativeToolSearch = configValues.nativeToolSearch;
+  const originalNoProxy = process.env.NO_PROXY;
   configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
   configValues.credentialsSource = 'codexAuth';
   configValues.nativeToolSearch = 'enabled';
   configValues.transport = 'http';
+  process.env.NO_PROXY = [originalNoProxy, 'chatgpt.com'].filter(Boolean).join(',');
   globalThis.fetch = async (input, init) => {
     const requestUrl = typeof input === 'string'
       ? input
@@ -2179,6 +2190,11 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
     configValues.credentialsSource = originalCredentialsSource;
     configValues.nativeToolSearch = originalNativeToolSearch;
     configValues.transport = 'http';
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
     await closeServer(server);
   }
 }
@@ -2466,6 +2482,250 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
       socket.terminate();
     }
     await closeWebSocketServer(webSocketServer);
+    await closeServer(server);
+  }
+}
+
+async function runDanglingCompletedToolCallFullReplaySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+
+    if (responseRequests.length === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+      send({
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: {
+          id: 'fc_dangling',
+          type: 'function_call',
+          call_id: 'call_dangling',
+          name: 'lookup_fixture',
+          arguments: ''
+        }
+      });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: 'fc_dangling',
+        output_index: 0,
+        name: '',
+        arguments: '{"key":"sample"}'
+      });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'fc_dangling',
+          type: 'function_call',
+          call_id: 'call_dangling',
+          name: 'lookup_fixture',
+          arguments: '{"key":"sample"}'
+        }
+      });
+      send({ type: 'response.completed', response: { id: 'resp_dangling_anchor', status: 'completed' } });
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+
+    writeSseResponse(response, 'Full replay complete.', 'resp_dangling_replayed');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const tool = {
+    name: 'lookup_fixture',
+    description: 'Looks up a synthetic fixture.',
+    inputSchema: {
+      type: 'object',
+      properties: { key: { type: 'string' } },
+      required: ['key']
+    }
+  };
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for dangling completed tool-call coverage.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Start tool turn.')] }],
+      { tools: [tool] },
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Start tool turn.')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_dangling', 'lookup_fixture', { key: 'sample' })]
+        },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Use a different approach.')] }
+      ],
+      { tools: [tool] },
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'dangling completed tool-call request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'dangling completed tool call omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Start tool turn.', type: 'message' },
+      {
+        role: 'assistant',
+        content: 'The previous assistant turn was interrupted before tool execution. It had prepared a call to lookup_fixture with arguments {"key":"sample"}, but no tool output was produced.',
+        type: 'message'
+      },
+      { role: 'user', content: 'Use a different approach.', type: 'message' }
+    ]), 'dangling completed tool call sends normalized full input');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runCreatedResponseCancellationDoesNotRecordBranchSmokeTest() {
+  const responseRequests = [];
+  const infoMessages = [];
+  let canceledToken;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+
+    if (responseRequests.length === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      response.write(`data: ${JSON.stringify({
+        type: 'response.created',
+        response: { id: 'resp_created_only', status: 'in_progress' }
+      })}\n\n`);
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+
+    writeSseResponse(response, 'Fresh response complete.', 'resp_after_cancellation');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    {
+      trace(message) {
+        if (message.startsWith('[provider] response created ')) {
+          canceledToken?.cancel();
+        }
+      },
+      debug() {},
+      info(message) {
+        infoMessages.push(message);
+      },
+      warn() {},
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const discoveryToken = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, discoveryToken);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for created-response cancellation coverage.');
+    }
+
+    canceledToken = createMutableCancellationToken();
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Cancel this turn.')] }],
+      {},
+      { report() {} },
+      canceledToken
+    );
+    assertEqual(canceledToken.isCancellationRequested, true, 'response.created triggers deterministic cancellation');
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Cancel this turn.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Start again.')] }
+      ],
+      {},
+      { report() {} },
+      createCancellationToken()
+    );
+
+    assertEqual(responseRequests.length, 2, 'created-response cancellation request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'created-only response id is not reused');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Cancel this turn.', type: 'message' },
+      { role: 'user', content: 'Start again.', type: 'message' }
+    ]), 'request after created-response cancellation sends full input');
+    assertEqual(infoMessages.includes('response reuse miss'), false, 'created-only response is never recorded as a branch');
+  } finally {
     await closeServer(server);
   }
 }

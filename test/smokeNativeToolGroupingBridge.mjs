@@ -554,6 +554,54 @@ try {
   await restoreCompensationFailureLoaded.dispose();
 }
 
+const restoreCleanupFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  for (const failedKey of [OWNER_KEY, PREVIOUS_KEY]) {
+    const savedThresholds = [{ value: 61, target: vscode.ConfigurationTarget.WorkspaceFolder }];
+    const workspaceState = createState([
+      [OWNER_KEY, true],
+      [PREVIOUS_KEY, savedThresholds]
+    ], {
+      label: 'workspace',
+      failOnceAfterUpdate(key, value) {
+        return key === failedKey && value === undefined;
+      }
+    });
+    const context = { globalState: createState(), workspaceState };
+    nativeToolSearchGlobalValue = 'auto';
+    resetCommandAvailable = true;
+    resetCommandFails = false;
+    workspaceThreshold = 64;
+    workspaceFolderThreshold = 0;
+    configurationUpdateFails = undefined;
+    operationSequence = [];
+
+    await restoreCleanupFailureLoaded.exports.restoreVSCodeToolGrouping(context);
+    assertEqual(workspaceFolderThreshold, 61, `${failedKey} cleanup failure leaves the restored threshold in place`);
+    assertEqual(nativeToolSearchGlobalValue, 'disabled', `${failedKey} cleanup failure leaves Native Tool Search disabled`);
+    assertEqual(workspaceState.get(OWNER_KEY), true, `${failedKey} cleanup failure restores ownership for retry`);
+    assertEqual(workspaceState.get(PREVIOUS_KEY), savedThresholds, `${failedKey} cleanup failure restores the saved threshold metadata`);
+    assertEqual(errors.at(-1).includes('Retry this command to finish cleanup'), true, `${failedKey} cleanup failure gives retry guidance`);
+
+    operationSequence = [];
+    await restoreCleanupFailureLoaded.exports.restoreVSCodeToolGrouping(context);
+    assertEqual(workspaceState.get(OWNER_KEY), undefined, `${failedKey} cleanup retry clears ownership`);
+    assertEqual(workspaceState.get(PREVIOUS_KEY), undefined, `${failedKey} cleanup retry clears saved threshold metadata`);
+    assertEqual(
+      JSON.stringify(operationSequence.slice(-2)),
+      JSON.stringify([
+        `memento:workspace:${OWNER_KEY}`,
+        `memento:workspace:${PREVIOUS_KEY}`
+      ]),
+      `${failedKey} cleanup retry completes both Memento writes`
+    );
+  }
+  console.log('Smoke test passed: restore cleanup persistence failures retain retryable ownership metadata.');
+} finally {
+  operationSequence = undefined;
+  await restoreCleanupFailureLoaded.dispose();
+}
+
 function createState(entries = [], options = {}) {
   const values = options.values ?? new Map(entries);
   let failed = false;

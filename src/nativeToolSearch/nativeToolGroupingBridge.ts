@@ -196,9 +196,12 @@ export async function restoreVSCodeToolGrouping(context: vscode.ExtensionContext
     void vscode.window.showWarningMessage('VS Code Virtual Tool Groups were restored, but Copilot tool groups could not be reset. Reload Window before starting a new Agent request.');
     return;
   }
-  for (const owned of ownedStates) {
-    await owned.state.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, undefined);
-    await owned.state.update(PREVIOUS_KEY, undefined);
+  const cleanupErrors = await clearRestoredGroupingOwnership(ownedStates);
+  if (cleanupErrors.length > 0) {
+    void vscode.window.showErrorMessage(
+      `VS Code Virtual Tool Groups were restored, but saving the completed restoration failed. Retry this command to finish cleanup.${formatRollbackErrors(cleanupErrors)}`
+    );
+    return;
   }
   void vscode.window.showInformationMessage('VS Code Virtual Tool Groups restored as the default tool-discovery method.');
 }
@@ -283,6 +286,31 @@ function getSavedThresholds(state: vscode.Memento, scope: ThresholdStateScope): 
     const accepted = scope === 'legacy-global' || target !== vscode.ConfigurationTarget.Global;
     return accepted ? [{ value: entry.value, target }] : [];
   });
+}
+
+async function clearRestoredGroupingOwnership(ownedStates: readonly ThresholdState[]): Promise<unknown[]> {
+  const errors: unknown[] = [];
+  for (const owned of ownedStates) {
+    const previousOwner = owned.state.get<unknown>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY);
+    const previousThresholds = owned.state.get<unknown>(PREVIOUS_KEY);
+    try {
+      await owned.state.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, undefined);
+      await owned.state.update(PREVIOUS_KEY, undefined);
+    } catch (error) {
+      errors.push(error);
+      try {
+        await owned.state.update(PREVIOUS_KEY, previousThresholds);
+      } catch (rollbackError) {
+        errors.push(rollbackError);
+      }
+      try {
+        await owned.state.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, previousOwner);
+      } catch (rollbackError) {
+        errors.push(rollbackError);
+      }
+    }
+  }
+  return errors;
 }
 
 function isConfigurationTarget(value: unknown): value is vscode.ConfigurationTarget {
