@@ -305,6 +305,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       selectedModel = this.resolveRequestModel(model.id, config, catalog.models, catalog.authoritative);
     }
+    selectedModel = {
+      ...selectedModel,
+      effectiveInputBudget: resolveConfiguredContextSize(
+        selectedModel.effectiveInputBudget,
+        model,
+        options as RuntimeProvideLanguageModelChatResponseOptions
+      )
+    };
     this.scheduleWebSocketPreconnection(config, credentials, authIdentity);
     latency.mark('modelResolved');
     this.selectedModelSink?.setSelectedModel(selectedModel.requestModel);
@@ -1837,6 +1845,41 @@ export function getReasoningEffort(
   defaultReasoningEffort: ReasoningEffort | undefined
 ): ReasoningEffortResolution {
   return resolveReasoningEffort(selectedReasoningEffort, options, defaultReasoningEffort);
+}
+
+type ContextSizeSchemaCarrier = {
+  readonly configurationSchema?: {
+    readonly properties?: {
+      readonly contextSize?: {
+        readonly enum?: readonly unknown[];
+      };
+    };
+  };
+};
+
+function resolveConfiguredContextSize(
+  defaultBudget: number | undefined,
+  model: vscode.LanguageModelChatInformation,
+  options: RuntimeProvideLanguageModelChatResponseOptions
+): number | undefined {
+  const supportedSizes = getConfiguredContextSizeOptions(model);
+  if (supportedSizes.length === 0) {
+    return defaultBudget;
+  }
+
+  for (const candidate of [options.modelConfiguration?.contextSize, options.configuration?.contextSize]) {
+    if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && supportedSizes.includes(candidate)) {
+      return candidate;
+    }
+  }
+
+  return defaultBudget;
+}
+
+function getConfiguredContextSizeOptions(model: vscode.LanguageModelChatInformation): number[] {
+  const values = (model as vscode.LanguageModelChatInformation & ContextSizeSchemaCarrier)
+    .configurationSchema?.properties?.contextSize?.enum ?? [];
+  return values.filter((value): value is number => Number.isSafeInteger(value) && value > 0);
 }
 
 function supportsOfficialTokenCounting(baseURL: string): boolean {
