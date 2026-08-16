@@ -83,9 +83,14 @@ export interface ResolvedProviderModel {
   effectiveInputBudget: number;
 }
 
-type ThinkingEffortSchema = {
+interface ContextSizeOption {
+  readonly value: number;
+  readonly description: string;
+}
+
+type ModelConfigurationSchema = {
   readonly properties: {
-    readonly reasoningEffort: {
+    readonly reasoningEffort?: {
       readonly type: 'string';
       readonly title: string;
       readonly enum: readonly ReasoningEffort[];
@@ -94,11 +99,20 @@ type ThinkingEffortSchema = {
       readonly default: ReasoningEffort;
       readonly group: 'navigation';
     };
+    readonly contextSize?: {
+      readonly type: 'number';
+      readonly title: string;
+      readonly enum: readonly number[];
+      readonly enumItemLabels: readonly string[];
+      readonly enumDescriptions: readonly string[];
+      readonly default: number;
+      readonly group: 'tokens';
+    };
   };
 };
 
 type ModelPickerChatInformation = vscode.LanguageModelChatInformation & {
-  readonly configurationSchema?: ThinkingEffortSchema;
+  readonly configurationSchema?: ModelConfigurationSchema;
 };
 
 export interface ParsedModelIdentifier {
@@ -236,16 +250,30 @@ function buildDiscoveredModels(
   const effectiveInputBudget = getEffectiveInputBudget(activeRawContextWindow, effectiveContextWindowPercent);
   const maximumContextWindow = getPositiveInteger(model.max_context_window);
   const knownRawContextCeiling = getKnownCodexRawContextCeiling(slug, config.baseURL, credentialKind);
+  const longRawContextWindow = getLongContextWindow(slug, activeRawContextWindow, maximumContextWindow, knownRawContextCeiling);
+  const contextSizeOptions = getContextSizeOptions(
+    activeRawContextWindow,
+    effectiveInputBudget,
+    longRawContextWindow,
+    effectiveContextWindowPercent,
+    slug
+  );
+  const maximumEffectiveInputBudget = Math.max(...contextSizeOptions.map((option) => option.value));
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
   const tooltip = getModelDescription(model, slug);
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
+  const configurationSchema = buildModelConfigurationSchema(
+    reasoningOptions,
+    defaultReasoningEffort ?? reasoningEfforts[0],
+    contextSizeOptions
+  );
 
   const info: ModelPickerChatInformation = {
     id: toProviderModelId(slug),
     name: displayName,
     family: slug,
     version: versionBase,
-    maxInputTokens: effectiveInputBudget,
+    maxInputTokens: maximumEffectiveInputBudget,
     maxOutputTokens: config.maxOutputTokens,
     tooltip,
     detail: buildModelDetail(
@@ -261,49 +289,16 @@ function buildDiscoveredModels(
       imageInput,
       toolCalling: true
     },
-    ...(reasoningEfforts.length > 1
-      ? { configurationSchema: buildThinkingEffortSchema(reasoningOptions, defaultReasoningEffort ?? reasoningEfforts[0]) }
-      : {})
+    ...(configurationSchema ? { configurationSchema } : {})
   };
 
-  const standardModel = {
+  return [{
     requestModel: slug,
     reasoningEffort: defaultReasoningEffort ?? reasoningEfforts[0],
     rawContextWindow: activeRawContextWindow,
     effectiveInputBudget,
     info
-  };
-
-  const longRawContextWindow = getLongContextWindow(slug, activeRawContextWindow, maximumContextWindow, knownRawContextCeiling);
-  if (!longRawContextWindow) {
-    return [standardModel];
-  }
-
-  const longEffectiveInputBudget = getEffectiveInputBudget(longRawContextWindow, effectiveContextWindowPercent);
-  const experimental = isExperimentalLongContextProfile(slug, longRawContextWindow);
-
-  return [
-    standardModel,
-    {
-      requestModel: slug,
-      reasoningEffort: standardModel.reasoningEffort,
-      rawContextWindow: longRawContextWindow,
-      effectiveInputBudget: longEffectiveInputBudget,
-      info: {
-        ...info,
-        id: toLongContextProviderModelId(slug, longRawContextWindow),
-        name: `${displayName} (Long context)${experimental ? ' (Experimental)' : ''}`,
-        maxInputTokens: longEffectiveInputBudget,
-        detail: buildLongContextDetail(
-          longRawContextWindow,
-          longEffectiveInputBudget,
-          experimental,
-          reasoningOptions,
-          defaultReasoningEffort
-        )
-      }
-    }
-  ];
+  }];
 }
 
 function getReasoningOptions(model: UpstreamModel | undefined, slug: string): ReasoningOption[] {
@@ -455,10 +450,6 @@ function toProviderModelId(requestModel: string): string {
   return `${PROVIDER_MODEL_ID_PREFIX}${requestModel}`;
 }
 
-function toLongContextProviderModelId(requestModel: string, contextWindow: number): string {
-  return `${toProviderModelId(requestModel)}${CONTEXT_ID_DELIMITER}${contextWindow}`;
-}
-
 function stripProviderModelIdPrefix(modelId: string): string {
   return modelId.startsWith(PROVIDER_MODEL_ID_PREFIX)
     ? modelId.slice(PROVIDER_MODEL_ID_PREFIX.length)
@@ -500,21 +491,6 @@ function buildModelDetail(
   return parts.join(' | ');
 }
 
-function buildLongContextDetail(
-  rawContextWindow: number,
-  effectiveInputBudget: number,
-  experimental: boolean,
-  reasoningOptions?: readonly ReasoningOption[],
-  defaultReasoningEffort?: ReasoningEffort
-): string {
-  const parts = [
-    `Long context${experimental ? ' (Experimental)' : ''}: ${formatTokenCount(effectiveInputBudget)} effective input budget`,
-    `Raw context window: ${formatTokenCount(rawContextWindow)}`
-  ];
-  appendReasoningDetail(parts, reasoningOptions, defaultReasoningEffort);
-  return parts.join(' | ');
-}
-
 function appendReasoningDetail(
   parts: string[],
   reasoningOptions?: readonly ReasoningOption[],
@@ -532,24 +508,72 @@ function appendReasoningDetail(
   }
 }
 
-function buildThinkingEffortSchema(reasoningOptions: readonly ReasoningOption[], defaultEffort: ReasoningEffort): ThinkingEffortSchema {
-  const efforts = reasoningOptions.map((option) => option.effort);
-  const labels = reasoningOptions.map((option) => formatReasoningEffort(option.effort));
-  const descriptions = reasoningOptions.map((option) => option.description);
+function getContextSizeOptions(
+  activeRawContextWindow: number,
+  effectiveInputBudget: number,
+  longRawContextWindow: number | undefined,
+  effectiveContextWindowPercent: number,
+  model: string
+): ContextSizeOption[] {
+  const options: ContextSizeOption[] = [{
+    value: effectiveInputBudget,
+    description: 'Default context size.'
+  }];
 
-  return {
-    properties: {
-      reasoningEffort: {
-        type: 'string',
-        title: 'Thinking Effort',
-        enum: [...efforts],
-        enumItemLabels: labels,
-        enumDescriptions: descriptions,
-        default: defaultEffort,
-        group: 'navigation'
-      }
-    }
-  };
+  if (!longRawContextWindow) {
+    return options;
+  }
+
+  const longEffectiveInputBudget = getEffectiveInputBudget(longRawContextWindow, effectiveContextWindowPercent);
+  if (longEffectiveInputBudget <= effectiveInputBudget) {
+    return options;
+  }
+
+  options.push({
+    value: longEffectiveInputBudget,
+    description: isExperimentalLongContextProfile(model, longRawContextWindow)
+      ? 'Long context (Experimental).'
+      : 'Long context.'
+  });
+  return options;
+}
+
+function buildModelConfigurationSchema(
+  reasoningOptions: readonly ReasoningOption[],
+  defaultEffort: ReasoningEffort | undefined,
+  contextSizeOptions: readonly ContextSizeOption[]
+): ModelConfigurationSchema | undefined {
+  const properties: ModelConfigurationSchema['properties'] = {};
+
+  if (reasoningOptions.length > 1 && defaultEffort) {
+    properties.reasoningEffort = {
+      type: 'string',
+      title: 'Thinking Effort',
+      enum: reasoningOptions.map((option) => option.effort),
+      enumItemLabels: reasoningOptions.map((option) => formatReasoningEffort(option.effort)),
+      enumDescriptions: reasoningOptions.map((option) => option.description),
+      default: defaultEffort,
+      group: 'navigation'
+    };
+  }
+
+  if (contextSizeOptions.length > 1) {
+    properties.contextSize = {
+      type: 'number',
+      title: 'Context Size',
+      enum: contextSizeOptions.map((option) => option.value),
+      enumItemLabels: contextSizeOptions.map((option) => formatContextSize(option.value)),
+      enumDescriptions: contextSizeOptions.map((option) => option.description),
+      default: contextSizeOptions[0].value,
+      group: 'tokens'
+    };
+  }
+
+  return Object.keys(properties).length > 0 ? { properties } : undefined;
+}
+
+function formatContextSize(value: number): string {
+  return value % 1000 === 0 ? `${value / 1000}K` : formatTokenCount(value);
 }
 
 function formatTokenCount(value: number): string {
