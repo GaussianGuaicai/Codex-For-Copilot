@@ -1885,7 +1885,7 @@ function getContextSizeSchema(model: vscode.LanguageModelChatInformation): { opt
   }
 
   const options = (contextSize.enum ?? [])
-    .filter((value): value is number => Number.isSafeInteger(value) && value > 0);
+    .filter((value): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0);
   if (options.length === 0) {
     return undefined;
   }
