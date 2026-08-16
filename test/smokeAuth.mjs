@@ -57,6 +57,7 @@ export * from ${repoImport('src/auth/codexJwt')};
 export * from ${repoImport('src/auth/codexAuthManager')};
 export * from ${repoImport('src/auth/codexAuthRequest')};
 export * from ${repoImport('src/auth/codexAuthLock')};
+export * from ${repoImport('src/auth/codexSecretStore')};
 export * from ${repoImport('src/auth/codexPkce')};
 export * from ${repoImport('src/auth/codexOAuthClient')};
 export * from ${repoImport('src/auth/codexAuthenticationProvider')};
@@ -100,6 +101,93 @@ try {
   assertEqual(auth.isJwtExpiringSoon(soonToken, 5 * 60 * 1000), true, 'expiring soon');
   assertEqual(auth.needsRefresh({ ...valid, tokens: { ...valid.tokens, access_token: soonToken } }), true, 'refresh when access token expires soon');
   assertEqual(auth.needsRefresh({ ...valid, last_refresh: new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString() }), true, 'refresh when last_refresh is old');
+
+  const importedSecrets = new Map();
+  const importedSecretStorage = {
+    async get(key) { return importedSecrets.get(key); },
+    async store(key, value) { importedSecrets.set(key, value); },
+    async delete(key) { importedSecrets.delete(key); }
+  };
+  const importedRefreshCalls = [];
+  let importedRevokeCalls = 0;
+  const importedManager = new auth.CodexAuthManager(
+    new auth.CodexSecretStore(importedSecretStorage),
+    { async withLock(callback) { return callback(); } },
+    {
+      async refresh(refreshToken) {
+        importedRefreshCalls.push(refreshToken);
+        return { access_token: futureToken, refresh_token: 'rotated-refresh-token', account_id: 'acct_2' };
+      },
+      async revoke() { importedRevokeCalls += 1; }
+    }
+  );
+  const importedEvents = [];
+  const importedSubscription = importedManager.onDidChangeAuth((event) => importedEvents.push(event));
+  await importedManager.importAuthJson(JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: {
+      id_token: futureToken,
+      access_token: soonToken,
+      refresh_token: 'imported-refresh-token',
+      account_id: 'acct_1'
+    }
+  }));
+  const importedBeforeRefresh = JSON.parse(importedSecrets.get('codexForCopilot.codexAuthBundle'));
+  assertEqual(importedBeforeRefresh.source, 'importedAuthJson', 'auth.json import retains its credential source');
+  assertEqual(importedBeforeRefresh.tokens.refresh_token, 'imported-refresh-token', 'auth.json import stores its refresh token');
+  const importedSnapshot = await importedManager.getCredentialSnapshot();
+  const importedAfterRefresh = JSON.parse(importedSecrets.get('codexForCopilot.codexAuthBundle'));
+  assertEqual(importedSnapshot.source, 'importedAuthJson', 'auth.json import remains identifiable after refresh');
+  assertEqual(importedSnapshot.refreshable, true, 'auth.json import is refreshable');
+  assertEqual(JSON.stringify(importedRefreshCalls), JSON.stringify(['imported-refresh-token']), 'auth.json import enters the automatic refresh path');
+  assertEqual(importedAfterRefresh.tokens.refresh_token, 'rotated-refresh-token', 'auth.json refresh persists refresh-token rotation');
+  assertEqual(importedAfterRefresh.tokens.account_id, 'acct_2', 'auth.json refresh persists refreshed account metadata');
+  assertEqual(JSON.stringify(importedEvents.map((event) => event.reason)), JSON.stringify(['signedIn', 'tokensRefreshed']), 'auth.json import emits sign-in and refresh events');
+  await importedManager.signOut();
+  assertEqual(importedSecrets.has('codexForCopilot.codexAuthBundle'), false, 'sign-out removes the imported credential copy');
+  assertEqual(importedRevokeCalls, 0, 'sign-out does not revoke an imported auth.json credential');
+  importedSubscription.dispose();
+  importedManager.dispose();
+
+  const rawImportedSecrets = new Map([
+    ['codexForCopilot.codexAuthBundle', JSON.stringify({ auth_mode: 'chatgpt', tokens: valid.tokens, last_refresh: new Date().toISOString() })]
+  ]);
+  const rawImportedStore = new auth.CodexSecretStore({
+    async get(key) { return rawImportedSecrets.get(key); },
+    async store(key, value) { rawImportedSecrets.set(key, value); },
+    async delete(key) { rawImportedSecrets.delete(key); }
+  });
+  const migratedRawImport = await rawImportedStore.getCredential();
+  assertEqual(migratedRawImport.source, 'importedAuthJson', 'pre-schema auth.json import migrates into the refreshable path');
+  assertEqual(migratedRawImport.tokens.refresh_token, 'refresh-token', 'pre-schema auth.json migration preserves the refresh token');
+  assertEqual(JSON.parse(rawImportedSecrets.get('codexForCopilot.codexAuthBundle')).source, 'importedAuthJson', 'pre-schema auth.json migration persists a stable schema-v2 record');
+
+  const legacySecrets = new Map();
+  const legacySecretStorage = {
+    async get(key) { return legacySecrets.get(key); },
+    async store(key, value) { legacySecrets.set(key, value); },
+    async delete(key) { legacySecrets.delete(key); }
+  };
+  const legacyManager = new auth.CodexAuthManager(
+    new auth.CodexSecretStore(legacySecretStorage),
+    { async withLock(callback) { return callback(); } },
+    { async refresh() { throw new Error('legacy snapshots must not refresh'); }, async revoke() {} }
+  );
+  await legacyManager.importAuthJson(JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { id_token: futureToken, access_token: futureToken, refresh_token: 'fresh-import-token' }
+  }));
+  await legacySecretStorage.store('codexForCopilot.codexAuthBundle', JSON.stringify({
+    schemaVersion: 2,
+    source: 'legacyCodexFile',
+    revision: 'legacy',
+    accessToken: futureToken,
+    loadedAt: new Date().toISOString()
+  }));
+  const legacySnapshot = await legacyManager.getCredentialSnapshot();
+  assertEqual(legacySnapshot.source, 'legacyCodexFile', 'stored legacy access-token snapshots remain identifiable');
+  assertEqual(legacySnapshot.refreshable, false, 'stored legacy access-token snapshots stay non-refreshable');
+  legacyManager.dispose();
 
   const lock = new auth.CodexAuthLock({ fsPath: join(tempDir, 'refresh.lock') });
   let activeLocks = 0;

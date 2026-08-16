@@ -36,10 +36,10 @@ Open the Command Palette and choose one of the following:
 
 - **`Codex for Copilot: Sign in with ChatGPT`** for the normal browser-based login flow.
 - **`Codex for Copilot: Sign in with Device Code`** when a loopback browser callback is unavailable.
-- **`Codex for Copilot: Import Codex auth.json`** only for a read-only legacy credential snapshot.
+- **`Codex for Copilot: Import Codex auth.json`** to import existing Codex CLI ChatGPT credentials.
 - **`Codex: Set API Key`** to store an API key in VS Code SecretStorage.
 
-The extension stores its own ChatGPT credentials in VS Code SecretStorage and refreshes them automatically. The legacy `~/.codex/auth.json` fallback is never modified, refreshed, or revoked.
+The extension stores imported and signed-in ChatGPT credentials in VS Code SecretStorage and refreshes them automatically, including refresh-token rotation. Importing copies the credentials and never writes to the original `~/.codex/auth.json` file; signing out of an imported credential only removes the extension's copy. The direct `~/.codex/auth.json` fallback remains read-only.
 
 ### 3. Select Codex
 
@@ -56,7 +56,7 @@ Use **`Codex: Enable Native Tool Search`** to opt in. The extension saves the pr
 ## Requirements
 
 - VS Code 1.104.0 or newer.
-- A ChatGPT sign-in, legacy Codex credential snapshot, or API key.
+- A ChatGPT sign-in, imported Codex CLI `auth.json`, or API key.
 
 ## Common commands
 

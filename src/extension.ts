@@ -196,13 +196,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json (Legacy)', 'Refresh Account Limits', 'Enable Native Tool Search', 'Use VS Code Virtual Tool Groups', 'Show Native Tool Search Status', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json', 'Refresh Account Limits', 'Enable Native Tool Search', 'Use VS Code Virtual Tool Groups', 'Show Native Tool Search Status', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex' }
       );
 
       if (action === 'Sign in with ChatGPT') {
         await vscode.commands.executeCommand('codexForCopilot.auth.signInWithChatGPT');
-      } else if (action === 'Import Codex auth.json (Legacy)') {
+      } else if (action === 'Import Codex auth.json') {
         await vscode.commands.executeCommand('codexForCopilot.auth.importAuthJson');
       } else if (action === 'Show Auth Status') {
         await vscode.commands.executeCommand('codexForCopilot.auth.showStatus');
