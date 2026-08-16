@@ -573,7 +573,11 @@ function buildModelConfigurationSchema(
 }
 
 function formatContextSize(value: number): string {
-  return value % 1000 === 0 ? `${value / 1000}K` : formatTokenCount(value);
+  if (value < 1000) {
+    return formatTokenCount(value);
+  }
+
+  return `${Number((value / 1000).toFixed(1))}K`;
 }
 
 function formatTokenCount(value: number): string {
