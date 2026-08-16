@@ -90,7 +90,7 @@ interface ContextSizeOption {
 
 type ModelConfigurationSchema = {
   readonly properties: {
-    readonly reasoningEffort?: {
+    reasoningEffort?: {
       readonly type: 'string';
       readonly title: string;
       readonly enum: readonly ReasoningEffort[];
@@ -99,7 +99,7 @@ type ModelConfigurationSchema = {
       readonly default: ReasoningEffort;
       readonly group: 'navigation';
     };
-    readonly contextSize?: {
+    contextSize?: {
       readonly type: 'number';
       readonly title: string;
       readonly enum: readonly number[];
