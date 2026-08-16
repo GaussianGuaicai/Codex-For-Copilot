@@ -1852,34 +1852,50 @@ type ContextSizeSchemaCarrier = {
     readonly properties?: {
       readonly contextSize?: {
         readonly enum?: readonly unknown[];
+        readonly default?: unknown;
       };
     };
   };
 };
 
 function resolveConfiguredContextSize(
-  defaultBudget: number | undefined,
+  fallbackBudget: number | undefined,
   model: vscode.LanguageModelChatInformation,
   options: RuntimeProvideLanguageModelChatResponseOptions
 ): number | undefined {
-  const supportedSizes = getConfiguredContextSizeOptions(model);
-  if (supportedSizes.length === 0) {
-    return defaultBudget;
+  const contextSizeSchema = getContextSizeSchema(model);
+  if (!contextSizeSchema) {
+    return fallbackBudget;
   }
 
   for (const candidate of [options.modelConfiguration?.contextSize, options.configuration?.contextSize]) {
-    if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && supportedSizes.includes(candidate)) {
+    if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && contextSizeSchema.options.includes(candidate)) {
       return candidate;
     }
   }
 
-  return defaultBudget;
+  return contextSizeSchema.default ?? fallbackBudget;
 }
 
-function getConfiguredContextSizeOptions(model: vscode.LanguageModelChatInformation): number[] {
-  const values = (model as vscode.LanguageModelChatInformation & ContextSizeSchemaCarrier)
-    .configurationSchema?.properties?.contextSize?.enum ?? [];
-  return values.filter((value): value is number => Number.isSafeInteger(value) && value > 0);
+function getContextSizeSchema(model: vscode.LanguageModelChatInformation): { options: number[]; default: number | undefined } | undefined {
+  const contextSize = (model as vscode.LanguageModelChatInformation & ContextSizeSchemaCarrier)
+    .configurationSchema?.properties?.contextSize;
+  if (!contextSize) {
+    return undefined;
+  }
+
+  const options = (contextSize.enum ?? [])
+    .filter((value): value is number => Number.isSafeInteger(value) && value > 0);
+  if (options.length === 0) {
+    return undefined;
+  }
+
+  return {
+    options,
+    default: typeof contextSize.default === 'number' && options.includes(contextSize.default)
+      ? contextSize.default
+      : undefined
+  };
 }
 
 function supportsOfficialTokenCounting(baseURL: string): boolean {
