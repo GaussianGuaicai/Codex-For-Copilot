@@ -779,7 +779,7 @@ async function runProviderLongContextSelectionSmokeTest() {
         'context size remains client-side and is not sent as a Responses API parameter'
       );
     }
-    assertEqual(responseRequests[1].previous_response_id, undefined, 'switching to long context starts an isolated chain');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_standard', 'switching to a larger context safely reuses the completed smaller-context response');
     assertEqual(responseRequests[2].previous_response_id, 'resp_long', 'same context size reuses its completed response');
     assertEqual(
       JSON.stringify(responseRequests[2].input),
