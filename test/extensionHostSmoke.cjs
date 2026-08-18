@@ -110,14 +110,8 @@ async function run() {
     }
 
     if (responseRequestCount === 3) {
-      assert.strictEqual(body.previous_response_id, undefined, 'Long-to-standard downgrade must start a new chain.');
-      assert.deepStrictEqual(body.input, [
-        { type: 'message', role: 'user', content: 'Profile start' },
-        { type: 'message', role: 'assistant', content: 'standard reply' },
-        { type: 'message', role: 'user', content: 'Expand context' },
-        { type: 'message', role: 'assistant', content: 'long reply' },
-        { type: 'message', role: 'user', content: 'Return to standard' }
-      ]);
+      assert.strictEqual(body.previous_response_id, 'resp_profile_long');
+      assert.deepStrictEqual(body.input, [{ type: 'message', role: 'user', content: 'Return to standard' }]);
       writeTextResponse(response, 'downgrade reply', 'resp_profile_downgrade');
       return;
     }
@@ -198,27 +192,22 @@ async function run() {
 
     const models = await vscode.lm.selectChatModels({ vendor: 'codex-for-copilot' });
     assert(modelDiscoveryRequestCount > 0, 'Model discovery did not reach the mock backend; verify isolated test credentials.');
-    const standardModel = models.find((model) => model.id === 'codex::gpt-5.4');
-    const longModel = models.find((model) => model.id === 'codex::gpt-5.4::context=1000000');
-    assert(standardModel, 'Hidden GPT-5.4 standard profile was not selectable.');
-    assert(longModel, 'Hidden GPT-5.4 long profile was not selectable.');
-    assert.strictEqual(models.length, 2);
-    assert.strictEqual(standardModel.name, 'GPT-5.4');
-    assert.strictEqual(standardModel.family, 'gpt-5.4');
-    assert.strictEqual(standardModel.maxInputTokens, 258400);
-    assert.strictEqual(longModel.name, 'GPT-5.4 (Long context)');
-    assert.strictEqual(longModel.family, 'gpt-5.4');
-    assert.strictEqual(longModel.maxInputTokens, 950000);
+    const model = models.find((candidate) => candidate.id === 'codex::gpt-5.4');
+    assert(model, 'Hidden GPT-5.4 model was not selectable.');
+    assert.strictEqual(models.length, 1);
+    assert.strictEqual(model.name, 'GPT-5.4');
+    assert.strictEqual(model.family, 'gpt-5.4');
+    assert.strictEqual(model.maxInputTokens, 950000);
 
-    assert.strictEqual(await collectText(await standardModel.sendRequest([
+    assert.strictEqual(await collectText(await model.sendRequest([
       vscode.LanguageModelChatMessage.User('Profile start')
     ])), 'standard reply');
-    assert.strictEqual(await collectText(await longModel.sendRequest([
+    assert.strictEqual(await collectText(await model.sendRequest([
       vscode.LanguageModelChatMessage.User('Profile start'),
       vscode.LanguageModelChatMessage.Assistant('standard reply'),
       vscode.LanguageModelChatMessage.User('Expand context')
     ])), 'long reply');
-    assert.strictEqual(await collectText(await standardModel.sendRequest([
+    assert.strictEqual(await collectText(await model.sendRequest([
       vscode.LanguageModelChatMessage.User('Profile start'),
       vscode.LanguageModelChatMessage.Assistant('standard reply'),
       vscode.LanguageModelChatMessage.User('Expand context'),
@@ -226,7 +215,7 @@ async function run() {
       vscode.LanguageModelChatMessage.User('Return to standard')
     ])), 'downgrade reply');
 
-    assert.strictEqual(await standardModel.countTokens('Ping'), 11);
+    assert.strictEqual(await model.countTokens('Ping'), 11);
     const tool = {
       name: 'extension_host_smoke_tool',
       description: 'Returns a deterministic smoke-test value.',
@@ -236,7 +225,7 @@ async function run() {
         required: ['value']
       }
     };
-    const toolResponse = await standardModel.sendRequest(
+    const toolResponse = await model.sendRequest(
       [vscode.LanguageModelChatMessage.User('Ping')],
       { tools: [tool], toolMode: vscode.LanguageModelChatToolMode.Required }
     );
@@ -251,7 +240,7 @@ async function run() {
     assert.strictEqual(toolCalls[0].name, 'extension_host_smoke_tool');
     assert.deepStrictEqual(toolCalls[0].input, { value: 'ping' });
 
-    const response = await standardModel.sendRequest([
+    const response = await model.sendRequest([
       vscode.LanguageModelChatMessage.User('Ping'),
       vscode.LanguageModelChatMessage.Assistant([toolCalls[0]]),
       vscode.LanguageModelChatMessage.User([
@@ -266,7 +255,7 @@ async function run() {
     if (process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH) {
       await writeFile(process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH, JSON.stringify({ passed: true }));
     }
-    console.log(`Extension host smoke passed: profiles, token counting, and tool loop completed with ${standardModel.vendor}/${standardModel.id}.`);
+    console.log(`Extension host smoke passed: profiles, token counting, and tool loop completed with ${model.vendor}/${model.id}.`);
   } finally {
     try {
       if (config) {

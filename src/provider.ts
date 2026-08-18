@@ -305,6 +305,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       selectedModel = this.resolveRequestModel(model.id, config, catalog.models, catalog.authoritative);
     }
+    selectedModel = {
+      ...selectedModel,
+      effectiveInputBudget: resolveConfiguredContextSize(
+        selectedModel.effectiveInputBudget,
+        model,
+        options as RuntimeProvideLanguageModelChatResponseOptions
+      )
+    };
     this.scheduleWebSocketPreconnection(config, credentials, authIdentity);
     latency.mark('modelResolved');
     this.selectedModelSink?.setSelectedModel(selectedModel.requestModel);
@@ -1362,7 +1370,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     logger.debug('getAvailableModels discovery success', {
       discoveredCount: upstreamModels.length,
       returnedCount: models.length,
-      requestModels: models.map((model) => model.requestModel)
+      models: models.map((model) => ({
+        requestModel: model.requestModel,
+        activeRawContextWindow: model.rawContextWindow,
+        maximumRawContextWindow: model.maximumRawContextWindow ?? null,
+        effectiveInputBudget: model.effectiveInputBudget,
+        maximumEffectiveInputBudget: model.info.maxInputTokens
+      }))
     });
     return { models, authoritative: true };
   }
@@ -1837,6 +1851,57 @@ export function getReasoningEffort(
   defaultReasoningEffort: ReasoningEffort | undefined
 ): ReasoningEffortResolution {
   return resolveReasoningEffort(selectedReasoningEffort, options, defaultReasoningEffort);
+}
+
+type ContextSizeSchemaCarrier = {
+  readonly configurationSchema?: {
+    readonly properties?: {
+      readonly contextSize?: {
+        readonly enum?: readonly unknown[];
+        readonly default?: unknown;
+      };
+    };
+  };
+};
+
+function resolveConfiguredContextSize(
+  fallbackBudget: number | undefined,
+  model: vscode.LanguageModelChatInformation,
+  options: RuntimeProvideLanguageModelChatResponseOptions
+): number | undefined {
+  const contextSizeSchema = getContextSizeSchema(model);
+  if (!contextSizeSchema) {
+    return fallbackBudget;
+  }
+
+  for (const candidate of [options.modelConfiguration?.contextSize, options.configuration?.contextSize]) {
+    if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && contextSizeSchema.options.includes(candidate)) {
+      return candidate;
+    }
+  }
+
+  return contextSizeSchema.default ?? fallbackBudget;
+}
+
+function getContextSizeSchema(model: vscode.LanguageModelChatInformation): { options: number[]; default: number | undefined } | undefined {
+  const contextSize = (model as vscode.LanguageModelChatInformation & ContextSizeSchemaCarrier)
+    .configurationSchema?.properties?.contextSize;
+  if (!contextSize) {
+    return undefined;
+  }
+
+  const options = (contextSize.enum ?? [])
+    .filter((value): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0);
+  if (options.length === 0) {
+    return undefined;
+  }
+
+  return {
+    options,
+    default: typeof contextSize.default === 'number' && options.includes(contextSize.default)
+      ? contextSize.default
+      : undefined
+  };
 }
 
 function supportsOfficialTokenCounting(baseURL: string): boolean {
