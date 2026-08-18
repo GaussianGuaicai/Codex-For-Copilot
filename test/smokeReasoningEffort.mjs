@@ -69,11 +69,11 @@ try {
   );
   assertEqual(schema.default, 'low', 'catalog default reasoning effort');
   assertEqual(contextSizeSchema.group, 'tokens', 'context size uses the native tokens group');
-  assertEqual(contextSizeSchema.enum.join(','), '258400,353400', 'context size preserves effective input budgets');
-  assertEqual(contextSizeSchema.enumItemLabels.join(','), '258.4K,353.4K', 'context size uses concise picker labels');
-  assertEqual(contextSizeSchema.enumDescriptions.join(','), 'Default context size.,Long context (Experimental).', 'context size labels the experimental option');
+  assertEqual(contextSizeSchema.enum.join(','), '258400,828400', 'context size preserves effective input budgets');
+  assertEqual(contextSizeSchema.enumItemLabels.join(','), '272K,872K', 'context size shows raw context-window picker labels');
+  assertEqual(contextSizeSchema.enumDescriptions.join(','), 'Default context size.,Long context.', 'context size labels the discovered maximum option');
   assertEqual(contextSizeSchema.default, 258400, 'context size defaults to the active context window');
-  assertEqual(model.info.maxInputTokens, 353400, 'model advertises its maximum selectable context size');
+  assertEqual(model.info.maxInputTokens, 828400, 'model advertises its maximum selectable context size');
   assertEqual(
     schema.enumDescriptions[3],
     'Use the Future Effort reasoning effort advertised by the selected model.',
@@ -164,7 +164,7 @@ function createCatalogModel() {
     slug: 'gpt-5.6-sol',
     display_name: 'GPT-5.6-Sol',
     context_window: 272000,
-    max_context_window: 272000,
+    max_context_window: 872000,
     default_reasoning_level: 'low',
     supported_reasoning_levels: [
       { effort: 'low', description: 'Fast responses with lighter reasoning' },

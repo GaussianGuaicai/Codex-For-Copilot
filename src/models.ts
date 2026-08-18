@@ -18,19 +18,12 @@ const CONTEXT_ID_DELIMITER = '::context=';
 const PROVIDER_MODEL_ID_PREFIX = 'codex::';
 const DEFAULT_FALLBACK_CONTEXT_WINDOW = 272000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 95;
-const GPT_5_4_LONG_CONTEXT_WINDOW = 1000000;
-const GPT_5_6_LONG_CONTEXT_WINDOW = 372000;
 const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5.5': 272000,
   'gpt-5.4': 272000,
   'gpt-5.4-mini': 272000,
   'gpt-5.3-codex-spark': 128000,
   'codex-auto-review': 272000
-};
-const KNOWN_CODEX_RAW_CONTEXT_CEILINGS: Readonly<Record<string, number>> = {
-  'gpt-5.6-sol': GPT_5_6_LONG_CONTEXT_WINDOW,
-  'gpt-5.6-terra': GPT_5_6_LONG_CONTEXT_WINDOW,
-  'gpt-5.6-luna': GPT_5_6_LONG_CONTEXT_WINDOW
 };
 
 const MODEL_DESCRIPTION_FALLBACKS: Record<string, string> = {
@@ -80,11 +73,13 @@ export interface ResolvedProviderModel {
   requestModel: string;
   reasoningEffort?: ReasoningEffort;
   rawContextWindow: number;
+  maximumRawContextWindow?: number;
   effectiveInputBudget: number;
 }
 
 interface ContextSizeOption {
   readonly value: number;
+  readonly rawContextWindow: number;
   readonly description: string;
 }
 
@@ -186,7 +181,6 @@ export function buildProviderModels(
 export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCredentials['kind']): ResolvedProviderModel {
   const rawContextWindow = getFallbackContextWindow(config.model);
   const effectiveInputBudget = getEffectiveInputBudget(rawContextWindow, DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
-  const knownRawContextCeiling = getKnownCodexRawContextCeiling(config.model, config.baseURL, credentialKind);
   const reasoningEffort = getDefaultReasoningEffort(undefined, config.model);
   const reasoningOptions = getReasoningOptions(undefined, config.model);
   return {
@@ -208,8 +202,7 @@ export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCr
         reasoningOptions,
         reasoningEffort,
         config.baseURL,
-        undefined,
-        knownRawContextCeiling
+        undefined
       ),
       capabilities: {
         imageInput: false,
@@ -249,14 +242,12 @@ function buildDiscoveredModels(
   const effectiveContextWindowPercent = getEffectiveContextWindowPercent(model.effective_context_window_percent);
   const effectiveInputBudget = getEffectiveInputBudget(activeRawContextWindow, effectiveContextWindowPercent);
   const maximumContextWindow = getPositiveInteger(model.max_context_window);
-  const knownRawContextCeiling = getKnownCodexRawContextCeiling(slug, config.baseURL, credentialKind);
-  const longRawContextWindow = getLongContextWindow(slug, activeRawContextWindow, maximumContextWindow, knownRawContextCeiling);
+  const longRawContextWindow = getLongContextWindow(activeRawContextWindow, maximumContextWindow);
   const contextSizeOptions = getContextSizeOptions(
     activeRawContextWindow,
     effectiveInputBudget,
     longRawContextWindow,
-    effectiveContextWindowPercent,
-    slug
+    effectiveContextWindowPercent
   );
   const maximumEffectiveInputBudget = Math.max(...contextSizeOptions.map((option) => option.value));
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
@@ -282,8 +273,7 @@ function buildDiscoveredModels(
       reasoningOptions,
       defaultReasoningEffort,
       undefined,
-      maximumContextWindow,
-      knownRawContextCeiling
+      maximumContextWindow
     ),
     capabilities: {
       imageInput,
@@ -296,6 +286,7 @@ function buildDiscoveredModels(
     requestModel: slug,
     reasoningEffort: defaultReasoningEffort ?? reasoningEfforts[0],
     rawContextWindow: activeRawContextWindow,
+    maximumRawContextWindow: maximumContextWindow,
     effectiveInputBudget,
     info
   }];
@@ -389,61 +380,10 @@ function getEffectiveInputBudget(rawContextWindow: number, percent: number): num
   return Math.floor(rawContextWindow * percent / 100);
 }
 
-function getLongContextWindow(
-  model: string,
-  activeContextWindow: number,
-  maximumContextWindow: number | undefined,
-  knownRawContextCeiling: number | undefined
-): number | undefined {
-  if (
-    model === 'gpt-5.4'
-    && maximumContextWindow !== undefined
-    && maximumContextWindow >= GPT_5_4_LONG_CONTEXT_WINDOW
-    && activeContextWindow < GPT_5_4_LONG_CONTEXT_WINDOW
-  ) {
-    return GPT_5_4_LONG_CONTEXT_WINDOW;
-  }
-
-  if (
-    knownRawContextCeiling === GPT_5_6_LONG_CONTEXT_WINDOW
-    && activeContextWindow < GPT_5_6_LONG_CONTEXT_WINDOW
-  ) {
-    return GPT_5_6_LONG_CONTEXT_WINDOW;
-  }
-
-  return undefined;
-}
-
-function getKnownCodexRawContextCeiling(
-  model: string,
-  baseURL: string,
-  credentialKind: ApiCredentials['kind']
-): number | undefined {
-  if (credentialKind !== 'codexAccessToken' || !isChatGptCodexBackend(baseURL)) {
-    return undefined;
-  }
-
-  return KNOWN_CODEX_RAW_CONTEXT_CEILINGS[model];
-}
-
-function isExperimentalLongContextProfile(model: string, rawContextWindow: number): boolean {
-  return KNOWN_CODEX_RAW_CONTEXT_CEILINGS[model] === GPT_5_6_LONG_CONTEXT_WINDOW
-    && rawContextWindow === GPT_5_6_LONG_CONTEXT_WINDOW;
-}
-
-function isChatGptCodexBackend(baseURL: string): boolean {
-  try {
-    const url = new URL(normalizeBaseURL(baseURL));
-    const path = url.pathname.replace(/\/+$/, '');
-    return url.origin === 'https://chatgpt.com'
-      && !url.username
-      && !url.password
-      && !url.search
-      && !url.hash
-      && path === '/backend-api/codex';
-  } catch {
-    return false;
-  }
+function getLongContextWindow(activeContextWindow: number, maximumContextWindow: number | undefined): number | undefined {
+  return maximumContextWindow !== undefined && maximumContextWindow > activeContextWindow
+    ? maximumContextWindow
+    : undefined;
 }
 
 function toProviderModelId(requestModel: string): string {
@@ -462,13 +402,9 @@ function buildModelDetail(
   reasoningOptions?: readonly ReasoningOption[],
   defaultReasoningEffort?: ReasoningEffort,
   sourceHint?: string,
-  maximumContextWindow?: number,
-  knownRawContextCeiling?: number
+  maximumContextWindow?: number
 ): string {
   const hasLargerMaximum = maximumContextWindow !== undefined && maximumContextWindow > activeRawContextWindow;
-  const hasLargerKnownCeiling = knownRawContextCeiling !== undefined
-    && knownRawContextCeiling > activeRawContextWindow
-    && (maximumContextWindow === undefined || knownRawContextCeiling > maximumContextWindow);
   const parts = [
     `Effective input budget: ${formatTokenCount(effectiveInputBudget)}`,
     `Raw context window: ${formatTokenCount(activeRawContextWindow)}${hasLargerMaximum ? ' (active)' : ''}`
@@ -476,10 +412,6 @@ function buildModelDetail(
 
   if (hasLargerMaximum) {
     parts.push(`Maximum context: ${formatTokenCount(maximumContextWindow)} (opt-in)`);
-  }
-
-  if (hasLargerKnownCeiling) {
-    parts.push(`Known raw context ceiling: ${formatTokenCount(knownRawContextCeiling)}`);
   }
 
   appendReasoningDetail(parts, reasoningOptions, defaultReasoningEffort);
@@ -512,11 +444,11 @@ function getContextSizeOptions(
   activeRawContextWindow: number,
   effectiveInputBudget: number,
   longRawContextWindow: number | undefined,
-  effectiveContextWindowPercent: number,
-  model: string
+  effectiveContextWindowPercent: number
 ): ContextSizeOption[] {
   const options: ContextSizeOption[] = [{
     value: effectiveInputBudget,
+    rawContextWindow: activeRawContextWindow,
     description: 'Default context size.'
   }];
 
@@ -531,9 +463,8 @@ function getContextSizeOptions(
 
   options.push({
     value: longEffectiveInputBudget,
-    description: isExperimentalLongContextProfile(model, longRawContextWindow)
-      ? 'Long context (Experimental).'
-      : 'Long context.'
+    rawContextWindow: longRawContextWindow,
+    description: 'Long context.'
   });
   return options;
 }
@@ -562,7 +493,7 @@ function buildModelConfigurationSchema(
       type: 'number',
       title: 'Context Size',
       enum: contextSizeOptions.map((option) => option.value),
-      enumItemLabels: contextSizeOptions.map((option) => formatContextSize(option.value)),
+      enumItemLabels: contextSizeOptions.map((option) => formatContextSize(option.rawContextWindow)),
       enumDescriptions: contextSizeOptions.map((option) => option.description),
       default: contextSizeOptions[0].value,
       group: 'tokens'
@@ -626,12 +557,11 @@ function isModelVisible(
 }
 
 function getPositiveInteger(value: unknown): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
     return undefined;
   }
 
-  const normalized = Math.floor(value);
-  return Number.isSafeInteger(normalized) && normalized > 0 ? normalized : undefined;
+  return value;
 }
 
 function toAbortSignal(token: vscode.CancellationToken): AbortSignal | undefined {

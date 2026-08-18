@@ -1370,7 +1370,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     logger.debug('getAvailableModels discovery success', {
       discoveredCount: upstreamModels.length,
       returnedCount: models.length,
-      requestModels: models.map((model) => model.requestModel)
+      models: models.map((model) => ({
+        requestModel: model.requestModel,
+        activeRawContextWindow: model.rawContextWindow,
+        maximumRawContextWindow: model.maximumRawContextWindow ?? null,
+        effectiveInputBudget: model.effectiveInputBudget,
+        maximumEffectiveInputBudget: model.info.maxInputTokens
+      }))
     });
     return { models, authoritative: true };
   }

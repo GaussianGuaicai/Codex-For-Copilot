@@ -363,11 +363,16 @@ async function runModelCatalogMetadataSmokeTest() {
       'long context is no longer a duplicate model profile'
     );
     assertEqual(gpt54Mini.info.maxInputTokens, 258400, 'GPT-5.4-Mini uses the default effective budget');
-    assertEqual(autoReview.info.maxInputTokens, 258400, 'Auto Review standard effective budget');
+    assertEqual(autoReview.info.maxInputTokens, 950000, 'Auto Review advertises the discovered maximum budget');
     assertEqual(
       autoReview.info.detail?.includes(`Maximum context: ${formattedMaximumContext} tokens (opt-in)`),
       true,
       'Auto Review maximum context detail'
+    );
+    assertEqual(
+      autoReview.info.configurationSchema?.properties?.contextSize?.enum.join(','),
+      '258400,950000',
+      'Auto Review uses the discovered maximum as a context-size selector'
     );
     assertEqual(spark.info.id, 'codex::gpt-5.3-codex-spark', 'Spark provider model id');
     assertEqual(spark.info.maxInputTokens, 121600, 'Spark standard effective budget');
@@ -419,6 +424,21 @@ async function runModelCatalogMetadataSmokeTest() {
     assertEqual(fractionalMetadata.info.maxInputTokens, 258400, 'fractional context below one uses effective fixed fallback');
     assertEqual(fractionalMetadata.info.detail?.includes('Maximum context:'), false, 'invalid fractional maximum is omitted');
 
+    for (const invalidMaximumContext of [undefined, 272000, 271999, 0.5, '872000', Number.POSITIVE_INFINITY]) {
+      const invalidMaximumModel = buildProviderModels(config, [
+        createMockModel('invalid-maximum', 'Invalid Maximum', {
+          context_window: 272000,
+          max_context_window: invalidMaximumContext
+        })
+      ], 'codexAccessToken')[0];
+      assertEqual(
+        invalidMaximumModel.info.configurationSchema?.properties?.contextSize,
+        undefined,
+        `invalid maximum ${String(invalidMaximumContext)} omits the context-size selector`
+      );
+      assertEqual(invalidMaximumModel.info.maxInputTokens, 258400, `invalid maximum ${String(invalidMaximumContext)} keeps the active budget`);
+    }
+
     const sparkFallback = buildFallbackModel({
       ...config,
       model: 'gpt-5.3-codex-spark'
@@ -441,13 +461,13 @@ async function runModelCatalogMetadataSmokeTest() {
       baseURL: 'https://chatgpt.com/backend-api/codex/responses'
     };
     const rollbackCatalog = [
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 272000, max_context_window: 272000 }),
-      createMockModel('gpt-5.6-terra', 'GPT-5.6-Terra', { context_window: 272000, max_context_window: 272000 }),
-      createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { context_window: 272000, max_context_window: 272000 }),
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.6-terra', 'GPT-5.6-Terra', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { context_window: 272000, max_context_window: 872000 }),
       createMockModel('gpt-5.6-nova', 'GPT-5.6-Nova', { context_window: 272000, max_context_window: 272000 })
     ];
     const rollbackModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'codexAccessToken');
-    const formattedKnownCeiling = (372000).toLocaleString();
+    const formattedGpt56MaximumContext = (872000).toLocaleString();
     assertEqual(rollbackModels.length, 4, 'eligible GPT-5.6 catalog keeps one model per backend model');
     for (const slug of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
       const resolvedModel = rollbackModels.find((candidate) => candidate.info.id === `codex::${slug}`);
@@ -456,13 +476,13 @@ async function runModelCatalogMetadataSmokeTest() {
         throw new Error(`Expected ${slug} metadata with a Context Size selector.`);
       }
       assertEqual(resolvedModel.effectiveInputBudget, 258400, `${slug} retains the default effective budget`);
-      assertEqual(resolvedModel.info.maxInputTokens, 353400, `${slug} advertises the maximum selectable budget`);
-      assertEqual(contextSize.enum.join(','), '258400,353400', `${slug} exposes standard and long context sizes`);
-      assertEqual(contextSize.enumDescriptions[1], 'Long context (Experimental).', `${slug} labels the known ceiling as experimental`);
+      assertEqual(resolvedModel.info.maxInputTokens, 828400, `${slug} advertises the maximum selectable budget`);
+      assertEqual(contextSize.enum.join(','), '258400,828400', `${slug} exposes standard and long context sizes`);
+      assertEqual(contextSize.enumDescriptions[1], 'Long context.', `${slug} labels the discovered maximum as long context`);
       assertEqual(
-        resolvedModel.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
+        resolvedModel.info.detail?.includes(`Maximum context: ${formattedGpt56MaximumContext} tokens (opt-in)`),
         true,
-        `${slug} shows known raw context ceiling`
+        `${slug} shows the discovered maximum context`
       );
       assertEqual(resolvedModel.info.maxOutputTokens, config.maxOutputTokens, `${slug} output metadata remains configured`);
       assertEqual(resolvedModel.info.detail?.includes('500,000'), false, `${slug} does not expose inferred total context`);
@@ -474,8 +494,8 @@ async function runModelCatalogMetadataSmokeTest() {
     );
 
     const duplicateGpt56Models = buildProviderModels(chatGptConfig, [
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol First', { context_window: 272000, max_context_window: 272000 }),
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol Second', { context_window: 272000, max_context_window: 272000 })
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol First', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol Second', { context_window: 272000, max_context_window: 872000 })
     ], 'codexAccessToken');
     assertEqual(
       duplicateGpt56Models.map((model) => model.info.id).join(','),
@@ -489,35 +509,24 @@ async function runModelCatalogMetadataSmokeTest() {
     );
 
     const unrelatedModel = rollbackModels.find((model) => model.info.id === 'codex::gpt-5.6-nova');
-    assertEqual(unrelatedModel?.info.detail?.includes('Known raw context ceiling:'), false, 'unrelated GPT-5.6 model is unchanged');
+    assertEqual(unrelatedModel?.info.configurationSchema?.properties?.contextSize, undefined, 'equal maximum omits the context-size selector');
     assertEqual(
-      rollbackModels.some((model) => model.info.id === 'codex::gpt-5.6-nova::context=372000'),
+      rollbackModels.some((model) => model.info.id.includes('::context=')),
       false,
-      'unlisted GPT-5.6 slug has no long profile'
+      'long context does not create synthetic model IDs'
     );
 
     const apiKeyModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'openaiApiKey');
     assertEqual(
-      apiKeyModels.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
-      false,
-      'API-key catalog omits Codex account ceilings'
+      apiKeyModels.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+      828400,
+      'API-key catalog uses a valid discovered maximum'
     );
-    assertEqual(
-      apiKeyModels.some((model) => model.info.id.includes('::context=')),
-      false,
-      'API-key catalog omits GPT-5.6 long profiles'
-    );
-
     const customBackendModels = buildProviderModels(config, rollbackCatalog, 'codexAccessToken');
     assertEqual(
-      customBackendModels.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
-      false,
-      'custom backend catalog omits ChatGPT Codex ceilings'
-    );
-    assertEqual(
-      customBackendModels.some((model) => model.info.id.includes('::context=')),
-      false,
-      'custom backend catalog omits GPT-5.6 long profiles'
+      customBackendModels.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+      828400,
+      'custom backend catalog uses a valid discovered maximum'
     );
 
     for (const baseURL of [
@@ -528,14 +537,9 @@ async function runModelCatalogMetadataSmokeTest() {
     ]) {
       const models = buildProviderModels({ ...chatGptConfig, baseURL }, rollbackCatalog, 'codexAccessToken');
       assertEqual(
-        models.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
-        false,
-        `noncanonical backend ${baseURL} omits known ceilings`
-      );
-      assertEqual(
-        models.some((model) => model.info.id.includes('::context=')),
-        false,
-        `noncanonical backend ${baseURL} omits long profiles`
+        models.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+        828400,
+        `backend ${baseURL} uses the valid discovered maximum`
       );
     }
 
@@ -543,10 +547,9 @@ async function runModelCatalogMetadataSmokeTest() {
       createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 372000, max_context_window: 372000 })
     ], 'codexAccessToken');
     const promotedModel = promotedModels[0];
-    assertEqual(promotedModel.info.maxInputTokens, 353400, 'future active 372K catalog value uses effective budget');
-    assertEqual(promotedModel.info.name.includes('(Experimental)'), false, 'active 372K catalog row is not a synthetic experimental profile');
-    assertEqual(promotedModel.info.detail?.includes('Known raw context ceiling:'), false, 'active 372K omits redundant known ceiling');
-    assertEqual(promotedModels.length, 1, 'active 372K catalog does not duplicate the long profile');
+    assertEqual(promotedModel.info.maxInputTokens, 353400, 'active 372K catalog value uses effective budget');
+    assertEqual(promotedModel.info.configurationSchema?.properties?.contextSize, undefined, 'equal active and maximum context omit the selector');
+    assertEqual(promotedModels.length, 1, 'active 372K catalog does not duplicate the model');
 
     const activeMillionModels = buildProviderModels(chatGptConfig, [
       createMockModel('gpt-5.4', 'GPT-5.4', { context_window: 1000000, max_context_window: 1000000 })
@@ -557,7 +560,7 @@ async function runModelCatalogMetadataSmokeTest() {
     const nearMatchModels = buildProviderModels(chatGptConfig, [
       createMockModel('gpt-5.4-preview', 'GPT-5.4 Preview', { context_window: 272000, max_context_window: 1000000 })
     ], 'codexAccessToken');
-    assertEqual(nearMatchModels.length, 1, 'non-exact GPT-5.4 slug has no long profile');
+    assertEqual(nearMatchModels[0].info.maxInputTokens, 950000, 'any model with a valid maximum receives the long-context budget');
 
     const fallbackCeiling = buildFallbackModel({
       ...chatGptConfig,
@@ -565,9 +568,9 @@ async function runModelCatalogMetadataSmokeTest() {
     }, 'codexAccessToken');
     assertEqual(fallbackCeiling.info.maxInputTokens, 258400, 'fallback keeps conservative effective budget');
     assertEqual(
-      fallbackCeiling.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
-      true,
-      'fallback shows known raw context ceiling'
+      fallbackCeiling.info.detail?.includes('Maximum context:'),
+      false,
+      'fallback omits unverified maximum context'
     );
     const percentageOverride = buildProviderModels(config, [
       createMockModel('percentage-override', 'Percentage Override', {
