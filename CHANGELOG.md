@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.6.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.5.1...v1.6.0) (2026-08-18)
+
+
+### Features
+
+* add native long context size picker ([#71](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/71)) ([511db0b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/511db0b86d0f85ca7871e7c52b2b13635580dc4b))
+
 ## [1.5.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.5.0...v1.5.1) (2026-08-15)
 
 
