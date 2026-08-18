@@ -603,6 +603,7 @@ async function streamCodexResponseTextOverManagedWebSocket(
       if (attempt === 0 && !visibleActivity && options.authManager && isUnauthorizedError(error)) {
         const currentSnapshot = await options.authManager.getCredentialSnapshot();
         const snapshot = await options.authManager.recoverFromUnauthorized({
+          accountKey: currentSnapshot.accountKey ?? '',
           snapshotRevision: currentSnapshot.revision,
           visibleActivity: false,
           reason: 'websocketUnauthorized'

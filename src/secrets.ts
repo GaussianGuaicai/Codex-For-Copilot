@@ -12,6 +12,8 @@ export interface ApiCredentials {
   headers: Record<string, string>;
   source: 'secretStorage' | 'codexAuth';
   authManager?: CodexAuthManager;
+  /** Codex account the credentials belong to (SecretStore account key). */
+  accountKey?: string;
   kind: 'codexAccessToken' | 'openaiApiKey';
   omitMaxOutputTokens: boolean;
 }
@@ -60,6 +62,7 @@ async function readCodexAuthCredentials(authManager?: CodexAuthManager): Promise
         headers,
         source: 'codexAuth',
         authManager,
+        accountKey: snapshot.accountKey,
         kind: 'codexAccessToken',
         omitMaxOutputTokens: true
       };
@@ -123,4 +126,26 @@ async function readSecretStorageCredentials(context: vscode.ExtensionContext): P
   }
 
   return undefined;
+}
+
+/** Build Codex access-token credentials for one account, refreshing that account's token if needed. */
+export async function getCodexCredentialsForAccount(authManager: CodexAuthManager, accountKey: string): Promise<ApiCredentials | undefined> {
+  try {
+    const snapshot = await authManager.getCredentialSnapshot(accountKey);
+    const headers: Record<string, string> = { 'User-Agent': DEFAULT_USER_AGENT };
+    if (snapshot.accountId?.trim()) {
+      headers['ChatGPT-Account-ID'] = snapshot.accountId.trim();
+    }
+    return {
+      apiKey: snapshot.accessToken,
+      headers,
+      source: 'codexAuth',
+      authManager,
+      accountKey,
+      kind: 'codexAccessToken',
+      omitMaxOutputTokens: true
+    };
+  } catch {
+    return undefined;
+  }
 }

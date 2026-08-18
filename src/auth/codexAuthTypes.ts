@@ -53,6 +53,7 @@ export interface CodexCredentialSnapshot {
   source: CodexCredentialSource | 'openaiApiKey';
   accessToken: string;
   accountId?: string;
+  accountKey?: string;
   expiresAt?: number;
   revision: string;
   refreshable: boolean;
@@ -60,6 +61,7 @@ export interface CodexCredentialSnapshot {
 
 export interface CodexAuthStatus {
   authenticated: boolean;
+  accountKey?: string;
   source?: CodexCredentialSource;
   email?: string;
   accountId?: string;
@@ -68,8 +70,9 @@ export interface CodexAuthStatus {
   reauthRequired?: boolean;
 }
 
-export type CodexAuthChangeReason = 'signedIn' | 'tokensRefreshed' | 'reauthRequired' | 'signedOut' | 'accountChanged';
-export interface CodexAuthChangeEvent { reason: CodexAuthChangeReason; revision?: string; }
+/** Fine-grained auth change reasons, carrying the account and credential revision affected. */
+export type CodexAuthChangeReason = 'signedIn' | 'tokensRefreshed' | 'reauthRequired' | 'signedOut' | 'activeAccountChanged';
+export interface CodexAuthChangeEvent { reason: CodexAuthChangeReason; accountKey?: string; revision?: string; }
 
 export class AuthRequiredError extends Error {
   constructor(message = 'Sign in with ChatGPT or configure an API key.') { super(message); this.name = 'AuthRequiredError'; }

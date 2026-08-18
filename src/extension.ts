@@ -52,12 +52,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   void vscode.workspace.fs.createDirectory(context.globalStorageUri);
   const authManager = new CodexAuthManager(
     new CodexSecretStore(context.secrets),
-    new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, 'codex-auth-refresh.lock')),
+    (accountKey) => new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, `codex-auth-refresh.${sanitizeLockKey(accountKey)}.lock`)),
     undefined,
     logger.child('auth')
   );
   const authenticationProvider = new CodexAuthenticationProvider(authManager);
-  const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, logger.child('account-usage'), authManager);
+  const accountUsageStatusBar = new CodexAccountUsageStatusBar(logger.child('account-usage'), authManager);
   const provider = new CodexModelProvider(context, logger.child('provider'), undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
 
   context.subscriptions.push(authManager, authManager.onDidChangeAuth((event) => {
@@ -74,7 +74,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       CODEX_AUTHENTICATION_PROVIDER_ID,
       'Codex for Copilot',
       authenticationProvider,
-      { supportsMultipleAccounts: false }
+      { supportsMultipleAccounts: true }
     ),
     vscode.lm.registerLanguageModelChatProvider('codex-for-copilot', provider),
     vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
@@ -104,21 +104,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage('Responses API key cleared.');
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.importAuthJson', async () => {
-      const selected = await vscode.window.showOpenDialog({
-        title: 'Import Codex auth.json',
-        canSelectFiles: true,
-        canSelectFolders: false,
-        canSelectMany: false,
-        filters: { JSON: ['json'] }
-      });
-      const uri = selected?.[0];
-      if (!uri) {
-        return;
-      }
       try {
-        const raw = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
-        await authManager.importAuthJson(raw);
-        const status = await authManager.getStatus();
+        const accountKey = await importCodexAuthJsonInteractive(authManager);
+        if (!accountKey) {
+          return;
+        }
+        const status = await authManager.getStatus(accountKey);
         const suffix = status.email ? ` for ${status.email}` : '';
         vscode.window.showInformationMessage(`Codex credentials imported${suffix}.`);
       } catch (error) {
@@ -128,9 +119,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.signOut', async () => {
-      await authManager.signOut();
-      logger.child('command').info('auth.sign-out.completed');
-      vscode.window.showInformationMessage('Codex credentials removed.');
+      const accounts = await authManager.listAccounts();
+      if (accounts.length === 0) {
+        vscode.window.showInformationMessage('No Codex accounts are signed in.');
+        return;
+      }
+      await authManager.signOutAll();
+      logger.child('command').info('auth.sign-out.completed', { count: accounts.length });
+      vscode.window.showInformationMessage(accounts.length > 1 ? `Signed out of all ${accounts.length} Codex accounts.` : 'Codex credentials removed.');
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.signInWithChatGPT', async () => {
       try {
@@ -160,6 +156,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand('codexModelProvider.refreshAccountLimits', async () => {
       await accountUsageStatusBar.refresh();
+      await accountUsageStatusBar.showDetails();
+    }),
+    vscode.commands.registerCommand('codexModelProvider.showAccountLimits', async () => {
       await accountUsageStatusBar.showDetails();
     }),
     vscode.commands.registerCommand('codexModelProvider.enableNativeToolSearch', () => enableNativeToolSearchGroupingBridge(context)),
@@ -194,19 +193,75 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.commands.executeCommand('workbench.action.openSettings', 'codexModelProvider.nativeToolSearch');
       }
     }),
+    vscode.commands.registerCommand('codexForCopilot.auth.switchAccount', async () => {
+      const picked = await pickAccount(authManager, 'Switch Codex Account', 'Choose which account new chat requests use.');
+      if (!picked) return;
+      await authManager.switchAccount(picked.accountKey);
+      logger.child('command').info('auth.switched', { accountKey: picked.accountKey });
+      vscode.window.showInformationMessage(`Active Codex account switched to ${picked.email ?? picked.accountId ?? picked.accountKey}.`);
+    }),
+    vscode.commands.registerCommand('codexForCopilot.auth.removeAccount', async () => {
+      const picked = await pickAccount(authManager, 'Remove Codex Account', 'Choose an account to remove (its credentials will be deleted).');
+      if (!picked) return;
+      const label = picked.email ?? picked.accountId ?? picked.accountKey;
+      const confirm = await vscode.window.showWarningMessage(`Remove Codex account ${label}?`, { modal: true }, 'Remove');
+      if (confirm !== 'Remove') return;
+      await authManager.signOut(picked.accountKey);
+      logger.child('command').info('auth.removed', { accountKey: picked.accountKey });
+      vscode.window.showInformationMessage(`Codex account ${label} removed.`);
+    }),
+    vscode.commands.registerCommand('codexForCopilot.auth.addAccount', async () => {
+      const method = await vscode.window.showQuickPick(
+        [
+          { label: 'Sign in with ChatGPT', description: 'Open the ChatGPT website in your browser', id: 'browser' as const },
+          { label: 'Sign in with Device Code', description: 'Authorize with a one-time device code', id: 'device' as const },
+          { label: 'Import Codex auth.json', description: 'Load credentials from an exported auth.json file', id: 'import' as const }
+        ],
+        { title: 'Add Codex Account', placeHolder: 'Choose how to sign in to the new account' }
+      );
+      if (!method) {
+        return;
+      }
+      try {
+        let accountKey: string | undefined;
+        if (method.id === 'browser') {
+          accountKey = await authManager.signInWithBrowser();
+        } else if (method.id === 'device') {
+          accountKey = await authManager.signInWithDeviceCode();
+        } else {
+          accountKey = await importCodexAuthJsonInteractive(authManager);
+          if (!accountKey) {
+            return;
+          }
+        }
+        await authManager.switchAccount(accountKey);
+        const status = await authManager.getStatus(accountKey);
+        vscode.window.showInformationMessage(`Added Codex account${status.email ? ` ${status.email}` : ''} and set it active.`);
+      } catch (error) {
+        logger.child('command').error('auth.add-account.failed', error);
+        const message = error instanceof InvalidAuthJsonError ? error.message : (error instanceof Error ? error.message : 'Adding a Codex account failed.');
+        vscode.window.showErrorMessage(message);
+      }
+    }),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json', 'Refresh Account Limits', 'Enable Native Tool Search', 'Use VS Code Virtual Tool Groups', 'Show Native Tool Search Status', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Sign in with ChatGPT', 'Add Codex Account', 'Switch Codex Account', 'Remove Codex Account', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out (All Accounts)', 'Import Codex auth.json', 'Refresh Account Limits', 'Enable Native Tool Search', 'Use VS Code Virtual Tool Groups', 'Show Native Tool Search Status', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex' }
       );
 
       if (action === 'Sign in with ChatGPT') {
         await vscode.commands.executeCommand('codexForCopilot.auth.signInWithChatGPT');
+      } else if (action === 'Add Codex Account') {
+        await vscode.commands.executeCommand('codexForCopilot.auth.addAccount');
+      } else if (action === 'Switch Codex Account') {
+        await vscode.commands.executeCommand('codexForCopilot.auth.switchAccount');
+      } else if (action === 'Remove Codex Account') {
+        await vscode.commands.executeCommand('codexForCopilot.auth.removeAccount');
       } else if (action === 'Import Codex auth.json') {
         await vscode.commands.executeCommand('codexForCopilot.auth.importAuthJson');
       } else if (action === 'Show Auth Status') {
         await vscode.commands.executeCommand('codexForCopilot.auth.showStatus');
-      } else if (action === 'Sign Out') {
+      } else if (action === 'Sign Out (All Accounts)') {
         await vscode.commands.executeCommand('codexForCopilot.auth.signOut');
       } else if (action === 'Sign in with Device Code') {
         await vscode.commands.executeCommand('codexForCopilot.auth.signInWithDeviceCode');
@@ -249,4 +304,45 @@ function formatNativeToolSearchReason(reason: string): string {
 
 function formatSettingValue(value: unknown): string {
   return value === undefined ? 'default' : String(value);
+}
+
+function sanitizeLockKey(accountKey: string): string {
+  return accountKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+/** Prompt for an auth.json file and import it, returning the new account key (or undefined if cancelled). */
+async function importCodexAuthJsonInteractive(authManager: CodexAuthManager): Promise<string | undefined> {
+  const selected = await vscode.window.showOpenDialog({
+    title: 'Import Codex auth.json',
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: false,
+    filters: { JSON: ['json'] }
+  });
+  const uri = selected?.[0];
+  if (!uri) {
+    return undefined;
+  }
+  const raw = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+  return authManager.importAuthJson(raw);
+}
+
+async function pickAccount(
+  authManager: CodexAuthManager,
+  title: string,
+  placeHolder: string
+): Promise<{ accountKey: string; email?: string; accountId?: string; isActive: boolean } | undefined> {
+  const accounts = await authManager.listAccounts();
+  if (accounts.length === 0) {
+    vscode.window.showInformationMessage('No Codex accounts are configured. Use "Add Codex Account" to sign in.');
+    return undefined;
+  }
+  const items = accounts.map((account) => ({
+    label: `${account.isActive ? '$(check) ' : ''}${account.email ?? account.accountId ?? account.accountKey}`,
+    description: account.isActive ? 'active' : (account.accountId ?? ''),
+    detail: account.reauthRequired ? 'Re-authentication required' : undefined,
+    account
+  }));
+  const picked = await vscode.window.showQuickPick(items, { title, placeHolder, matchOnDescription: true });
+  return picked?.account;
 }

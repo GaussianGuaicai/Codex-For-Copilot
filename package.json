@@ -95,6 +95,10 @@
         "title": "Codex: Refresh Account Limits"
       },
       {
+        "command": "codexModelProvider.showAccountLimits",
+        "title": "Codex: Show Account Limits"
+      },
+      {
         "command": "codexForCopilot.auth.signInWithChatGPT",
         "title": "Codex for Copilot: Sign in with ChatGPT"
       },
@@ -116,7 +120,19 @@
       },
       {
         "command": "codexForCopilot.auth.signOut",
-        "title": "Codex for Copilot: Sign Out"
+        "title": "Codex for Copilot: Sign Out (All Accounts)"
+      },
+      {
+        "command": "codexForCopilot.auth.addAccount",
+        "title": "Codex for Copilot: Add Codex Account"
+      },
+      {
+        "command": "codexForCopilot.auth.switchAccount",
+        "title": "Codex for Copilot: Switch Codex Account"
+      },
+      {
+        "command": "codexForCopilot.auth.removeAccount",
+        "title": "Codex for Copilot: Remove Codex Account"
       },
       {
         "command": "codexForCopilot.auth.showStatus",

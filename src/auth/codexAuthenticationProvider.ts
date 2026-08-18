@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { CODEX_OAUTH } from './codexOAuthCompatibility';
 import { CodexAuthManager } from './codexAuthManager';
-import type { CodexAuthChangeEvent, CodexAuthStatus, CodexCredentialSnapshot } from './codexAuthTypes';
+import type { CodexAuthChangeEvent, CodexCredentialSnapshot } from './codexAuthTypes';
 
 export const CODEX_AUTHENTICATION_PROVIDER_ID = 'codex-for-copilot';
 
@@ -10,7 +10,8 @@ const supportedScopes = CODEX_OAUTH.scopes.split(' ');
 export class CodexAuthenticationProvider implements vscode.AuthenticationProvider, vscode.Disposable {
   private readonly sessionChanges = new vscode.EventEmitter<vscode.AuthenticationProviderAuthenticationSessionsChangeEvent>();
   private readonly authChangeSubscription: vscode.Disposable;
-  private currentSession: vscode.AuthenticationSession | undefined;
+  /** Sessions as last reported to VS Code, keyed by session id. */
+  private knownSessions = new Map<string, vscode.AuthenticationSession>();
 
   readonly onDidChangeSessions = this.sessionChanges.event;
 
@@ -24,9 +25,9 @@ export class CodexAuthenticationProvider implements vscode.AuthenticationProvide
     if (scopes && !supportsRequestedScopes(scopes)) {
       return [];
     }
-    const session = await this.getCurrentSession();
-    this.currentSession = session;
-    return session ? [session] : [];
+    const sessions = await this.getAllSessions();
+    this.knownSessions = new Map(sessions.map((session) => [session.id, session]));
+    return sessions;
   }
 
   async createSession(scopes: readonly string[], _options: vscode.AuthenticationProviderSessionOptions): Promise<vscode.AuthenticationSession> {
@@ -34,20 +35,20 @@ export class CodexAuthenticationProvider implements vscode.AuthenticationProvide
       throw new Error('Codex for Copilot does not support the requested authentication scopes.');
     }
     await this.authManager.signInWithBrowser();
-    const session = await this.getCurrentSession();
+    const sessions = await this.getAllSessions();
+    const session = sessions.find((candidate) => !this.knownSessions.has(candidate.id)) ?? sessions.at(-1);
     if (!session) {
       throw new Error('ChatGPT sign-in completed without creating a credential session.');
     }
-    this.currentSession = session;
     return session;
   }
 
   async removeSession(sessionId: string): Promise<void> {
-    const session = await this.getCurrentSession();
-    if (!session || session.id !== sessionId) {
+    const session = this.knownSessions.get(sessionId) ?? await this.findSessionById(sessionId);
+    if (!session) {
       throw new Error('The requested Codex for Copilot authentication session does not exist.');
     }
-    await this.authManager.signOut();
+    await this.authManager.signOut(session.account.id);
   }
 
   dispose(): void {
@@ -55,37 +56,42 @@ export class CodexAuthenticationProvider implements vscode.AuthenticationProvide
     this.sessionChanges.dispose();
   }
 
-  private async handleAuthenticationChange(event: CodexAuthChangeEvent): Promise<void> {
-    const previousSession = this.currentSession;
-    const nextSession = event.reason === 'signedOut' || event.reason === 'reauthRequired'
-      ? undefined
-      : await this.getCurrentSession();
-    this.currentSession = nextSession;
+  private async handleAuthenticationChange(_event: CodexAuthChangeEvent): Promise<void> {
+    // Recompute the full session set and diff against what VS Code last saw.
+    const previous = this.knownSessions;
+    const nextSessions = await this.getAllSessions();
+    const next = new Map(nextSessions.map((session) => [session.id, session]));
+    this.knownSessions = next;
 
-    if (!previousSession && nextSession) {
-      this.sessionChanges.fire({ added: [nextSession], removed: [], changed: [] });
-    } else if (previousSession && !nextSession) {
-      this.sessionChanges.fire({ added: [], removed: [previousSession], changed: [] });
-    } else if (previousSession && nextSession) {
-      if (previousSession.id === nextSession.id) {
-        this.sessionChanges.fire({ added: [], removed: [], changed: [nextSession] });
-      } else {
-        this.sessionChanges.fire({ added: [nextSession], removed: [previousSession], changed: [] });
-      }
+    const added = nextSessions.filter((session) => !previous.has(session.id));
+    const removed = [...previous.values()].filter((session) => !next.has(session.id));
+    const changed = nextSessions.filter((session) => {
+      const prior = previous.get(session.id);
+      return prior !== undefined && prior.accessToken !== session.accessToken;
+    });
+
+    if (added.length || removed.length || changed.length) {
+      this.sessionChanges.fire({ added, removed, changed });
     }
   }
 
-  private async getCurrentSession(): Promise<vscode.AuthenticationSession | undefined> {
-    const status = await this.authManager.getStatus();
-    if (!status.authenticated) {
-      return undefined;
+  private async findSessionById(sessionId: string): Promise<vscode.AuthenticationSession | undefined> {
+    const sessions = await this.getAllSessions();
+    return sessions.find((session) => session.id === sessionId);
+  }
+
+  private async getAllSessions(): Promise<vscode.AuthenticationSession[]> {
+    const accounts = await this.authManager.listAccounts();
+    const sessions: vscode.AuthenticationSession[] = [];
+    for (const account of accounts) {
+      try {
+        const snapshot = await this.authManager.getCredentialSnapshot(account.accountKey);
+        sessions.push(toAuthenticationSession(account, snapshot));
+      } catch {
+        // Skip accounts whose credentials can no longer be read.
+      }
     }
-    try {
-      const snapshot = await this.authManager.getCredentialSnapshot();
-      return toAuthenticationSession(status, snapshot);
-    } catch {
-      return undefined;
-    }
+    return sessions;
   }
 }
 
@@ -93,14 +99,14 @@ function supportsRequestedScopes(scopes: readonly string[]): boolean {
   return scopes.every((scope) => supportedScopes.includes(scope));
 }
 
-function toAuthenticationSession(status: CodexAuthStatus, snapshot: CodexCredentialSnapshot): vscode.AuthenticationSession {
-  const accountId = snapshot.accountId ?? status.email ?? snapshot.source;
+function toAuthenticationSession(account: { accountKey: string; source: string; email?: string; accountId?: string }, snapshot: CodexCredentialSnapshot): vscode.AuthenticationSession {
+  const label = account.email ?? account.accountId ?? 'ChatGPT';
   return {
-    id: `${snapshot.source}:${accountId}`,
+    id: `${account.source}:${account.accountKey}`,
     accessToken: snapshot.accessToken,
     account: {
-      id: accountId,
-      label: status.email ?? 'ChatGPT'
+      id: account.accountKey,
+      label
     },
     scopes: supportedScopes
   };
