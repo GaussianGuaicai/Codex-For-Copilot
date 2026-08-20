@@ -4,6 +4,7 @@ import { performance } from 'node:perf_hooks';
 import type { ResponseUsage } from 'openai/resources/responses/responses';
 import {
   compareResponsesInputHistory,
+  createStatefulMarkerPayload,
   convertMessagesToResponsesInput,
   convertMessagesToResponsesInputWithStatefulMarker,
   estimateTokenCount,
@@ -1152,7 +1153,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     const finalResponseId = completedResponseId;
-    if (finalResponseId) {
+    const statefulMarkerPayload = finalResponseId
+      ? createStatefulMarkerPayload(model.id, finalResponseId)
+      : undefined;
+    if (finalResponseId && statefulMarkerPayload) {
       const recordedInput = markerCanonicalReplayInput ?? input;
       const builtFullRequest = buildCodexResponsesRequest({
         ...requestOptions,
@@ -1193,8 +1197,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         branchState
       );
       if (!token.isCancellationRequested && !this.responseBranchStore.isReuseDisabled(reuseEnvelope)) {
-        progress.report(createStatefulMarkerDataPart(model.id, finalResponseId));
+        progress.report(createStatefulMarkerDataPart(statefulMarkerPayload));
       }
+    } else if (finalResponseId) {
+      requestLogger.warn('response continuation metadata rejected', {
+        requestModel: selectedModel.requestModel
+      });
     }
   }
 
@@ -2058,9 +2066,9 @@ function createUsageDataPart(usage: ResponseUsage | null | undefined): vscode.La
   ) as vscode.LanguageModelResponsePart;
 }
 
-function createStatefulMarkerDataPart(modelId: string, previousResponseId: string): vscode.LanguageModelResponsePart {
+function createStatefulMarkerDataPart(payload: string): vscode.LanguageModelResponsePart {
   return vscode.LanguageModelDataPart.text(
-    `${modelId}\\${previousResponseId}`,
+    payload,
     STATEFUL_MARKER_DATA_PART_MIME
   ) as vscode.LanguageModelResponsePart;
 }

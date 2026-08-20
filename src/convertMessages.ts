@@ -517,6 +517,17 @@ function parseStatefulMarker(part: vscode.LanguageModelDataPart): {
   return { modelId, previousResponseId };
 }
 
+export function createStatefulMarkerPayload(modelId: string, previousResponseId: string): string | undefined {
+  if (modelId.includes('\\')
+    || !isValidStatefulMarkerComponent(modelId, MAX_STATEFUL_MARKER_MODEL_ID_BYTES)
+    || !isValidStatefulMarkerComponent(previousResponseId, MAX_STATEFUL_MARKER_RESPONSE_ID_BYTES)) {
+    return undefined;
+  }
+
+  const payload = `${modelId}\\${previousResponseId}`;
+  return Buffer.byteLength(payload, 'utf8') <= MAX_STATEFUL_MARKER_BYTES ? payload : undefined;
+}
+
 function isValidStatefulMarkerComponent(value: string, maxBytes: number): boolean {
   return value.length > 0
     && value.trim() === value

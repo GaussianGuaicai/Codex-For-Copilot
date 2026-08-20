@@ -193,6 +193,7 @@ try {
   await runStatefulMarkerToolOutputReplaySmokeTest();
   await runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest();
   await runStatefulMarkerRecordFailureSmokeTest();
+  await runStatefulMarkerInvalidCompletionIdSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
   await runStructuredHttpContinuationRecoverySmokeTest();
   await runContinuationMissAfterVisibleOutputSmokeTest();
@@ -1841,6 +1842,94 @@ async function runStatefulMarkerRecordFailureSmokeTest() {
 
     assertEqual(failureMessage, 'Synthetic branch record failure', 'branch record failure is surfaced');
     assertEqual(getStatefulMarkers(parts).length, 0, 'branch record failure emits no stateful marker');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerInvalidCompletionIdSmokeTest() {
+  const responseRequests = [];
+  const responseIds = ['resp_invalid\u0001', 'r'.repeat(513), 'resp_valid_after_invalid'];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const responseId = responseIds[responseRequests.length - 1];
+    if (!responseId) {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Unexpected invalid completion-id request.' } }));
+      return;
+    }
+    writeSseResponseWithOutputItem(
+      response,
+      `reply ${responseRequests.length}`,
+      responseId,
+      `msg_invalid_completion_${responseRequests.length}`
+    );
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for invalid completion-id coverage.');
+    }
+
+    const messages = [];
+    for (let index = 0; index < responseIds.length; index += 1) {
+      messages.push({
+        role: vscodeMock.LanguageModelChatMessageRole.User,
+        content: [new vscodeMock.LanguageModelTextPart(`request ${index + 1}`)]
+      });
+      const parts = [];
+      await provider.provideLanguageModelChatResponse(
+        model,
+        messages,
+        {},
+        { report(part) { parts.push(part); } },
+        token
+      );
+      assertEqual(
+        getStatefulMarkers(parts).length,
+        index === responseIds.length - 1 ? 1 : 0,
+        `completion id ${index + 1} marker count`
+      );
+      if (index < responseIds.length - 1) {
+        messages.push({
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelTextPart(`reply ${index + 1}`)]
+        });
+      }
+    }
+
+    assertEqual(responseRequests.length, 3, 'invalid completion IDs do not cause retries');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'control-bearing response ID is not recorded');
+    assertEqual('previous_response_id' in responseRequests[2], false, 'oversized response ID is not recorded');
   } finally {
     await closeServer(server);
   }
