@@ -1881,7 +1881,11 @@ function resolveConfiguredContextSize(
     return fallbackBudget;
   }
 
-  for (const candidate of [options.modelConfiguration?.contextSize, options.configuration?.contextSize]) {
+  for (const candidate of [
+    options.modelOptions?.contextSize,
+    options.modelConfiguration?.contextSize,
+    options.configuration?.contextSize
+  ]) {
     if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && contextSizeSchema.options.includes(candidate)) {
       return candidate;
     }
