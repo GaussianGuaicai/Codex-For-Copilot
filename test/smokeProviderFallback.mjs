@@ -737,7 +737,7 @@ async function runProviderLongContextSelectionSmokeTest() {
         { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
         { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
       ],
-      { modelConfiguration: { contextSize: 950000 } },
+      { modelOptions: { contextSize: 950000 } },
       { report() {} },
       token
     );
