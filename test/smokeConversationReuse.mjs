@@ -378,6 +378,37 @@ function runStatefulMarkerBranchStoreSmokeTest(ResponseBranchStore) {
   assertEqual(exactMatch?.comparison.matchedPrefixCount, 0, 'marker lookup does not require historical prefix');
   assertEqual(JSON.stringify(exactMatch?.comparison.appendedInput), JSON.stringify(currentInput), 'exact marker returns complete delta');
 
+  const continuedBranchId = store.recordSuccess(
+    envelope,
+    currentInput,
+    'resp_marker_continued',
+    branchId,
+    createCompletedBranchState(envelope, currentInput, 'resp_marker_continued')
+  );
+  assertEqual(continuedBranchId === branchId, false, 'continuation creates a new immutable marker anchor');
+  assertEqual(store.findReusableBranch(envelope, currentInput, {
+    responseId: 'resp_marker_exact',
+    incrementalInput: currentInput
+  })?.branchId, branchId, 'older emitted marker remains reusable after continuation');
+  const siblingInput = [{ type: 'message', role: 'user', content: 'sibling follow up' }];
+  const siblingBranchId = store.recordSuccess(
+    envelope,
+    siblingInput,
+    'resp_marker_sibling',
+    branchId,
+    createCompletedBranchState(envelope, siblingInput, 'resp_marker_sibling')
+  );
+  assertEqual(siblingBranchId === branchId || siblingBranchId === continuedBranchId, false, 'same-anchor sibling continuation gets an independent branch');
+  assertEqual(store.findReusableBranch(envelope, siblingInput, {
+    responseId: 'resp_marker_exact',
+    incrementalInput: siblingInput
+  })?.branchId, branchId, 'source marker survives sibling continuation recording');
+  const nextInput = [{ type: 'message', role: 'user', content: 'continue from child' }];
+  assertEqual(store.findReusableBranch(envelope, nextInput, {
+    responseId: 'resp_marker_continued',
+    incrementalInput: nextInput
+  })?.branchId, continuedBranchId, 'new continuation marker resolves independently');
+
   const alternateInput = [{ type: 'message', role: 'user', content: 'alternate seed' }];
   store.recordSuccess(envelope, alternateInput, 'resp_marker_alternate');
   assertEqual(store.findReusableBranch(envelope, currentInput, {

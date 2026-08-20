@@ -85,6 +85,7 @@ interface ResponseBranchEntry {
   responseId: string;
   state?: CodexBranchState;
   updatedAt: number;
+  supersededForHistoryReuse?: boolean;
 }
 
 export class ResponseBranchStore {
@@ -120,7 +121,8 @@ export class ResponseBranchStore {
     } | undefined;
 
     for (const branch of this.branches.values()) {
-      if (branch.envelope.identityKey !== envelope.identityKey
+      if (branch.supersededForHistoryReuse
+        || branch.envelope.identityKey !== envelope.identityKey
         || !hasMatchingRequestFingerprint(branch, envelope)
         || !hasCompatibleInputBudget(branch.envelope.effectiveInputBudget, envelope.effectiveInputBudget)) {
         continue;
@@ -207,7 +209,7 @@ export class ResponseBranchStore {
     let bestDiagnostic: ResponseBranchReuseMissDiagnostic | undefined;
 
     for (const branch of this.branches.values()) {
-      if (branch.envelope.scopeKey !== envelope.scopeKey) {
+      if (branch.supersededForHistoryReuse || branch.envelope.scopeKey !== envelope.scopeKey) {
         continue;
       }
 
@@ -253,7 +255,7 @@ export class ResponseBranchStore {
 
     if (branchId) {
       const existing = this.branches.get(branchId);
-      if (existing) {
+      if (existing?.responseId === responseId) {
         existing.envelope = envelope;
         existing.input = [...currentInput];
         existing.continuationInput = continuationInput;
@@ -261,6 +263,9 @@ export class ResponseBranchStore {
         existing.state = state ? cloneBranchState(state) : existing.state;
         existing.updatedAt = Date.now();
         return existing.id;
+      }
+      if (existing) {
+        existing.supersededForHistoryReuse = true;
       }
     }
 
@@ -270,7 +275,9 @@ export class ResponseBranchStore {
       }
 
       const comparison = compareResponsesInputHistory(branch.continuationInput, continuationInput);
-      if (comparison.kind === 'append' && comparison.appendedInput.length === 0) {
+      if (branch.responseId === responseId
+        && comparison.kind === 'append'
+        && comparison.appendedInput.length === 0) {
         branch.input = [...currentInput];
         branch.continuationInput = continuationInput;
         branch.responseId = responseId;
@@ -278,6 +285,9 @@ export class ResponseBranchStore {
         branch.state = state ? cloneBranchState(state) : branch.state;
         branch.updatedAt = Date.now();
         return branch.id;
+      }
+      if (comparison.kind === 'append' && comparison.appendedInput.length === 0) {
+        branch.supersededForHistoryReuse = true;
       }
     }
 
