@@ -16,6 +16,7 @@ import {
   restoreVSCodeToolGrouping
 } from './nativeToolSearch/nativeToolGroupingBridge';
 import { getNativeToolSearchRuntimeStatus } from './nativeToolSearch/nativeToolSearchStatus';
+import { getLastEffectiveCodexProtocol } from './codexProtocol';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
@@ -194,9 +195,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.commands.executeCommand('workbench.action.openSettings', 'codexModelProvider.nativeToolSearch');
       }
     }),
+    vscode.commands.registerCommand('codexModelProvider.showEffectiveProtocol', () => {
+      const diagnostic = getLastEffectiveCodexProtocol();
+      if (!diagnostic) {
+        void vscode.window.showInformationMessage('No Codex-compatible request has run since this extension activated.');
+        return;
+      }
+      logger.info('protocol.effective', { ...diagnostic });
+      outputChannel.show(true);
+    }),
     vscode.commands.registerCommand('codexModelProvider.manage', async () => {
       const action = await vscode.window.showQuickPick(
-        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json', 'Refresh Account Limits', 'Enable Native Tool Search', 'Use VS Code Virtual Tool Groups', 'Show Native Tool Search Status', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
+        ['Sign in with ChatGPT', 'Sign in with Device Code', 'Show Auth Status', 'Sign Out', 'Import Codex auth.json', 'Refresh Account Limits', 'Enable Native Tool Search', 'Use VS Code Virtual Tool Groups', 'Show Native Tool Search Status', 'Show Effective Protocol', 'Open Debug Logs', 'Set API Key', 'Clear API Key', 'Open Settings'],
         { title: 'Codex' }
       );
 
@@ -218,6 +228,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.commands.executeCommand('codexModelProvider.restoreVSCodeToolGrouping');
       } else if (action === 'Show Native Tool Search Status') {
         await vscode.commands.executeCommand('codexModelProvider.showNativeToolSearchStatus');
+      } else if (action === 'Show Effective Protocol') {
+        await vscode.commands.executeCommand('codexModelProvider.showEffectiveProtocol');
       } else if (action === 'Open Debug Logs') {
         await vscode.commands.executeCommand('codexModelProvider.openDebugLogs');
       } else if (action === 'Set API Key') {

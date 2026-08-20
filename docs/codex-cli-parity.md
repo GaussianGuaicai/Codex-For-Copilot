@@ -3,7 +3,7 @@
 Protocol baseline:
 
 - Codex For Copilot: `2987db25dc15b79cd22dc2ccc08f4c44b7db1351`
-- `openai/codex`: `72b41c55fb32f62373e070d6ac0cde7ba563989b`
+- `openai/codex`: `711a5f8b3a6eb40134146ae9ec22fdcdda5e3170`
 - WebSocket beta: `responses_websockets=2026-02-06`
 
 ## Baseline checklist
@@ -31,7 +31,11 @@ Protocol baseline:
 
 Protocol constants are centralized in `src/codexProtocol.ts` and carry the upstream commit reference.
 
-The final upstream recheck found no changes between the initial `4df8027a…` snapshot and `72b41c55…` in the inspected Responses transport, request, metadata, or header files.
+The current baseline follows upstream `CodexResponsesMetadata`: the full turn
+metadata object is canonical in `client_metadata["x-codex-turn-metadata"]`, while
+flat client metadata and direct HTTP/WebSocket headers are compatibility
+projections. The direct turn-metadata header deliberately excludes
+`tool_namespaces_info`, whose size is bounded only by the selected tool catalog.
 
 ## Implemented
 
@@ -41,6 +45,27 @@ The final upstream recheck found no changes between the initial `4df8027a…` sn
 - Per-session automatic HTTP fallback, bounded connection/capability caches, connection-limit retry, continuation recovery without duplicate visible output, and credential/config invalidation.
 - SDK custom-fetch timing and optional Zstandard request compression with one safe uncompressed retry.
 - Focused protocol, identity, request, turn, HTTP, WebSocket, fallback, and compression smoke tests plus an opt-in real-backend benchmark.
+- Canonical metadata snapshots with agent name, turn start time, parent/root turn
+  hierarchy, and Native Tool Search namespace/function inventory.
+- Safe user overrides for headers, flat client metadata, and turn metadata;
+  credentials, transport invariants, WebSocket security fields, and Turn State
+  remain protected. `Codex: Show Effective Protocol` writes a redacted view of
+  the most recent effective projection to the extension log.
+
+## Protocol profiles and overrides
+
+`codexModelProvider.protocolProfile` defaults to `auto`. `auto` and
+`codexCompatible` enable the Codex projection only for the official ChatGPT Codex
+endpoint with Codex credentials; `minimal` disables it. `custom` is an explicit
+opt-in for HTTPS-compatible gateways.
+
+Overrides are applied to the canonical snapshot before the body/header
+projections are created. Safe mode accepts extra metadata and non-protected
+headers. `allowUnsafeProtocolOverrides` additionally permits generated identity
+fields to be replaced for protocol testing, but it never permits settings to
+replace authentication, account identity, `x-codex-turn-state`, HTTP transport
+invariants, or `Sec-WebSocket-*` fields. Extra client metadata follows upstream's
+16-entry, 64-byte key, and 128-byte string-value limits.
 
 ## Latency and continuation behavior
 

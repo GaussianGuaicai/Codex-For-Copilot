@@ -111,6 +111,10 @@
         "title": "Codex: Show Native Tool Search Status"
       },
       {
+        "command": "codexModelProvider.showEffectiveProtocol",
+        "title": "Codex: Show Effective Protocol"
+      },
+      {
         "command": "codexForCopilot.auth.importAuthJson",
         "title": "Codex for Copilot: Import Codex auth.json"
       },
@@ -197,6 +201,77 @@
             "disabled"
           ],
           "description": "Controls Zstandard compression for large ChatGPT Codex Responses requests."
+        },
+        "codexModelProvider.protocolProfile": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "codexCompatible",
+            "minimal",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Enable Codex protocol fields only for the official ChatGPT Codex endpoint with Codex credentials.",
+            "Use the current Codex-compatible projection on the official ChatGPT Codex endpoint.",
+            "Do not add Codex-specific headers or client metadata.",
+            "Enable the Codex-compatible projection for an explicitly configured HTTPS endpoint."
+          ],
+          "description": "Controls when Codex protocol compatibility fields are generated.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.headerOverrides": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Additional or replacement request headers. Authentication, transport invariants, and Turn State are always protected; generated identity headers require unsafe overrides.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.clientMetadataOverrides": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "description": "Extra flat Responses client_metadata string values. Up to 16 entries are accepted; Codex-owned keys require unsafe overrides.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.turnMetadataOverrides": {
+          "type": "object",
+          "default": {},
+          "description": "Extra fields merged into the canonical x-codex-turn-metadata snapshot. Codex-owned identity and tool fields require unsafe overrides.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.omitGeneratedHeaders": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "description": "Generated header names to omit. Protected credentials and transport headers cannot be omitted.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.allowUnsafeProtocolOverrides": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow advanced overrides of generated Codex identity fields. Credentials, WebSocket security headers, transport invariants, and Turn State remain protected.",
+          "tags": [
+            "advanced"
+          ]
         },
         "codexModelProvider.nativeToolSearch": {
           "type": "string",
