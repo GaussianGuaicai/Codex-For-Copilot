@@ -22,20 +22,25 @@ export class CodexIdentityManager {
   async createThread(parentThreadId?: string): Promise<CodexRequestIdentity> {
     const installationId = await this.getInstallationId();
     const sessionId = randomUUID();
+    const turnId = randomUUID();
     return {
       installationId,
       sessionId,
       threadId: randomUUID(),
-      turnId: randomUUID(),
+      turnId,
+      rootTurnId: turnId,
       windowId: this.windowId,
       ...(parentThreadId ? { parentThreadId } : {})
     };
   }
 
   createNextTurn(identity: CodexRequestIdentity): CodexRequestIdentity {
+    const turnId = randomUUID();
     return {
       ...identity,
-      turnId: randomUUID(),
+      turnId,
+      parentTurnId: identity.turnId,
+      rootTurnId: identity.rootTurnId ?? identity.turnId,
       windowId: this.windowId
     };
   }

@@ -23,9 +23,9 @@ import { resolveProxyForURL } from './proxy';
 import {
   buildCodexWebSocketPreconnectHeaders,
   buildCodexRequestHeaders,
-  createCodexTurnMetadata,
-  stableSerializeCodexMetadata,
+  buildCodexProtocolSnapshot,
   type CodexCompatibilityProfile,
+  type CodexProtocolSettings,
   type CodexRequestIdentity
 } from './codexProtocol';
 import {
@@ -117,6 +117,8 @@ export interface StreamResponseTextOptions {
   authIdentity?: string;
   extensionVersion?: string;
   userAgent?: string;
+  protocolSettings?: CodexProtocolSettings;
+  turnStartedAtUnixMs?: number;
   websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
   requestCompression?: RequestCompressionPolicy;
   previousResponseId?: string;
@@ -173,6 +175,7 @@ export interface PreconnectCodexResponsesWebSocketOptions {
   authIdentity: string;
   extensionVersion?: string;
   userAgent?: string;
+  protocolSettings?: CodexProtocolSettings;
   onConnected?: CodexWebSocketPreconnectionObserver['onConnected'];
   onError?: CodexWebSocketPreconnectionObserver['onError'];
 }
@@ -219,7 +222,8 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
   const headers = buildCodexWebSocketPreconnectHeaders({
     credentialsHeaders: options.headers,
     extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
+    settings: options.protocolSettings
   });
 
   try {
@@ -874,7 +878,9 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
     omitMaxOutputTokens: options.omitMaxOutputTokens,
     maxOutputTokens: options.maxOutputTokens,
     textVerbosity: 'medium',
-    includeEncryptedReasoning: true
+    includeEncryptedReasoning: true,
+    protocolSettings: options.protocolSettings,
+    turnStartedAtUnixMs: options.turnStartedAtUnixMs
   };
 }
 
@@ -882,11 +888,18 @@ function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'htt
   if (!options.compatibilityProfile?.enabled || !options.identity) {
     return { ...options.headers };
   }
-  const metadata = stableSerializeCodexMetadata(createCodexTurnMetadata(options.identity));
+  const snapshot = buildCodexProtocolSnapshot({
+    identity: options.identity,
+    turnStartedAtUnixMs: options.turnStartedAtUnixMs,
+    toolPlan: options.toolPlan,
+    settings: options.protocolSettings
+  });
+  const metadata = snapshot.compatibilityTurnMetadata;
   return buildCodexRequestHeaders({
     credentialsHeaders: options.headers,
     identity: options.identity,
     turnMetadata: metadata,
+    snapshot,
     turnState: options.turnState,
     extensionVersion: options.extensionVersion ?? '0.0.0',
     userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
