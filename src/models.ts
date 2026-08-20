@@ -18,19 +18,12 @@ const CONTEXT_ID_DELIMITER = '::context=';
 const PROVIDER_MODEL_ID_PREFIX = 'codex::';
 const DEFAULT_FALLBACK_CONTEXT_WINDOW = 272000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 95;
-const GPT_5_4_LONG_CONTEXT_WINDOW = 1000000;
-const GPT_5_6_LONG_CONTEXT_WINDOW = 372000;
 const FIXED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5.5': 272000,
   'gpt-5.4': 272000,
   'gpt-5.4-mini': 272000,
   'gpt-5.3-codex-spark': 128000,
   'codex-auto-review': 272000
-};
-const KNOWN_CODEX_RAW_CONTEXT_CEILINGS: Readonly<Record<string, number>> = {
-  'gpt-5.6-sol': GPT_5_6_LONG_CONTEXT_WINDOW,
-  'gpt-5.6-terra': GPT_5_6_LONG_CONTEXT_WINDOW,
-  'gpt-5.6-luna': GPT_5_6_LONG_CONTEXT_WINDOW
 };
 
 const MODEL_DESCRIPTION_FALLBACKS: Record<string, string> = {
@@ -80,12 +73,19 @@ export interface ResolvedProviderModel {
   requestModel: string;
   reasoningEffort?: ReasoningEffort;
   rawContextWindow: number;
+  maximumRawContextWindow?: number;
   effectiveInputBudget: number;
 }
 
-type ThinkingEffortSchema = {
+interface ContextSizeOption {
+  readonly value: number;
+  readonly rawContextWindow: number;
+  readonly description: string;
+}
+
+type ModelConfigurationSchema = {
   readonly properties: {
-    readonly reasoningEffort: {
+    reasoningEffort?: {
       readonly type: 'string';
       readonly title: string;
       readonly enum: readonly ReasoningEffort[];
@@ -94,11 +94,20 @@ type ThinkingEffortSchema = {
       readonly default: ReasoningEffort;
       readonly group: 'navigation';
     };
+    contextSize?: {
+      readonly type: 'number';
+      readonly title: string;
+      readonly enum: readonly number[];
+      readonly enumItemLabels: readonly string[];
+      readonly enumDescriptions: readonly string[];
+      readonly default: number;
+      readonly group: 'tokens';
+    };
   };
 };
 
 type ModelPickerChatInformation = vscode.LanguageModelChatInformation & {
-  readonly configurationSchema?: ThinkingEffortSchema;
+  readonly configurationSchema?: ModelConfigurationSchema;
 };
 
 export interface ParsedModelIdentifier {
@@ -172,7 +181,6 @@ export function buildProviderModels(
 export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCredentials['kind']): ResolvedProviderModel {
   const rawContextWindow = getFallbackContextWindow(config.model);
   const effectiveInputBudget = getEffectiveInputBudget(rawContextWindow, DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
-  const knownRawContextCeiling = getKnownCodexRawContextCeiling(config.model, config.baseURL, credentialKind);
   const reasoningEffort = getDefaultReasoningEffort(undefined, config.model);
   const reasoningOptions = getReasoningOptions(undefined, config.model);
   return {
@@ -194,8 +202,7 @@ export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCr
         reasoningOptions,
         reasoningEffort,
         config.baseURL,
-        undefined,
-        knownRawContextCeiling
+        undefined
       ),
       capabilities: {
         imageInput: false,
@@ -235,17 +242,29 @@ function buildDiscoveredModels(
   const effectiveContextWindowPercent = getEffectiveContextWindowPercent(model.effective_context_window_percent);
   const effectiveInputBudget = getEffectiveInputBudget(activeRawContextWindow, effectiveContextWindowPercent);
   const maximumContextWindow = getPositiveInteger(model.max_context_window);
-  const knownRawContextCeiling = getKnownCodexRawContextCeiling(slug, config.baseURL, credentialKind);
+  const longRawContextWindow = getLongContextWindow(activeRawContextWindow, maximumContextWindow);
+  const contextSizeOptions = getContextSizeOptions(
+    activeRawContextWindow,
+    effectiveInputBudget,
+    longRawContextWindow,
+    effectiveContextWindowPercent
+  );
+  const maximumEffectiveInputBudget = Math.max(...contextSizeOptions.map((option) => option.value));
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
   const tooltip = getModelDescription(model, slug);
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
+  const configurationSchema = buildModelConfigurationSchema(
+    reasoningOptions,
+    defaultReasoningEffort ?? reasoningEfforts[0],
+    contextSizeOptions
+  );
 
   const info: ModelPickerChatInformation = {
     id: toProviderModelId(slug),
     name: displayName,
     family: slug,
     version: versionBase,
-    maxInputTokens: effectiveInputBudget,
+    maxInputTokens: maximumEffectiveInputBudget,
     maxOutputTokens: config.maxOutputTokens,
     tooltip,
     detail: buildModelDetail(
@@ -254,56 +273,23 @@ function buildDiscoveredModels(
       reasoningOptions,
       defaultReasoningEffort,
       undefined,
-      maximumContextWindow,
-      knownRawContextCeiling
+      maximumContextWindow
     ),
     capabilities: {
       imageInput,
       toolCalling: true
     },
-    ...(reasoningEfforts.length > 1
-      ? { configurationSchema: buildThinkingEffortSchema(reasoningOptions, defaultReasoningEffort ?? reasoningEfforts[0]) }
-      : {})
+    ...(configurationSchema ? { configurationSchema } : {})
   };
 
-  const standardModel = {
+  return [{
     requestModel: slug,
     reasoningEffort: defaultReasoningEffort ?? reasoningEfforts[0],
     rawContextWindow: activeRawContextWindow,
+    maximumRawContextWindow: maximumContextWindow,
     effectiveInputBudget,
     info
-  };
-
-  const longRawContextWindow = getLongContextWindow(slug, activeRawContextWindow, maximumContextWindow, knownRawContextCeiling);
-  if (!longRawContextWindow) {
-    return [standardModel];
-  }
-
-  const longEffectiveInputBudget = getEffectiveInputBudget(longRawContextWindow, effectiveContextWindowPercent);
-  const experimental = isExperimentalLongContextProfile(slug, longRawContextWindow);
-
-  return [
-    standardModel,
-    {
-      requestModel: slug,
-      reasoningEffort: standardModel.reasoningEffort,
-      rawContextWindow: longRawContextWindow,
-      effectiveInputBudget: longEffectiveInputBudget,
-      info: {
-        ...info,
-        id: toLongContextProviderModelId(slug, longRawContextWindow),
-        name: `${displayName} (Long context)${experimental ? ' (Experimental)' : ''}`,
-        maxInputTokens: longEffectiveInputBudget,
-        detail: buildLongContextDetail(
-          longRawContextWindow,
-          longEffectiveInputBudget,
-          experimental,
-          reasoningOptions,
-          defaultReasoningEffort
-        )
-      }
-    }
-  ];
+  }];
 }
 
 function getReasoningOptions(model: UpstreamModel | undefined, slug: string): ReasoningOption[] {
@@ -394,69 +380,14 @@ function getEffectiveInputBudget(rawContextWindow: number, percent: number): num
   return Math.floor(rawContextWindow * percent / 100);
 }
 
-function getLongContextWindow(
-  model: string,
-  activeContextWindow: number,
-  maximumContextWindow: number | undefined,
-  knownRawContextCeiling: number | undefined
-): number | undefined {
-  if (
-    model === 'gpt-5.4'
-    && maximumContextWindow !== undefined
-    && maximumContextWindow >= GPT_5_4_LONG_CONTEXT_WINDOW
-    && activeContextWindow < GPT_5_4_LONG_CONTEXT_WINDOW
-  ) {
-    return GPT_5_4_LONG_CONTEXT_WINDOW;
-  }
-
-  if (
-    knownRawContextCeiling === GPT_5_6_LONG_CONTEXT_WINDOW
-    && activeContextWindow < GPT_5_6_LONG_CONTEXT_WINDOW
-  ) {
-    return GPT_5_6_LONG_CONTEXT_WINDOW;
-  }
-
-  return undefined;
-}
-
-function getKnownCodexRawContextCeiling(
-  model: string,
-  baseURL: string,
-  credentialKind: ApiCredentials['kind']
-): number | undefined {
-  if (credentialKind !== 'codexAccessToken' || !isChatGptCodexBackend(baseURL)) {
-    return undefined;
-  }
-
-  return KNOWN_CODEX_RAW_CONTEXT_CEILINGS[model];
-}
-
-function isExperimentalLongContextProfile(model: string, rawContextWindow: number): boolean {
-  return KNOWN_CODEX_RAW_CONTEXT_CEILINGS[model] === GPT_5_6_LONG_CONTEXT_WINDOW
-    && rawContextWindow === GPT_5_6_LONG_CONTEXT_WINDOW;
-}
-
-function isChatGptCodexBackend(baseURL: string): boolean {
-  try {
-    const url = new URL(normalizeBaseURL(baseURL));
-    const path = url.pathname.replace(/\/+$/, '');
-    return url.origin === 'https://chatgpt.com'
-      && !url.username
-      && !url.password
-      && !url.search
-      && !url.hash
-      && path === '/backend-api/codex';
-  } catch {
-    return false;
-  }
+function getLongContextWindow(activeContextWindow: number, maximumContextWindow: number | undefined): number | undefined {
+  return maximumContextWindow !== undefined && maximumContextWindow > activeContextWindow
+    ? maximumContextWindow
+    : undefined;
 }
 
 function toProviderModelId(requestModel: string): string {
   return `${PROVIDER_MODEL_ID_PREFIX}${requestModel}`;
-}
-
-function toLongContextProviderModelId(requestModel: string, contextWindow: number): string {
-  return `${toProviderModelId(requestModel)}${CONTEXT_ID_DELIMITER}${contextWindow}`;
 }
 
 function stripProviderModelIdPrefix(modelId: string): string {
@@ -471,13 +402,9 @@ function buildModelDetail(
   reasoningOptions?: readonly ReasoningOption[],
   defaultReasoningEffort?: ReasoningEffort,
   sourceHint?: string,
-  maximumContextWindow?: number,
-  knownRawContextCeiling?: number
+  maximumContextWindow?: number
 ): string {
   const hasLargerMaximum = maximumContextWindow !== undefined && maximumContextWindow > activeRawContextWindow;
-  const hasLargerKnownCeiling = knownRawContextCeiling !== undefined
-    && knownRawContextCeiling > activeRawContextWindow
-    && (maximumContextWindow === undefined || knownRawContextCeiling > maximumContextWindow);
   const parts = [
     `Effective input budget: ${formatTokenCount(effectiveInputBudget)}`,
     `Raw context window: ${formatTokenCount(activeRawContextWindow)}${hasLargerMaximum ? ' (active)' : ''}`
@@ -487,31 +414,12 @@ function buildModelDetail(
     parts.push(`Maximum context: ${formatTokenCount(maximumContextWindow)} (opt-in)`);
   }
 
-  if (hasLargerKnownCeiling) {
-    parts.push(`Known raw context ceiling: ${formatTokenCount(knownRawContextCeiling)}`);
-  }
-
   appendReasoningDetail(parts, reasoningOptions, defaultReasoningEffort);
 
   if (sourceHint) {
     parts.push(sourceHint);
   }
 
-  return parts.join(' | ');
-}
-
-function buildLongContextDetail(
-  rawContextWindow: number,
-  effectiveInputBudget: number,
-  experimental: boolean,
-  reasoningOptions?: readonly ReasoningOption[],
-  defaultReasoningEffort?: ReasoningEffort
-): string {
-  const parts = [
-    `Long context${experimental ? ' (Experimental)' : ''}: ${formatTokenCount(effectiveInputBudget)} effective input budget`,
-    `Raw context window: ${formatTokenCount(rawContextWindow)}`
-  ];
-  appendReasoningDetail(parts, reasoningOptions, defaultReasoningEffort);
   return parts.join(' | ');
 }
 
@@ -532,24 +440,75 @@ function appendReasoningDetail(
   }
 }
 
-function buildThinkingEffortSchema(reasoningOptions: readonly ReasoningOption[], defaultEffort: ReasoningEffort): ThinkingEffortSchema {
-  const efforts = reasoningOptions.map((option) => option.effort);
-  const labels = reasoningOptions.map((option) => formatReasoningEffort(option.effort));
-  const descriptions = reasoningOptions.map((option) => option.description);
+function getContextSizeOptions(
+  activeRawContextWindow: number,
+  effectiveInputBudget: number,
+  longRawContextWindow: number | undefined,
+  effectiveContextWindowPercent: number
+): ContextSizeOption[] {
+  const options: ContextSizeOption[] = [{
+    value: effectiveInputBudget,
+    rawContextWindow: activeRawContextWindow,
+    description: 'Default context size.'
+  }];
 
-  return {
-    properties: {
-      reasoningEffort: {
-        type: 'string',
-        title: 'Thinking Effort',
-        enum: [...efforts],
-        enumItemLabels: labels,
-        enumDescriptions: descriptions,
-        default: defaultEffort,
-        group: 'navigation'
-      }
-    }
-  };
+  if (!longRawContextWindow) {
+    return options;
+  }
+
+  const longEffectiveInputBudget = getEffectiveInputBudget(longRawContextWindow, effectiveContextWindowPercent);
+  if (longEffectiveInputBudget <= effectiveInputBudget) {
+    return options;
+  }
+
+  options.push({
+    value: longEffectiveInputBudget,
+    rawContextWindow: longRawContextWindow,
+    description: 'Long context.'
+  });
+  return options;
+}
+
+function buildModelConfigurationSchema(
+  reasoningOptions: readonly ReasoningOption[],
+  defaultEffort: ReasoningEffort | undefined,
+  contextSizeOptions: readonly ContextSizeOption[]
+): ModelConfigurationSchema | undefined {
+  const properties: ModelConfigurationSchema['properties'] = {};
+
+  if (reasoningOptions.length > 1 && defaultEffort) {
+    properties.reasoningEffort = {
+      type: 'string',
+      title: 'Thinking Effort',
+      enum: reasoningOptions.map((option) => option.effort),
+      enumItemLabels: reasoningOptions.map((option) => formatReasoningEffort(option.effort)),
+      enumDescriptions: reasoningOptions.map((option) => option.description),
+      default: defaultEffort,
+      group: 'navigation'
+    };
+  }
+
+  if (contextSizeOptions.length > 1) {
+    properties.contextSize = {
+      type: 'number',
+      title: 'Context Size',
+      enum: contextSizeOptions.map((option) => option.value),
+      enumItemLabels: contextSizeOptions.map((option) => formatContextSize(option.rawContextWindow)),
+      enumDescriptions: contextSizeOptions.map((option) => option.description),
+      default: contextSizeOptions[0].value,
+      group: 'tokens'
+    };
+  }
+
+  return Object.keys(properties).length > 0 ? { properties } : undefined;
+}
+
+function formatContextSize(value: number): string {
+  if (value < 1000) {
+    return formatTokenCount(value);
+  }
+
+  return `${Number((value / 1000).toFixed(1))}K`;
 }
 
 function formatTokenCount(value: number): string {
@@ -598,12 +557,11 @@ function isModelVisible(
 }
 
 function getPositiveInteger(value: unknown): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
     return undefined;
   }
 
-  const normalized = Math.floor(value);
-  return Number.isSafeInteger(normalized) && normalized > 0 ? normalized : undefined;
+  return value;
 }
 
 function toAbortSignal(token: vscode.CancellationToken): AbortSignal | undefined {

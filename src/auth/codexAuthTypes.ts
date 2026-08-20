@@ -1,4 +1,4 @@
-export type CodexCredentialSource = 'extensionOAuth' | 'legacyCodexFile';
+export type CodexCredentialSource = 'extensionOAuth' | 'importedAuthJson' | 'legacyCodexFile';
 
 export interface CodexTokenData {
   id_token: string;
@@ -24,6 +24,18 @@ export interface ExtensionOAuthCredentialRecord {
   lastRefreshAt: string;
 }
 
+export interface ImportedAuthJsonCredentialRecord {
+  schemaVersion: 2;
+  source: 'importedAuthJson';
+  revision: string;
+  tokens: CodexTokenData;
+  email?: string;
+  accessTokenExpiresAt?: number;
+  lastRefreshAt: string;
+}
+
+export type RefreshableCodexCredentialRecord = ExtensionOAuthCredentialRecord | ImportedAuthJsonCredentialRecord;
+
 export interface LegacyCodexCredentialRecord {
   schemaVersion: 2;
   source: 'legacyCodexFile';
@@ -35,7 +47,7 @@ export interface LegacyCodexCredentialRecord {
   loadedAt: string;
 }
 
-export type CodexCredentialRecord = ExtensionOAuthCredentialRecord | LegacyCodexCredentialRecord;
+export type CodexCredentialRecord = RefreshableCodexCredentialRecord | LegacyCodexCredentialRecord;
 
 export interface CodexCredentialSnapshot {
   source: CodexCredentialSource | 'openaiApiKey';

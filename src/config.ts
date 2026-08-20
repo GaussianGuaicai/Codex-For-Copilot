@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { normalizeKnownReasoningEffort, type KnownReasoningEffort } from './reasoningEffort';
 import { MAX_NAMESPACE_FUNCTIONS } from './nativeToolSearch/nativeToolPolicy';
+import type { CodexProtocolProfileName, CodexProtocolSettings } from './codexProtocol';
 
 export interface ModelPricing {
   input?: number;
@@ -15,6 +16,7 @@ export interface ProviderConfig {
   transport: 'auto' | 'http' | 'websocket';
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
+  protocol: CodexProtocolSettings;
   nativeToolSearch: 'auto' | 'enabled' | 'disabled';
   nativeToolSearchMaxToolsPerNamespace: number;
   model: string;
@@ -38,6 +40,14 @@ export function getProviderConfig(): ProviderConfig {
     transport: normalizeTransport(config.get('transport', 'auto')),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
+    protocol: {
+      profile: normalizeProtocolProfile(config.get('protocolProfile', 'auto')),
+      headerOverrides: normalizeStringRecord(config.get('headerOverrides', {}), 32, 1024),
+      clientMetadataOverrides: normalizeStringRecord(config.get('clientMetadataOverrides', {}), 16, 128),
+      turnMetadataOverrides: normalizeJsonRecord(config.get('turnMetadataOverrides', {}), 16),
+      omitGeneratedHeaders: normalizeStringList(config.get('omitGeneratedHeaders', [])),
+      allowUnsafeProtocolOverrides: config.get('allowUnsafeProtocolOverrides', false)
+    },
     nativeToolSearch: normalizeTriState(config.get('nativeToolSearch', 'disabled'), 'disabled'),
     nativeToolSearchMaxToolsPerNamespace: normalizeNativeToolSearchMaxToolsPerNamespace(
       config.get('nativeToolSearchMaxToolsPerNamespace', MAX_NAMESPACE_FUNCTIONS)
@@ -52,6 +62,10 @@ export function getProviderConfig(): ProviderConfig {
     maxOutputTokens: config.get('maxOutputTokens', 8192),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };
+}
+
+function normalizeProtocolProfile(value: unknown): CodexProtocolProfileName {
+  return value === 'codexCompatible' || value === 'minimal' || value === 'custom' ? value : 'auto';
 }
 
 function normalizeTriState(
@@ -148,6 +162,33 @@ function normalizeModelAliases(value: unknown): Record<string, string> {
   }
 
   return aliases;
+}
+
+function normalizeStringRecord(
+  value: unknown,
+  maxEntries: number,
+  maxValueBytes: number
+): Record<string, string> {
+  if (!isObjectRecord(value)) {
+    return {};
+  }
+  const normalized: Record<string, string> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (Object.keys(normalized).length >= maxEntries) {
+      break;
+    }
+    if (key.trim().length > 0 && typeof nested === 'string' && Buffer.byteLength(nested) <= maxValueBytes) {
+      normalized[key] = nested;
+    }
+  }
+  return normalized;
+}
+
+function normalizeJsonRecord(value: unknown, maxEntries: number): Record<string, unknown> {
+  if (!isObjectRecord(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value).slice(0, maxEntries));
 }
 
 function normalizePricingNumber(value: unknown): number | undefined {

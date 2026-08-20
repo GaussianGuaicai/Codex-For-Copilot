@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -41,7 +41,7 @@
   "dependencies": {
     "https-proxy-agent": "^7.0.6",
     "openai": "^6.44.0",
-    "undici": "^7.28.0",
+    "undici": "^7.29.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {
@@ -111,6 +111,10 @@
         "title": "Codex: Show Native Tool Search Status"
       },
       {
+        "command": "codexModelProvider.showEffectiveProtocol",
+        "title": "Codex: Show Effective Protocol"
+      },
+      {
         "command": "codexForCopilot.auth.importAuthJson",
         "title": "Codex for Copilot: Import Codex auth.json"
       },
@@ -152,8 +156,8 @@
             "secretStorage"
           ],
           "enumDescriptions": [
-            "Prefer ChatGPT sign-in, then a read-only ~/.codex/auth.json fallback, then the API key saved in VS Code SecretStorage.",
-            "Only use ChatGPT sign-in or the read-only ~/.codex/auth.json fallback.",
+            "Prefer ChatGPT credentials stored by the extension, then a read-only ~/.codex/auth.json fallback, then the API key saved in VS Code SecretStorage.",
+            "Only use ChatGPT credentials stored by the extension or the read-only ~/.codex/auth.json fallback.",
             "Only use the API key saved with 'Codex: Set API Key'."
           ],
           "description": "Select which credential source the provider uses."
@@ -197,6 +201,77 @@
             "disabled"
           ],
           "description": "Controls Zstandard compression for large ChatGPT Codex Responses requests."
+        },
+        "codexModelProvider.protocolProfile": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "codexCompatible",
+            "minimal",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Enable Codex protocol fields only for the official ChatGPT Codex endpoint with Codex credentials.",
+            "Use the current Codex-compatible projection on the official ChatGPT Codex endpoint.",
+            "Do not add Codex-specific headers or client metadata.",
+            "Enable the Codex-compatible projection for an explicitly configured HTTPS endpoint."
+          ],
+          "description": "Controls when Codex protocol compatibility fields are generated.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.headerOverrides": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Additional or replacement request headers. Authentication, transport invariants, and Turn State are always protected; generated identity headers require unsafe overrides.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.clientMetadataOverrides": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "description": "Extra flat Responses client_metadata string values. Up to 16 entries are accepted; Codex-owned keys require unsafe overrides.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.turnMetadataOverrides": {
+          "type": "object",
+          "default": {},
+          "description": "Extra fields merged into the canonical x-codex-turn-metadata snapshot. Codex-owned identity and tool fields require unsafe overrides.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.omitGeneratedHeaders": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "description": "Generated header names to omit. Protected credentials and transport headers cannot be omitted.",
+          "tags": [
+            "advanced"
+          ]
+        },
+        "codexModelProvider.allowUnsafeProtocolOverrides": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow advanced overrides of generated Codex identity fields. Credentials, WebSocket security headers, transport invariants, and Turn State remain protected.",
+          "tags": [
+            "advanced"
+          ]
         },
         "codexModelProvider.nativeToolSearch": {
           "type": "string",

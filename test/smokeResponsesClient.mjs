@@ -44,6 +44,7 @@ const {
 
 try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
+  await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
@@ -55,7 +56,7 @@ try {
   await runWebSocketContinuationSmokeTest(streamResponseText);
   await runWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runManagedWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
-  await runWebSocketToolOutputContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
+  await runWebSocketFunctionCallContinuationIntegrityMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketSequentialReuseSmokeTest(streamResponseText);
   await runWebSocketConcurrentReuseIsolationSmokeTest(streamResponseText);
 
@@ -64,6 +65,47 @@ try {
   disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+async function runNestedConnectionCauseSmokeTest(streamResponseText) {
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  let capturedError;
+  const dnsError = Object.assign(new Error('getaddrinfo ENOTFOUND chatgpt.invalid'), {
+    code: 'ENOTFOUND'
+  });
+
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    throw new TypeError('fetch failed', { cause: dnsError });
+  };
+
+  try {
+    await streamResponseText({
+      baseURL: 'https://chatgpt.invalid/backend-api/codex/responses',
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'http',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Ping' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta() {}
+    });
+  } catch (error) {
+    capturedError = error;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assertEqual(requestCount, 3, 'connection failure uses the SDK retry budget');
+  assertEqual(
+    capturedError?.message,
+    'Connection failure while contacting https://chatgpt.invalid/backend-api/codex/responses. The OpenAI SDK automatically retried transient connection errors, but the request still failed. Root cause: getaddrinfo ENOTFOUND chatgpt.invalid',
+    'connection failure reports the deepest useful cause'
+  );
 }
 
 function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
@@ -1130,9 +1172,22 @@ async function runManagedWebSocketContinuationMissSmokeTest(streamResponseText, 
   }
 }
 
-async function runWebSocketToolOutputContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError) {
+async function runWebSocketFunctionCallContinuationIntegrityMissSmokeTest(streamResponseText, isResponsesContinuationMissError) {
   const server = createServer();
   const webSocketServer = new WebSocketServer({ noServer: true });
+  const failures = [
+    {
+      previousResponseId: 'resp_missing_tool_call',
+      message: 'No tool call found for function call output with call_id call_missing.',
+      input: [{ type: 'function_call_output', call_id: 'call_missing', output: 'result' }]
+    },
+    {
+      previousResponseId: 'resp_missing_tool_output',
+      message: 'No tool output found for function call call_unanswered.',
+      input: [{ role: 'user', content: 'Continue without the tool result.' }]
+    }
+  ];
+  let connectionIndex = 0;
 
   server.on('upgrade', (request, socket, head) => {
     webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
@@ -1142,11 +1197,12 @@ async function runWebSocketToolOutputContinuationMissSmokeTest(streamResponseTex
 
   webSocketServer.on('connection', (webSocket) => {
     webSocket.once('message', () => {
+      const failure = failures[connectionIndex++];
       webSocket.send(JSON.stringify({
         type: 'error',
         error: {
           type: 'invalid_request_error',
-          message: 'No tool call found for function call output with call_id call_missing.',
+          message: failure.message,
           param: 'input'
         },
         status: 400
@@ -1158,29 +1214,31 @@ async function runWebSocketToolOutputContinuationMissSmokeTest(streamResponseTex
 
   try {
     const address = server.address();
-    let capturedError;
+    for (const failure of failures) {
+      let capturedError;
+      try {
+        await streamResponseText({
+          baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+          apiKey: 'test-api-key',
+          headers: createHeaders(),
+          transport: 'websocket',
+          previousResponseId: failure.previousResponseId,
+          omitMaxOutputTokens: true,
+          model: 'gpt-5.5',
+          instructions: 'Smoke test instructions',
+          input: failure.input,
+          maxOutputTokens: 32,
+          token: createCancellationToken(),
+          onTextDelta() {}
+        });
+      } catch (error) {
+        capturedError = error;
+      }
 
-    try {
-      await streamResponseText({
-        baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
-        apiKey: 'test-api-key',
-        headers: createHeaders(),
-        transport: 'websocket',
-        previousResponseId: 'resp_missing_tool_call',
-        omitMaxOutputTokens: true,
-        model: 'gpt-5.5',
-        instructions: 'Smoke test instructions',
-        input: [{ type: 'function_call_output', call_id: 'call_missing', output: 'result' }],
-        maxOutputTokens: 32,
-        token: createCancellationToken(),
-        onTextDelta() {}
-      });
-    } catch (error) {
-      capturedError = error;
+      assertEqual(isResponsesContinuationMissError(capturedError), true, `${failure.previousResponseId} integrity miss classification`);
+      assertEqual(capturedError.previousResponseId, failure.previousResponseId, `${failure.previousResponseId} integrity miss response id`);
     }
-
-    assertEqual(isResponsesContinuationMissError(capturedError), true, 'tool output continuation miss classification');
-    assertEqual(capturedError.previousResponseId, 'resp_missing_tool_call', 'tool output continuation miss response id');
+    assertEqual(connectionIndex, failures.length, 'both inverse function-call integrity errors use WebSocket');
   } finally {
     webSocketServer.close();
     server.close();

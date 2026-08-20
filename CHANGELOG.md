@@ -2,6 +2,22 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.6.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.5.1...v1.6.0) (2026-08-18)
+
+
+### Features
+
+* add native long context size picker ([#71](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/71)) ([511db0b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/511db0b86d0f85ca7871e7c52b2b13635580dc4b))
+
+## [1.5.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.5.0...v1.5.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* recover unanswered tool call continuations ([#60](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/60)) ([ca1bcc1](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/ca1bcc1c592813e2a56c2be61072e7d9379e182d))
+* report nested connection causes ([#67](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/67)) ([da663c1](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/da663c1e7536c7a854aea59e952abb62b23b58e9))
+* update undici security patches ([#65](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/65)) ([8c2054b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/8c2054b227fad79676cbadfcbc517d9039dd2a58))
+
 ## [1.5.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.4.3...v1.5.0) (2026-08-11)
 
 

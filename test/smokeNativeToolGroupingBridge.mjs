@@ -15,6 +15,7 @@ let workspaceFolderThreshold = 32;
 let nativeToolSearchGlobalValue;
 let resetCommandAvailable = true;
 let resetCommandFails = false;
+let resetCommandBlocker;
 let configurationUpdateFails;
 let operationSequence;
 
@@ -29,6 +30,11 @@ const vscode = {
     getCommands: async () => resetCommandAvailable ? ['github.copilot.debug.resetVirtualToolGroups'] : [],
     executeCommand: async (...args) => {
       operationSequence?.push(`reset:${args[0]}`);
+      if (resetCommandBlocker) {
+        const blocker = resetCommandBlocker;
+        resetCommandBlocker = undefined;
+        await blocker();
+      }
       if (resetCommandFails && args[0] === 'github.copilot.debug.resetVirtualToolGroups') {
         resetCommandFails = false;
         throw new Error('Copilot reset failed');
@@ -179,6 +185,55 @@ try {
   await scopedLoaded.dispose();
 }
 
+const serializedLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  const savedThresholds = [{ value: 37, target: vscode.ConfigurationTarget.WorkspaceFolder }];
+  const workspaceState = createState([
+    [OWNER_KEY, true],
+    [PREVIOUS_KEY, savedThresholds]
+  ]);
+  const context = { globalState: createState(), workspaceState };
+  nativeToolSearchGlobalValue = 'auto';
+  resetCommandAvailable = true;
+  resetCommandFails = false;
+  workspaceThreshold = 64;
+  workspaceFolderThreshold = 0;
+  let releaseReset;
+  let reportResetStarted;
+  const resetStarted = new Promise((resolve) => {
+    reportResetStarted = resolve;
+  });
+  const resetRelease = new Promise((resolve) => {
+    releaseReset = resolve;
+  });
+  resetCommandBlocker = async () => {
+    reportResetStarted();
+    await resetRelease;
+  };
+
+  const restore = serializedLoaded.exports.restoreVSCodeToolGrouping(context);
+  await resetStarted;
+  const enable = serializedLoaded.exports.enableNativeToolSearchGroupingBridge(context);
+  await new Promise((resolve) => setImmediate(resolve));
+  assertEqual(workspaceFolderThreshold, 37, 'blocked restore applies its threshold before the queued enable starts');
+  assertEqual(nativeToolSearchGlobalValue, 'disabled', 'blocked restore disables Native Tool Search before the queued enable starts');
+
+  releaseReset();
+  await Promise.all([restore, enable]);
+  assertEqual(workspaceFolderThreshold, 0, 'queued enable runs after restore cleanup and reapplies the bridge sentinel');
+  assertEqual(nativeToolSearchGlobalValue, 'auto', 'queued enable finishes with Native Tool Search enabled');
+  assertEqual(workspaceState.get(OWNER_KEY), true, 'queued enable retains recoverable ownership after concurrent restore');
+  assertEqual(
+    JSON.stringify(workspaceState.get(PREVIOUS_KEY)),
+    JSON.stringify(savedThresholds),
+    'queued enable retains the original threshold after concurrent restore'
+  );
+  console.log('Smoke test passed: Native Tool Search grouping operations are serialized across restore and enable.');
+} finally {
+  resetCommandBlocker = undefined;
+  await serializedLoaded.dispose();
+}
+
 const legacyLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
 try {
   const legacyGlobalState = createState([
@@ -197,13 +252,15 @@ try {
   workspaceFolderThreshold = 0;
 
   await legacyLoaded.exports.restoreVSCodeToolGrouping(legacyContext);
-  assertEqual(workspaceThreshold, 71, 'legacy global Workspace ownership restores its saved threshold');
-  assertEqual(workspaceFolderThreshold, 47, 'legacy global WorkspaceFolder ownership restores its saved threshold');
+  assertEqual(workspaceThreshold, 0, 'failed legacy reset rolls the Workspace threshold back to its owned zero sentinel');
+  assertEqual(workspaceFolderThreshold, 0, 'failed legacy reset rolls the WorkspaceFolder threshold back to its owned zero sentinel');
   assertEqual(legacyGlobalState.get(OWNER_KEY), true, 'legacy global ownership remains after Copilot reset fails');
   assertEqual(Array.isArray(legacyGlobalState.get(PREVIOUS_KEY)), true, 'legacy global thresholds remain after Copilot reset fails');
 
   resetCommandFails = false;
   await legacyLoaded.exports.restoreVSCodeToolGrouping(legacyContext);
+  assertEqual(workspaceThreshold, 71, 'legacy global Workspace ownership restores its saved threshold after retry');
+  assertEqual(workspaceFolderThreshold, 47, 'legacy global WorkspaceFolder ownership restores its saved threshold after retry');
   assertEqual(legacyGlobalState.get(OWNER_KEY), undefined, 'legacy global ownership clears only after restoration succeeds');
   assertEqual(legacyGlobalState.get(PREVIOUS_KEY), undefined, 'legacy global thresholds clear only after restoration succeeds');
   console.log('Smoke test passed: legacy global workspace ownership survives until restoration succeeds.');
@@ -217,25 +274,79 @@ try {
     [OWNER_KEY, true],
     [PREVIOUS_KEY, [{ value: 53, target: vscode.ConfigurationTarget.WorkspaceFolder }]]
   ]);
-  const upgradedWorkspaceState = createState();
-  const upgradedContext = { globalState: upgradedGlobalState, workspaceState: upgradedWorkspaceState };
-  nativeToolSearchGlobalValue = 'auto';
+  const workspaceAState = createState();
+  const workspaceBState = createState();
+  const workspaceAContext = { globalState: upgradedGlobalState, workspaceState: workspaceAState };
+  const workspaceBContext = { globalState: upgradedGlobalState, workspaceState: workspaceBState };
+  nativeToolSearchGlobalValue = undefined;
   resetCommandAvailable = true;
   resetCommandFails = false;
   workspaceThreshold = 64;
-  workspaceFolderThreshold = 0;
+  workspaceFolderThreshold = 48;
+  const commandCountBeforeWorkspaceBRestore = commands.length;
 
-  await upgradedLoaded.exports.enableNativeToolSearchGroupingBridge(upgradedContext);
+  assertEqual(
+    upgradedLoaded.exports.hasNativeToolGroupingBridgeOwnership(workspaceBContext),
+    false,
+    'workspace B does not claim workspace A legacy global folder ownership at a nonzero threshold'
+  );
+  assertEqual(
+    (await upgradedLoaded.exports.getNativeToolGroupingBridgeStatus(workspaceBContext)).enabledByThisExtension,
+    false,
+    'workspace B status ignores workspace A legacy global folder ownership'
+  );
+  assertEqual(await upgradedLoaded.exports.migrateNativeToolSearchOptIn(workspaceBContext), false, 'workspace B does not migrate workspace A legacy ownership');
+  assertEqual(nativeToolSearchGlobalValue, undefined, 'workspace B leaves the provider setting untouched during rejected migration');
+
+  await upgradedLoaded.exports.restoreVSCodeToolGrouping(workspaceBContext);
+  assertEqual(workspaceFolderThreshold, 48, 'workspace B restore leaves its distinct folder threshold untouched');
+  assertEqual(commands.length, commandCountBeforeWorkspaceBRestore, 'workspace B restore does not reset groups for foreign ownership');
   assertEqual(
     JSON.stringify(upgradedGlobalState.get(PREVIOUS_KEY)),
     JSON.stringify([{ value: 53, target: vscode.ConfigurationTarget.WorkspaceFolder }]),
-    'repeated enable after upgrade preserves the legacy pre-enable threshold'
+    'workspace B restore preserves workspace A legacy threshold metadata'
   );
-  assertEqual(upgradedWorkspaceState.get(OWNER_KEY), undefined, 'repeated enable after upgrade does not split legacy ownership across Mementos');
+  assertEqual(upgradedGlobalState.get(OWNER_KEY), true, 'workspace B restore preserves workspace A legacy ownership marker');
 
-  await upgradedLoaded.exports.restoreVSCodeToolGrouping(upgradedContext);
-  assertEqual(workspaceFolderThreshold, 53, 'repeated enable after upgrade still restores the legacy threshold');
-  console.log('Smoke test passed: repeated enable after upgrade preserves legacy global ownership.');
+  await upgradedLoaded.exports.enableNativeToolSearchGroupingBridge(workspaceBContext);
+  assertEqual(workspaceFolderThreshold, 0, 'workspace B enable applies its own bridge zero sentinel');
+  assertEqual(workspaceBState.get(OWNER_KEY), true, 'workspace B enable stores independent workspace ownership');
+  assertEqual(
+    JSON.stringify(workspaceBState.get(PREVIOUS_KEY)),
+    JSON.stringify([{ value: 48, target: vscode.ConfigurationTarget.WorkspaceFolder }]),
+    'workspace B enable saves its own folder threshold'
+  );
+  assertEqual(
+    JSON.stringify(upgradedGlobalState.get(PREVIOUS_KEY)),
+    JSON.stringify([{ value: 53, target: vscode.ConfigurationTarget.WorkspaceFolder }]),
+    'workspace B enable leaves workspace A legacy metadata untouched'
+  );
+
+  await upgradedLoaded.exports.restoreVSCodeToolGrouping(workspaceBContext);
+  assertEqual(workspaceFolderThreshold, 48, 'workspace B restores its independent folder threshold');
+  assertEqual(workspaceBState.get(OWNER_KEY), undefined, 'workspace B clears only its own ownership');
+  assertEqual(workspaceBState.get(PREVIOUS_KEY), undefined, 'workspace B clears only its own saved threshold');
+  assertEqual(upgradedGlobalState.get(OWNER_KEY), true, 'workspace B cleanup leaves workspace A legacy owner intact');
+
+  workspaceFolderThreshold = 0;
+  assertEqual(
+    upgradedLoaded.exports.hasNativeToolGroupingBridgeOwnership(workspaceAContext),
+    true,
+    'workspace A recognizes its legacy ownership while the folder threshold is zero'
+  );
+  await upgradedLoaded.exports.enableNativeToolSearchGroupingBridge(workspaceAContext);
+  assertEqual(workspaceAState.get(OWNER_KEY), undefined, 'workspace A adopts legacy ownership without splitting Mementos');
+  assertEqual(
+    JSON.stringify(upgradedGlobalState.get(PREVIOUS_KEY)),
+    JSON.stringify([{ value: 53, target: vscode.ConfigurationTarget.WorkspaceFolder }]),
+    'workspace A repeated enable preserves its original legacy threshold'
+  );
+
+  await upgradedLoaded.exports.restoreVSCodeToolGrouping(workspaceAContext);
+  assertEqual(workspaceFolderThreshold, 53, 'workspace A restores its legacy folder threshold');
+  assertEqual(upgradedGlobalState.get(OWNER_KEY), undefined, 'workspace A clears its legacy owner after successful restore');
+  assertEqual(upgradedGlobalState.get(PREVIOUS_KEY), undefined, 'workspace A clears its legacy metadata after successful restore');
+  console.log('Smoke test passed: legacy global workspace ownership cannot leak across workspaces.');
 } finally {
   await upgradedLoaded.dispose();
 }
@@ -554,6 +665,56 @@ try {
   await restoreCompensationFailureLoaded.dispose();
 }
 
+const restoreCleanupFailureLoaded = await loadBundled('src/nativeToolSearch/nativeToolGroupingBridge.ts', vscode);
+try {
+  for (const failureMode of ['before', 'after']) {
+    for (const failedKey of [PREVIOUS_KEY, OWNER_KEY]) {
+      const savedThresholds = [{ value: 61, target: vscode.ConfigurationTarget.WorkspaceFolder }];
+      const failCleanupWrite = (key, value) => key === failedKey && value === undefined;
+      const workspaceState = createState([
+        [OWNER_KEY, true],
+        [PREVIOUS_KEY, savedThresholds]
+      ], {
+        label: 'workspace',
+        failOnceBeforeUpdate: failureMode === 'before' ? failCleanupWrite : undefined,
+        failOnceAfterUpdate: failureMode === 'after' ? failCleanupWrite : undefined
+      });
+      const context = { globalState: createState(), workspaceState };
+      nativeToolSearchGlobalValue = 'auto';
+      resetCommandAvailable = true;
+      resetCommandFails = false;
+      workspaceThreshold = 64;
+      workspaceFolderThreshold = 0;
+      configurationUpdateFails = undefined;
+      operationSequence = [];
+
+      await restoreCleanupFailureLoaded.exports.restoreVSCodeToolGrouping(context);
+      assertEqual(workspaceFolderThreshold, 61, `${failureMode} ${failedKey} cleanup failure leaves the restored threshold in place`);
+      assertEqual(nativeToolSearchGlobalValue, 'disabled', `${failureMode} ${failedKey} cleanup failure leaves Native Tool Search disabled`);
+      assertEqual(workspaceState.get(OWNER_KEY), true, `${failureMode} ${failedKey} cleanup failure restores ownership for retry`);
+      assertEqual(workspaceState.get(PREVIOUS_KEY), savedThresholds, `${failureMode} ${failedKey} cleanup failure restores saved threshold metadata`);
+      assertEqual(errors.at(-1).includes('Retry this command to finish cleanup'), true, `${failureMode} ${failedKey} cleanup failure gives retry guidance`);
+
+      operationSequence = [];
+      await restoreCleanupFailureLoaded.exports.restoreVSCodeToolGrouping(context);
+      assertEqual(workspaceState.get(OWNER_KEY), undefined, `${failureMode} ${failedKey} cleanup retry clears ownership`);
+      assertEqual(workspaceState.get(PREVIOUS_KEY), undefined, `${failureMode} ${failedKey} cleanup retry clears saved threshold metadata`);
+      assertEqual(
+        JSON.stringify(operationSequence.slice(-2)),
+        JSON.stringify([
+          `memento:workspace:${PREVIOUS_KEY}`,
+          `memento:workspace:${OWNER_KEY}`
+        ]),
+        `${failureMode} ${failedKey} cleanup retry commits ownership removal last`
+      );
+    }
+  }
+  console.log('Smoke test passed: restore cleanup persistence failures retain retryable ownership metadata.');
+} finally {
+  operationSequence = undefined;
+  await restoreCleanupFailureLoaded.dispose();
+}
+
 function createState(entries = [], options = {}) {
   const values = options.values ?? new Map(entries);
   let failed = false;
@@ -562,6 +723,10 @@ function createState(entries = [], options = {}) {
     update: async (key, value) => {
       if (options.label) {
         operationSequence?.push(`memento:${options.label}:${key}`);
+      }
+      if (!failed && options.failOnceBeforeUpdate?.(key, value)) {
+        failed = true;
+        throw new Error(`Memento update failed before mutation for ${key}`);
       }
       if (value === undefined) {
         values.delete(key);

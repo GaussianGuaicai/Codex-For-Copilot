@@ -198,10 +198,11 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { CodexModelProvider } = require(bundlePath);
+const { CodexModelProvider, hasCanonicalReplayContinuationIntegrity } = require(bundlePath);
 const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
 
 try {
+  runCanonicalReplayIntegritySmokeTest();
   await runModelCatalogMetadataSmokeTest();
   await runProviderMalformedCatalogFallbackSmokeTest();
   await runProviderLongContextSelectionSmokeTest();
@@ -215,6 +216,8 @@ try {
   await runModelGeneratedToolLoopFullReplaySmokeTest();
   await runNativeHostedCanonicalReplaySmokeTest();
   await runNativeHostedToolOutputContinuationRecoverySmokeTest();
+  await runDanglingCompletedToolCallFullReplaySmokeTest();
+  await runCreatedResponseCancellationDoesNotRecordBranchSmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
   await runProviderUnavailableScopeSmokeTest();
   await runProviderModelDiscoveryPolicySmokeTest();
@@ -228,6 +231,32 @@ try {
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+function runCanonicalReplayIntegritySmokeTest() {
+  const call = {
+    type: 'function_call',
+    call_id: 'call_integrity',
+    name: 'lookup_fixture',
+    arguments: '{}'
+  };
+  const output = { type: 'function_call_output', call_id: 'call_integrity', output: 'ok' };
+  assertEqual(hasCanonicalReplayContinuationIntegrity([call], [output]), true, 'canonical replay accepts one call with exactly one matching output');
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([{ ...call, call_id: '' }], [output]),
+    false,
+    'canonical replay rejects a function call without a valid call id'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([call, { ...call }], [output]),
+    false,
+    'canonical replay rejects duplicate function-call ids'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([call], [output, { ...output }]),
+    false,
+    'canonical replay rejects duplicate outputs for one function call'
+  );
 }
 
 async function runModelCatalogMetadataSmokeTest() {
@@ -363,19 +392,22 @@ async function runModelCatalogMetadataSmokeTest() {
 
     const resolvedModels = buildProviderModels(config, accountCatalog, 'codexAccessToken');
     const gpt54 = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4');
-    const gpt54Long = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4::context=1000000');
     const gpt54Mini = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.4-mini');
     const spark = resolvedModels.find((model) => model.info.id === 'codex::gpt-5.3-codex-spark');
     const autoReview = resolvedModels.find((model) => model.info.id === 'codex::codex-auto-review');
-    if (!gpt54 || !gpt54Long || !gpt54Mini || !spark || !autoReview) {
-      throw new Error('Expected GPT-5.4 standard/long, GPT-5.4-Mini, Spark, and Auto Review model metadata.');
+    if (!gpt54 || !gpt54Mini || !spark || !autoReview) {
+      throw new Error('Expected GPT-5.4, GPT-5.4-Mini, Spark, and Auto Review model metadata.');
     }
 
     const formattedActiveContext = (272000).toLocaleString();
     const formattedMaximumContext = (1000000).toLocaleString();
-    assertEqual(gpt54.rawContextWindow, 272000, 'GPT-5.4 standard raw context');
-    assertEqual(gpt54.effectiveInputBudget, 258400, 'GPT-5.4 standard internal effective budget');
-    assertEqual(gpt54.info.maxInputTokens, 258400, 'GPT-5.4 standard effective budget');
+    const gpt54ContextSize = gpt54.info.configurationSchema?.properties?.contextSize;
+    assertEqual(gpt54.rawContextWindow, 272000, 'GPT-5.4 active raw context');
+    assertEqual(gpt54.effectiveInputBudget, 258400, 'GPT-5.4 default effective budget');
+    assertEqual(gpt54.info.maxInputTokens, 950000, 'GPT-5.4 advertises the maximum selectable budget');
+    assertEqual(gpt54ContextSize?.enum.join(','), '258400,950000', 'GPT-5.4 exposes default and long context sizes');
+    assertEqual(gpt54ContextSize?.default, 258400, 'GPT-5.4 defaults to the active context size');
+    assertEqual(gpt54ContextSize?.group, 'tokens', 'GPT-5.4 context size uses the native token group');
     assertEqual(
       gpt54.info.detail?.includes(
         `Effective input budget: 258,400 tokens | Raw context window: ${formattedActiveContext} tokens (active) | Maximum context: ${formattedMaximumContext} tokens (opt-in)`
@@ -383,39 +415,22 @@ async function runModelCatalogMetadataSmokeTest() {
       true,
       'GPT-5.4 detail distinguishes active and maximum context'
     );
-    assertEqual(gpt54Long.info.name, 'GPT-5.4 (Long context)', 'GPT-5.4 long profile name');
-    assertEqual(gpt54Long.rawContextWindow, 1000000, 'GPT-5.4 long raw context');
-    assertEqual(gpt54Long.effectiveInputBudget, 950000, 'GPT-5.4 long internal effective budget');
-    assertEqual(gpt54Long.info.maxInputTokens, 950000, 'GPT-5.4 long effective budget');
-    assertEqual(gpt54Long.requestModel, 'gpt-5.4', 'GPT-5.4 long profile keeps real request model');
     assertEqual(
-      gpt54Long.info.detail?.includes('Long context: 950,000 tokens effective input budget | Raw context window: 1,000,000 tokens'),
-      true,
-      'GPT-5.4 long profile detail'
-    );
-    assertEqual(gpt54Long.info.version, gpt54.info.version, 'GPT-5.4 profiles preserve version metadata');
-    assertEqual(gpt54Long.info.tooltip, gpt54.info.tooltip, 'GPT-5.4 profiles preserve tooltip metadata');
-    assertEqual(
-      JSON.stringify(gpt54Long.info.capabilities),
-      JSON.stringify(gpt54.info.capabilities),
-      'GPT-5.4 profiles preserve capabilities'
-    );
-    assertEqual(
-      JSON.stringify(gpt54Long.info.configurationSchema),
-      JSON.stringify(gpt54.info.configurationSchema),
-      'GPT-5.4 profiles preserve reasoning configuration'
+      resolvedModels.some((model) => model.info.id.includes('::context=')),
+      false,
+      'long context is no longer a duplicate model profile'
     );
     assertEqual(gpt54Mini.info.maxInputTokens, 258400, 'GPT-5.4-Mini uses the default effective budget');
-    assertEqual(
-      resolvedModels.some((model) => model.info.id.startsWith('codex::gpt-5.4-mini::context=')),
-      false,
-      'GPT-5.4-Mini omits a redundant long profile'
-    );
-    assertEqual(autoReview.info.maxInputTokens, 258400, 'Auto Review standard effective budget');
+    assertEqual(autoReview.info.maxInputTokens, 950000, 'Auto Review advertises the discovered maximum budget');
     assertEqual(
       autoReview.info.detail?.includes(`Maximum context: ${formattedMaximumContext} tokens (opt-in)`),
       true,
       'Auto Review maximum context detail'
+    );
+    assertEqual(
+      autoReview.info.configurationSchema?.properties?.contextSize?.enum.join(','),
+      '258400,950000',
+      'Auto Review uses the discovered maximum as a context-size selector'
     );
     assertEqual(spark.info.id, 'codex::gpt-5.3-codex-spark', 'Spark provider model id');
     assertEqual(spark.info.maxInputTokens, 121600, 'Spark standard effective budget');
@@ -435,12 +450,12 @@ async function runModelCatalogMetadataSmokeTest() {
     ], 'codexAccessToken');
     assertEqual(
       duplicateGpt54Models.map((model) => model.info.id).join(','),
-      'codex::gpt-5.4,codex::gpt-5.4::context=1000000',
-      'duplicate GPT-5.4 rows yield one standard and one long ID'
+      'codex::gpt-5.4',
+      'duplicate GPT-5.4 rows yield one model ID'
     );
     assertEqual(
       duplicateGpt54Models.map((model) => model.info.name).join(','),
-      'GPT-5.4 First,GPT-5.4 First (Long context)',
+      'GPT-5.4 First',
       'duplicate GPT-5.4 rows preserve first-seen metadata and order'
     );
 
@@ -451,11 +466,11 @@ async function runModelCatalogMetadataSmokeTest() {
       })
     ], 'codexAccessToken');
     const discoveredOverride = discoveredOverrideModels.find((model) => model.info.id === 'codex::gpt-5.4');
-    assertEqual(discoveredOverride?.info.maxInputTokens, 316350, 'valid discovered context uses the default effective percentage');
+    assertEqual(discoveredOverride?.info.maxInputTokens, 950000, 'valid discovered context preserves the maximum budget');
     assertEqual(
-      discoveredOverrideModels.some((model) => model.info.id === 'codex::gpt-5.4::context=1000000'),
-      true,
-      'valid GPT-5.4 maximum still adds the long profile'
+      discoveredOverride?.info.configurationSchema?.properties?.contextSize?.enum.join(','),
+      '316350,950000',
+      'valid GPT-5.4 maximum becomes a context-size selector'
     );
 
     const fractionalMetadata = buildProviderModels(config, [
@@ -466,6 +481,21 @@ async function runModelCatalogMetadataSmokeTest() {
     ], 'codexAccessToken')[0];
     assertEqual(fractionalMetadata.info.maxInputTokens, 258400, 'fractional context below one uses effective fixed fallback');
     assertEqual(fractionalMetadata.info.detail?.includes('Maximum context:'), false, 'invalid fractional maximum is omitted');
+
+    for (const invalidMaximumContext of [undefined, 272000, 271999, 0.5, '872000', Number.POSITIVE_INFINITY]) {
+      const invalidMaximumModel = buildProviderModels(config, [
+        createMockModel('invalid-maximum', 'Invalid Maximum', {
+          context_window: 272000,
+          max_context_window: invalidMaximumContext
+        })
+      ], 'codexAccessToken')[0];
+      assertEqual(
+        invalidMaximumModel.info.configurationSchema?.properties?.contextSize,
+        undefined,
+        `invalid maximum ${String(invalidMaximumContext)} omits the context-size selector`
+      );
+      assertEqual(invalidMaximumModel.info.maxInputTokens, 258400, `invalid maximum ${String(invalidMaximumContext)} keeps the active budget`);
+    }
 
     const sparkFallback = buildFallbackModel({
       ...config,
@@ -489,89 +519,72 @@ async function runModelCatalogMetadataSmokeTest() {
       baseURL: 'https://chatgpt.com/backend-api/codex/responses'
     };
     const rollbackCatalog = [
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 272000, max_context_window: 272000 }),
-      createMockModel('gpt-5.6-terra', 'GPT-5.6-Terra', { context_window: 272000, max_context_window: 272000 }),
-      createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { context_window: 272000, max_context_window: 272000 }),
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.6-terra', 'GPT-5.6-Terra', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { context_window: 272000, max_context_window: 872000 }),
       createMockModel('gpt-5.6-nova', 'GPT-5.6-Nova', { context_window: 272000, max_context_window: 272000 })
     ];
     const rollbackModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'codexAccessToken');
-    const formattedKnownCeiling = (372000).toLocaleString();
-    assertEqual(rollbackModels.length, 7, 'eligible GPT-5.6 catalog expands three exact long profiles');
+    const formattedGpt56MaximumContext = (872000).toLocaleString();
+    assertEqual(rollbackModels.length, 4, 'eligible GPT-5.6 catalog keeps one model per backend model');
     for (const slug of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
-      const standardModel = rollbackModels.find((candidate) => candidate.info.id === `codex::${slug}`);
-      const longModel = rollbackModels.find((candidate) => candidate.info.id === `codex::${slug}::context=372000`);
-      if (!standardModel || !longModel) {
-        throw new Error(`Expected ${slug} standard and long metadata.`);
+      const resolvedModel = rollbackModels.find((candidate) => candidate.info.id === `codex::${slug}`);
+      const contextSize = resolvedModel?.info.configurationSchema?.properties?.contextSize;
+      if (!resolvedModel || !contextSize) {
+        throw new Error(`Expected ${slug} metadata with a Context Size selector.`);
       }
-      assertEqual(standardModel.info.maxInputTokens, 258400, `${slug} advertises standard effective budget`);
+      assertEqual(resolvedModel.effectiveInputBudget, 258400, `${slug} retains the default effective budget`);
+      assertEqual(resolvedModel.info.maxInputTokens, 828400, `${slug} advertises the maximum selectable budget`);
+      assertEqual(contextSize.enum.join(','), '258400,828400', `${slug} exposes standard and long context sizes`);
+      assertEqual(contextSize.enumDescriptions[1], 'Long context.', `${slug} labels the discovered maximum as long context`);
       assertEqual(
-        standardModel.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
+        resolvedModel.info.detail?.includes(`Maximum context: ${formattedGpt56MaximumContext} tokens (opt-in)`),
         true,
-        `${slug} shows known raw context ceiling`
+        `${slug} shows the discovered maximum context`
       );
-      assertEqual(longModel.rawContextWindow, 372000, `${slug} retains exact long raw context`);
-      assertEqual(longModel.info.maxInputTokens, 353400, `${slug} advertises exact long effective budget`);
-      assertEqual(longModel.requestModel, slug, `${slug} long profile keeps real request model`);
-      assertEqual(longModel.info.name, `${standardModel.info.name} (Long context) (Experimental)`, `${slug} experimental long profile name`);
-      assertEqual(
-        longModel.info.detail?.includes('Long context (Experimental): 353,400 tokens effective input budget | Raw context window: 372,000 tokens'),
-        true,
-        `${slug} long detail is truthful`
-      );
-      assertEqual(longModel.info.maxOutputTokens, config.maxOutputTokens, `${slug} output metadata remains configured`);
-      assertEqual(longModel.info.detail?.includes('500,000'), false, `${slug} does not expose inferred total context`);
+      assertEqual(resolvedModel.info.maxOutputTokens, config.maxOutputTokens, `${slug} output metadata remains configured`);
+      assertEqual(resolvedModel.info.detail?.includes('500,000'), false, `${slug} does not expose inferred total context`);
     }
     assertEqual(
-      rollbackModels.some((model) => model.info.id.includes('context=1000000')),
+      rollbackModels.some((model) => model.info.id.includes('::context=')),
       false,
-      'GPT-5.6 models never expose a 1M profile'
+      'GPT-5.6 models do not expose synthetic long-context IDs'
     );
 
     const duplicateGpt56Models = buildProviderModels(chatGptConfig, [
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol First', { context_window: 272000, max_context_window: 272000 }),
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol Second', { context_window: 272000, max_context_window: 272000 })
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol First', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol Second', { context_window: 272000, max_context_window: 872000 })
     ], 'codexAccessToken');
     assertEqual(
       duplicateGpt56Models.map((model) => model.info.id).join(','),
-      'codex::gpt-5.6-sol,codex::gpt-5.6-sol::context=372000',
-      'duplicate GPT-5.6 rows yield one standard and one long ID'
+      'codex::gpt-5.6-sol',
+      'duplicate GPT-5.6 rows yield one model ID'
     );
     assertEqual(
       duplicateGpt56Models.map((model) => model.info.name).join(','),
-      'GPT-5.6-Sol First,GPT-5.6-Sol First (Long context) (Experimental)',
+      'GPT-5.6-Sol First',
       'duplicate GPT-5.6 rows preserve first-seen metadata and order'
     );
 
     const unrelatedModel = rollbackModels.find((model) => model.info.id === 'codex::gpt-5.6-nova');
-    assertEqual(unrelatedModel?.info.detail?.includes('Known raw context ceiling:'), false, 'unrelated GPT-5.6 model is unchanged');
+    assertEqual(unrelatedModel?.info.configurationSchema?.properties?.contextSize, undefined, 'equal maximum omits the context-size selector');
     assertEqual(
-      rollbackModels.some((model) => model.info.id === 'codex::gpt-5.6-nova::context=372000'),
+      rollbackModels.some((model) => model.info.id.includes('::context=')),
       false,
-      'unlisted GPT-5.6 slug has no long profile'
+      'long context does not create synthetic model IDs'
     );
 
     const apiKeyModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'openaiApiKey');
     assertEqual(
-      apiKeyModels.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
-      false,
-      'API-key catalog omits Codex account ceilings'
+      apiKeyModels.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+      828400,
+      'API-key catalog uses a valid discovered maximum'
     );
-    assertEqual(
-      apiKeyModels.some((model) => model.info.id.includes('::context=')),
-      false,
-      'API-key catalog omits GPT-5.6 long profiles'
-    );
-
     const customBackendModels = buildProviderModels(config, rollbackCatalog, 'codexAccessToken');
     assertEqual(
-      customBackendModels.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
-      false,
-      'custom backend catalog omits ChatGPT Codex ceilings'
-    );
-    assertEqual(
-      customBackendModels.some((model) => model.info.id.includes('::context=')),
-      false,
-      'custom backend catalog omits GPT-5.6 long profiles'
+      customBackendModels.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+      828400,
+      'custom backend catalog uses a valid discovered maximum'
     );
 
     for (const baseURL of [
@@ -582,14 +595,9 @@ async function runModelCatalogMetadataSmokeTest() {
     ]) {
       const models = buildProviderModels({ ...chatGptConfig, baseURL }, rollbackCatalog, 'codexAccessToken');
       assertEqual(
-        models.some((model) => model.info.detail?.includes('Known raw context ceiling:')),
-        false,
-        `noncanonical backend ${baseURL} omits known ceilings`
-      );
-      assertEqual(
-        models.some((model) => model.info.id.includes('::context=')),
-        false,
-        `noncanonical backend ${baseURL} omits long profiles`
+        models.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+        828400,
+        `backend ${baseURL} uses the valid discovered maximum`
       );
     }
 
@@ -597,10 +605,9 @@ async function runModelCatalogMetadataSmokeTest() {
       createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 372000, max_context_window: 372000 })
     ], 'codexAccessToken');
     const promotedModel = promotedModels[0];
-    assertEqual(promotedModel.info.maxInputTokens, 353400, 'future active 372K catalog value uses effective budget');
-    assertEqual(promotedModel.info.name.includes('(Experimental)'), false, 'active 372K catalog row is not a synthetic experimental profile');
-    assertEqual(promotedModel.info.detail?.includes('Known raw context ceiling:'), false, 'active 372K omits redundant known ceiling');
-    assertEqual(promotedModels.length, 1, 'active 372K catalog does not duplicate the long profile');
+    assertEqual(promotedModel.info.maxInputTokens, 353400, 'active 372K catalog value uses effective budget');
+    assertEqual(promotedModel.info.configurationSchema?.properties?.contextSize, undefined, 'equal active and maximum context omit the selector');
+    assertEqual(promotedModels.length, 1, 'active 372K catalog does not duplicate the model');
 
     const activeMillionModels = buildProviderModels(chatGptConfig, [
       createMockModel('gpt-5.4', 'GPT-5.4', { context_window: 1000000, max_context_window: 1000000 })
@@ -611,7 +618,7 @@ async function runModelCatalogMetadataSmokeTest() {
     const nearMatchModels = buildProviderModels(chatGptConfig, [
       createMockModel('gpt-5.4-preview', 'GPT-5.4 Preview', { context_window: 272000, max_context_window: 1000000 })
     ], 'codexAccessToken');
-    assertEqual(nearMatchModels.length, 1, 'non-exact GPT-5.4 slug has no long profile');
+    assertEqual(nearMatchModels[0].info.maxInputTokens, 950000, 'any model with a valid maximum receives the long-context budget');
 
     const fallbackCeiling = buildFallbackModel({
       ...chatGptConfig,
@@ -619,9 +626,9 @@ async function runModelCatalogMetadataSmokeTest() {
     }, 'codexAccessToken');
     assertEqual(fallbackCeiling.info.maxInputTokens, 258400, 'fallback keeps conservative effective budget');
     assertEqual(
-      fallbackCeiling.info.detail?.includes(`Known raw context ceiling: ${formattedKnownCeiling} tokens`),
-      true,
-      'fallback shows known raw context ceiling'
+      fallbackCeiling.info.detail?.includes('Maximum context:'),
+      false,
+      'fallback omits unverified maximum context'
     );
     const percentageOverride = buildProviderModels(config, [
       createMockModel('percentage-override', 'Percentage Override', {
@@ -724,11 +731,12 @@ async function runProviderLongContextSelectionSmokeTest() {
     const replies = [
       ['first reply', 'resp_standard'],
       ['long reply', 'resp_long'],
+      ['long follow-up reply', 'resp_long_follow_up'],
       ['downgrade reply', 'resp_downgrade']
     ];
     const reply = replies[responseRequests.length - 1];
     if (!reply) {
-      throw new Error('Unexpected extra context-profile request.');
+      throw new Error('Unexpected extra context-size request.');
     }
     writeSseResponse(response, reply[0], reply[1]);
   });
@@ -763,16 +771,17 @@ async function runProviderLongContextSelectionSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const standardModel = models.find((model) => model.id === 'codex::gpt-5.4');
-    const longModel = models.find((model) => model.id === 'codex::gpt-5.4::context=1000000');
-    if (!standardModel || !longModel) {
-      throw new Error('Expected selectable GPT-5.4 standard and long profiles.');
+    const model = models.find((candidate) => candidate.id === 'codex::gpt-5.4');
+    const contextSize = model?.configurationSchema?.properties?.contextSize;
+    if (!model || !contextSize) {
+      throw new Error('Expected one GPT-5.4 model with a Context Size selector.');
     }
-    assertEqual(standardModel.maxInputTokens, 258400, 'standard profile advertises effective budget');
-    assertEqual(longModel.maxInputTokens, 950000, 'long profile advertises effective budget');
+    assertEqual(model.maxInputTokens, 950000, 'model advertises maximum context size');
+    assertEqual(contextSize.enum.join(','), '258400,950000', 'model exposes standard and long context sizes');
+    assertEqual(contextSize.default, 258400, 'model defaults to the active context size');
 
     await provider.provideLanguageModelChatResponse(
-      standardModel,
+      model,
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
       {},
       { report() {} },
@@ -780,24 +789,40 @@ async function runProviderLongContextSelectionSmokeTest() {
     );
 
     await provider.provideLanguageModelChatResponse(
-      longModel,
+      model,
       [
         { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
         { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
         { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
       ],
-      {},
+      { modelConfiguration: { contextSize: 950000 } },
       { report() {} },
       token
     );
 
     await provider.provideLanguageModelChatResponse(
-      standardModel,
+      model,
       [
         { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
         { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
         { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] },
         { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('long reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Long follow up')] }
+      ],
+      { modelConfiguration: { contextSize: 950000 } },
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('long reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Long follow up')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('long follow-up reply')] },
         { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Downgrade')] }
       ],
       {},
@@ -805,37 +830,24 @@ async function runProviderLongContextSelectionSmokeTest() {
       token
     );
 
-    assertEqual(responseRequests.length, 3, 'profile transition request count');
-    assertEqual(selectedModels.join(','), 'gpt-5.4,gpt-5.4,gpt-5.4', 'all profiles resolve to the real selected model');
-    assertEqual(responseRequests[0].model, 'gpt-5.4', 'standard profile sends real backend model');
-    assertEqual(responseRequests[1].model, 'gpt-5.4', 'long profile sends real backend model');
-    assertEqual(responseRequests[1].previous_response_id, 'resp_standard', 'long profile reuses the standard profile branch');
-    assertEqual(
-      JSON.stringify(responseRequests[1].input),
-      JSON.stringify([{ role: 'user', content: 'Follow up', type: 'message' }]),
-      'long profile continuation sends only appended input'
-    );
-    assertEqual(responseRequests[2].model, 'gpt-5.4', 'downgraded standard profile sends real backend model');
-    assertEqual(responseRequests[2].previous_response_id, undefined, 'long-to-standard downgrade starts a new response chain');
-    assertEqual(
-      JSON.stringify(responseRequests[2].input),
-      JSON.stringify([
-        { role: 'user', content: 'First request', type: 'message' },
-        { role: 'assistant', content: 'first reply', type: 'message' },
-        { role: 'user', content: 'Follow up', type: 'message' },
-        { role: 'assistant', content: 'long reply', type: 'message' },
-        { role: 'user', content: 'Downgrade', type: 'message' }
-      ]),
-      'long-to-standard downgrade replays full caller history'
-    );
+    assertEqual(responseRequests.length, 4, 'context-size transition request count');
+    assertEqual(selectedModels.join(','), 'gpt-5.4,gpt-5.4,gpt-5.4,gpt-5.4', 'context sizes resolve to the real backend model');
     for (const body of responseRequests) {
+      assertEqual(body.model, 'gpt-5.4', 'context-size request sends the real backend model');
       assertEqual(
         Object.keys(body).some((key) => key.toLowerCase().includes('context')),
         false,
-        'profile request has no context-window field'
+        'context size remains client-side and is not sent as a Responses API parameter'
       );
-      assertEqual(JSON.stringify(body).includes('::context='), false, 'profile request has no synthetic identifier');
     }
+    assertEqual(responseRequests[1].previous_response_id, 'resp_standard', 'switching to a larger context safely reuses the completed smaller-context response');
+    assertEqual(responseRequests[2].previous_response_id, 'resp_long', 'same context size reuses its completed response');
+    assertEqual(
+      JSON.stringify(responseRequests[2].input),
+      JSON.stringify([{ role: 'user', content: 'Long follow up', type: 'message' }]),
+      'same context size sends only appended input'
+    );
+    assertEqual(responseRequests[3].previous_response_id, undefined, 'switching back to the default size starts an isolated chain');
   } finally {
     server.close();
   }
@@ -1020,7 +1032,12 @@ async function runInterleavedResponsePresentationSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({
+        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+          context_window: 272000,
+          max_context_window: 1000000
+        })]
+      }));
       return;
     }
 
@@ -1967,6 +1984,21 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
       if (!selectedNamespace || !selectedTool) {
         throw new Error('Expected native Tool Search request to contain a deferred namespace tool.');
       }
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'item_native_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            tools: [{ type: 'function', name: selectedTool }]
+          }]
+        }
+      });
       const item = {
         id: 'fc_native_replay',
         type: 'function_call',
@@ -2062,7 +2094,10 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
     const token = createCancellationToken();
     const model = buildProviderModels(
       configValues,
-      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        context_window: 272000,
+        max_context_window: 1000000
+      })],
       'codexAccessToken'
     ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
     if (!model) {
@@ -2073,7 +2108,7 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
     await provider.provideLanguageModelChatResponse(
       model,
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native tool.')] }],
-      { tools },
+      { tools, modelConfiguration: { contextSize: 950000 } },
       { report(part) { firstParts.push(part); } },
       token
     );
@@ -2123,15 +2158,27 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
     );
 
     assertEqual(responseRequests.length, 4, 'native replay performs initial, full-replay, rejected continuation, and recovery requests');
-    assertEqual('previous_response_id' in responseRequests[1], false, 'native HTTP tool output uses full replay');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'native HTTP context downgrade keeps previous response reuse disabled');
     const initialReplayCall = responseRequests[1].input.find((item) => item.type === 'function_call');
-    assertEqual(initialReplayCall.namespace, selectedNamespace, 'native HTTP full replay preserves the raw function-call namespace');
+    assertEqual(initialReplayCall.id, 'fc_native_replay', 'native HTTP context downgrade preserves the server function-call item id');
+    assertEqual(initialReplayCall.namespace, selectedNamespace, 'native HTTP context downgrade preserves the raw function-call namespace');
+    assertEqual(
+      responseRequests[1].input.filter((item) => item.type === 'tool_search_output').length,
+      1,
+      'native HTTP context downgrade includes the server Tool Search output exactly once'
+    );
+    assertEqual(responseRequests[1].input[1].id, 'item_native_search', 'native HTTP context downgrade preserves Tool Search output ordering');
     assertEqual(
       responseRequests[1].input.filter((item) => item.type === 'function_call').length,
       1,
-      'native HTTP full replay does not duplicate the converted function call'
+      'native HTTP context downgrade does not duplicate the canonical function call'
     );
-    assertEqual(responseRequests[1].input.at(-1).type, 'function_call_output', 'native HTTP full replay appends the matching output');
+    assertEqual(
+      responseRequests[1].input.filter((item) => item.type === 'function_call_output').length,
+      1,
+      'native HTTP context downgrade includes the matching output exactly once'
+    );
+    assertEqual(responseRequests[1].input.at(-1).type, 'function_call_output', 'native HTTP context downgrade appends the matching output');
     assertEqual(responseRequests[2].previous_response_id, 'resp_native_result', 'native follow-up first attempts incremental continuation');
     assertEqual(
       JSON.stringify(responseRequests[2].input),
@@ -2143,6 +2190,17 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
       JSON.stringify(responseRequests[3].input),
       JSON.stringify([
         { role: 'user', content: 'Run a deferred native tool.', type: 'message' },
+        {
+          id: 'item_native_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            tools: [{ type: 'function', name: selectedTool }]
+          }]
+        },
         {
           id: 'fc_native_replay',
           type: 'function_call',
@@ -2193,7 +2251,12 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
   const server = createServer((request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({
+        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+          context_window: 272000,
+          max_context_window: 1000000
+        })]
+      }));
       return;
     }
     httpResponseRequestCount += 1;
@@ -2223,6 +2286,21 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           }));
           return;
         }
+        webSocket.send(JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            id: 'item_native_ws_search',
+            type: 'tool_search_output',
+            execution: 'server',
+            status: 'completed',
+            tools: [{
+              type: 'namespace',
+              name: selectedNamespace,
+              tools: [{ type: 'function', name: selectedTool }]
+            }]
+          }
+        }));
         const item = {
           id: 'fc_native_ws_replay',
           type: 'function_call',
@@ -2244,19 +2322,35 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
         return;
       }
       if (frames.length === 2) {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'Native WebSocket tool result received.' }));
+        webSocket.send(JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            id: 'msg_native_ws_result',
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: 'Native WebSocket tool result received.', annotations: [] }]
+          }
+        }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_result', status: 'completed' } }));
+        return;
+      }
+      if (frames.length === 3) {
         webSocket.send(JSON.stringify({
           type: 'error',
           error: {
             type: 'invalid_request_error',
             code: 'previous_response_not_found',
-            message: 'Native WebSocket tool-output continuation expired.',
+            message: 'Native WebSocket context-downgrade continuation expired.',
             param: 'previous_response_id'
           },
           status: 400
         }));
         return;
       }
-      if (frames.length === 3) {
+      if (frames.length === 4) {
         webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'Native WebSocket continuation recovered.' }));
         webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_recovered', status: 'completed' } }));
         return;
@@ -2344,7 +2438,10 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
   try {
     const model = buildProviderModels(
       configValues,
-      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        context_window: 272000,
+        max_context_window: 1000000
+      })],
       'codexAccessToken'
     ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
     if (!model) {
@@ -2356,7 +2453,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
       provider.provideLanguageModelChatResponse(
         model,
         [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] }],
-        { tools },
+        { tools, modelConfiguration: { contextSize: 950000 } },
         { report(part) { firstParts.push(part); } },
         token
       ),
@@ -2369,7 +2466,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
     }
     assertEqual(toolCall.name, selectedTool, 'native WebSocket namespaced call maps to the selected VS Code tool');
 
-    const recoveredParts = [];
+    const downgradedParts = [];
     await withSmokeTimeout(
       provider.provideLanguageModelChatResponse(
         model,
@@ -2385,25 +2482,30 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           }
         ],
         { tools },
-        { report(part) { recoveredParts.push(part); } },
+        { report(part) { downgradedParts.push(part); } },
         token
       ),
       token,
-      'native WebSocket tool-output continuation recovery'
+      'native WebSocket context-downgrade canonical replay'
     );
 
-    assertEqual(frames.length, 3, 'native WebSocket recovery sends initial, incremental, and canonical retry frames');
-    assertEqual(frames[1].previous_response_id, 'resp_native_ws_tool', 'tool output is first sent with the previous response id');
+    assertEqual(frames.length, 2, 'native WebSocket context downgrade sends one canonical replay frame after the initial request');
+    assertEqual('previous_response_id' in frames[1], false, 'native WebSocket context downgrade keeps previous response reuse disabled');
     assertEqual(
       JSON.stringify(frames[1].input),
-      JSON.stringify([{ type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' }]),
-      'tool-output continuation sends only the matching incremental output'
-    );
-    assertEqual('previous_response_id' in frames[2], false, 'tool-output continuation-miss retry omits the stale response id');
-    assertEqual(
-      JSON.stringify(frames[2].input),
       JSON.stringify([
         { role: 'user', content: 'Run a deferred native WebSocket tool.', type: 'message' },
+        {
+          id: 'item_native_ws_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            tools: [{ type: 'function', name: selectedTool }]
+          }]
+        },
         {
           id: 'fc_native_ws_replay',
           type: 'function_call',
@@ -2414,27 +2516,105 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
         },
         { type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' }
       ]),
-      'tool-output continuation-miss retry sends exact ordered canonical replay'
+      'native WebSocket context downgrade sends exact ordered canonical call and output'
     );
+    assertEqual(frames[1].input.filter((item) => item.type === 'tool_search_output').length, 1, 'native WebSocket context downgrade includes one Tool Search output');
+    assertEqual(frames[1].input.filter((item) => item.type === 'function_call').length, 1, 'native WebSocket context downgrade includes one namespaced call');
+    assertEqual(frames[1].input.filter((item) => item.type === 'function_call_output').length, 1, 'native WebSocket context downgrade includes one matching output');
     assertEqual(
-      frames[2].input.filter((item) => item.type === 'function_call').length,
+      downgradedParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Native WebSocket tool result received.',
+      'native WebSocket context downgrade reports the completed replay response'
+    );
+
+    const recoveredParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, { value: 'websocket' })]
+          },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolResultPart('call_native_ws_replay', [new vscodeMock.LanguageModelTextPart('native websocket output')])]
+          },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Native WebSocket tool result received.')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the context downgrade.')] }
+        ],
+        { tools },
+        { report(part) { recoveredParts.push(part); } },
+        token
+      ),
+      token,
+      'native WebSocket context-downgrade continuation recovery'
+    );
+
+    assertEqual(frames.length, 4, 'native WebSocket recovery sends incremental continuation and canonical retry after downgrade replay');
+    assertEqual(frames[2].previous_response_id, 'resp_native_ws_result', 'post-downgrade follow-up first uses the new completed response id');
+    assertEqual(
+      JSON.stringify(frames[2].input),
+      JSON.stringify([{ role: 'user', content: 'Continue after the context downgrade.', type: 'message' }]),
+      'post-downgrade continuation sends only appended user input'
+    );
+    assertEqual('previous_response_id' in frames[3], false, 'post-downgrade continuation-miss retry omits the stale response id');
+    assertEqual(
+      JSON.stringify(frames[3].input),
+      JSON.stringify([
+        { role: 'user', content: 'Run a deferred native WebSocket tool.', type: 'message' },
+        {
+          id: 'item_native_ws_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            tools: [{ type: 'function', name: selectedTool }]
+          }]
+        },
+        {
+          id: 'fc_native_ws_replay',
+          type: 'function_call',
+          call_id: 'call_native_ws_replay',
+          name: selectedTool,
+          namespace: selectedNamespace,
+          arguments: '{"value":"websocket"}'
+        },
+        { type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' },
+        {
+          id: 'msg_native_ws_result',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Native WebSocket tool result received.', annotations: [] }]
+        },
+        { role: 'user', content: 'Continue after the context downgrade.', type: 'message' }
+      ]),
+      'post-downgrade continuation-miss retry sends exact ordered canonical replay'
+    );
+    assertEqual(frames[3].input.filter((item) => item.type === 'tool_search_output').length, 1, 'post-downgrade recovery contains exactly one Tool Search output');
+    assertEqual(
+      frames[3].input.filter((item) => item.type === 'function_call').length,
       1,
-      'tool-output continuation-miss retry contains exactly one namespaced function call'
+      'post-downgrade recovery contains exactly one namespaced function call'
     );
     assertEqual(
-      frames[2].input.filter((item) => item.type === 'function_call_output').length,
+      frames[3].input.filter((item) => item.type === 'function_call_output').length,
       1,
-      'tool-output continuation-miss retry contains exactly one matching output'
+      'post-downgrade recovery contains exactly one matching output'
     );
     assertEqual(
-      warnings.filter((entry) => entry.message === 'response tool-output continuation reset').length,
+      warnings.filter((entry) => entry.message === 'response continuation reset').length,
       1,
-      'tool-output continuation miss executes the dedicated provider recovery branch'
+      'post-downgrade continuation miss executes generic continuation recovery'
     );
     assertEqual(
-      warnings.some((entry) => entry.message === 'response continuation reset'),
+      warnings.some((entry) => entry.message === 'response tool-output continuation reset'),
       false,
-      'tool-output continuation miss does not execute generic continuation recovery'
+      'budget downgrade never executes tool-output incremental recovery'
     );
     assertEqual(httpResponseRequestCount, 0, 'structured WebSocket continuation miss never falls back to HTTP');
     assertEqual(
@@ -2466,6 +2646,250 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
       socket.terminate();
     }
     await closeWebSocketServer(webSocketServer);
+    await closeServer(server);
+  }
+}
+
+async function runDanglingCompletedToolCallFullReplaySmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+
+    if (responseRequests.length === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+      send({
+        type: 'response.output_item.added',
+        output_index: 0,
+        item: {
+          id: 'fc_dangling',
+          type: 'function_call',
+          call_id: 'call_dangling',
+          name: 'lookup_fixture',
+          arguments: ''
+        }
+      });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: 'fc_dangling',
+        output_index: 0,
+        name: '',
+        arguments: '{"key":"sample"}'
+      });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'fc_dangling',
+          type: 'function_call',
+          call_id: 'call_dangling',
+          name: 'lookup_fixture',
+          arguments: '{"key":"sample"}'
+        }
+      });
+      send({ type: 'response.completed', response: { id: 'resp_dangling_anchor', status: 'completed' } });
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+
+    writeSseResponse(response, 'Full replay complete.', 'resp_dangling_replayed');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const tool = {
+    name: 'lookup_fixture',
+    description: 'Looks up a synthetic fixture.',
+    inputSchema: {
+      type: 'object',
+      properties: { key: { type: 'string' } },
+      required: ['key']
+    }
+  };
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for dangling completed tool-call coverage.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Start tool turn.')] }],
+      { tools: [tool] },
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Start tool turn.')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_dangling', 'lookup_fixture', { key: 'sample' })]
+        },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Use a different approach.')] }
+      ],
+      { tools: [tool] },
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'dangling completed tool-call request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'dangling completed tool call omits previous response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Start tool turn.', type: 'message' },
+      {
+        role: 'assistant',
+        content: 'The previous assistant turn was interrupted before tool execution. It had prepared a call to lookup_fixture with arguments {"key":"sample"}, but no tool output was produced.',
+        type: 'message'
+      },
+      { role: 'user', content: 'Use a different approach.', type: 'message' }
+    ]), 'dangling completed tool call sends normalized full input');
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runCreatedResponseCancellationDoesNotRecordBranchSmokeTest() {
+  const responseRequests = [];
+  const infoMessages = [];
+  let canceledToken;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+
+    if (responseRequests.length === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      response.write(`data: ${JSON.stringify({
+        type: 'response.created',
+        response: { id: 'resp_created_only', status: 'in_progress' }
+      })}\n\n`);
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+
+    writeSseResponse(response, 'Fresh response complete.', 'resp_after_cancellation');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: {
+        async get() {
+          return 'test-api-key';
+        }
+      },
+      subscriptions: []
+    },
+    {
+      trace(message) {
+        if (message.startsWith('[provider] response created ')) {
+          canceledToken?.cancel();
+        }
+      },
+      debug() {},
+      info(message) {
+        infoMessages.push(message);
+      },
+      warn() {},
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const discoveryToken = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, discoveryToken);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for created-response cancellation coverage.');
+    }
+
+    canceledToken = createMutableCancellationToken();
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Cancel this turn.')] }],
+      {},
+      { report() {} },
+      canceledToken
+    );
+    assertEqual(canceledToken.isCancellationRequested, true, 'response.created triggers deterministic cancellation');
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Cancel this turn.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Start again.')] }
+      ],
+      {},
+      { report() {} },
+      createCancellationToken()
+    );
+
+    assertEqual(responseRequests.length, 2, 'created-response cancellation request count');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'created-only response id is not reused');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Cancel this turn.', type: 'message' },
+      { role: 'user', content: 'Start again.', type: 'message' }
+    ]), 'request after created-response cancellation sends full input');
+    assertEqual(infoMessages.includes('response reuse miss'), false, 'created-only response is never recorded as a branch');
+  } finally {
     await closeServer(server);
   }
 }

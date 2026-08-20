@@ -1,15 +1,19 @@
 # Codex transport architecture
 
-The compatibility profile is enabled only when both conditions are true:
+The default `auto` compatibility profile is enabled only when both conditions are true:
 
 1. The credential is a ChatGPT Codex access token.
 2. The endpoint is `https://chatgpt.com/backend-api/codex`.
 
 API-key and third-party endpoints keep the standard OpenAI SDK request path.
+`minimal` explicitly disables the projection. `custom` is an advanced opt-in for
+HTTPS gateways that intentionally implement the Codex wire contract.
 
 ## Modules
 
-- `codexProtocol.ts` owns the upstream commit marker, header names, WebSocket beta value, backend feature gate, metadata serialization, and response-header parsing.
+- `codexProtocol.ts` owns the upstream commit marker, canonical protocol snapshot,
+  safe override policy, body/header projections, WebSocket beta value, backend
+  feature gate, redacted effective-protocol diagnostic, and response-header parsing.
 - `codexIdentity.ts` owns installation, extension-host window, synthetic session/thread, fork parent, and turn identifiers.
 - `codexRequestBuilder.ts` creates the shared HTTP/WebSocket Responses request and the strict non-input request fingerprint.
 - `codexWebSocketSession.ts` is the only module that reaches the SDK Node WebSocket adapter. It serializes streams, captures upgrade headers and metadata events, enforces idle timeout, retains raw output items, prewarms, and creates incremental frames.
@@ -27,6 +31,7 @@ API-key and third-party endpoints keep the standard OpenAI SDK request path.
 | Session/thread | One synthetic append-only history branch |
 | Parent thread | Only a history fork with a non-empty matching prefix |
 | Turn | New user input; retained for tool results, retries, and recovery |
+| Parent/root turn | Derived from the synthetic append-only turn chain |
 | Turn State | One turn only; cleared before the next user turn |
 
 `prompt_cache_key` is the synthetic thread ID. The credential identity contains only account/source data and an irreversible token hash, so refreshed credentials cannot reuse an old connection.
@@ -48,4 +53,4 @@ Existing configuration keeps `transport: auto`. The two new settings default to 
 - `codexModelProvider.websocketPrewarm`
 - `codexModelProvider.requestCompression`
 
-No Codex-specific identity, beta header, prewarm, Turn State, or compression behavior is sent to ordinary OpenAI API keys or third-party endpoints.
+No Codex-specific identity, beta header, prewarm, Turn State, or compression behavior is sent to ordinary OpenAI API keys or third-party endpoints unless the user explicitly selects the advanced `custom` protocol profile for an HTTPS gateway.

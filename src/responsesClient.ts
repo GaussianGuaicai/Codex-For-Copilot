@@ -23,9 +23,9 @@ import { resolveProxyForURL } from './proxy';
 import {
   buildCodexWebSocketPreconnectHeaders,
   buildCodexRequestHeaders,
-  createCodexTurnMetadata,
-  stableSerializeCodexMetadata,
+  buildCodexProtocolSnapshot,
   type CodexCompatibilityProfile,
+  type CodexProtocolSettings,
   type CodexRequestIdentity
 } from './codexProtocol';
 import {
@@ -117,6 +117,8 @@ export interface StreamResponseTextOptions {
   authIdentity?: string;
   extensionVersion?: string;
   userAgent?: string;
+  protocolSettings?: CodexProtocolSettings;
+  turnStartedAtUnixMs?: number;
   websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
   requestCompression?: RequestCompressionPolicy;
   previousResponseId?: string;
@@ -173,6 +175,7 @@ export interface PreconnectCodexResponsesWebSocketOptions {
   authIdentity: string;
   extensionVersion?: string;
   userAgent?: string;
+  protocolSettings?: CodexProtocolSettings;
   onConnected?: CodexWebSocketPreconnectionObserver['onConnected'];
   onError?: CodexWebSocketPreconnectionObserver['onError'];
 }
@@ -219,7 +222,8 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
   const headers = buildCodexWebSocketPreconnectHeaders({
     credentialsHeaders: options.headers,
     extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
+    settings: options.protocolSettings
   });
 
   try {
@@ -299,9 +303,9 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         );
       }
 
-      if (isMissingFunctionCallForToolOutputError(error)) {
+      if (isFunctionCallContinuationIntegrityError(error)) {
         throw new ResponsesContinuationMissError(
-          'Responses API rejected function_call_output because its previous_response_id lacks the matching function_call.',
+          'Responses API rejected continuation because function calls and outputs are inconsistent with previous_response_id.',
           options.previousResponseId,
           { cause: error instanceof Error ? error : undefined }
         );
@@ -874,7 +878,9 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
     omitMaxOutputTokens: options.omitMaxOutputTokens,
     maxOutputTokens: options.maxOutputTokens,
     textVerbosity: 'medium',
-    includeEncryptedReasoning: true
+    includeEncryptedReasoning: true,
+    protocolSettings: options.protocolSettings,
+    turnStartedAtUnixMs: options.turnStartedAtUnixMs
   };
 }
 
@@ -882,11 +888,18 @@ function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'htt
   if (!options.compatibilityProfile?.enabled || !options.identity) {
     return { ...options.headers };
   }
-  const metadata = stableSerializeCodexMetadata(createCodexTurnMetadata(options.identity));
+  const snapshot = buildCodexProtocolSnapshot({
+    identity: options.identity,
+    turnStartedAtUnixMs: options.turnStartedAtUnixMs,
+    toolPlan: options.toolPlan,
+    settings: options.protocolSettings
+  });
+  const metadata = snapshot.compatibilityTurnMetadata;
   return buildCodexRequestHeaders({
     credentialsHeaders: options.headers,
     identity: options.identity,
     turnMetadata: metadata,
+    snapshot,
     turnState: options.turnState,
     extensionVersion: options.extensionVersion ?? '0.0.0',
     userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
@@ -1420,9 +1433,9 @@ function isOpaqueHttpContinuationRejection(error: unknown): boolean {
     && /\b400 status code \(no body\)/i.test(error.message);
 }
 
-function isMissingFunctionCallForToolOutputError(error: unknown): boolean {
+function isFunctionCallContinuationIntegrityError(error: unknown): boolean {
   return collectErrorMessages(error)
-    .some((message) => /no tool call found for function call output with call_id/i.test(message));
+    .some((message) => /no tool call found for function call output with call_id|no tool output found for function call\b/i.test(message));
 }
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {
@@ -1436,7 +1449,7 @@ function normalizeResponsesError(error: unknown, baseURL: string): Error {
   }
 
   if (error instanceof APIConnectionError) {
-    const causeMessage = getCauseMessage(error);
+    const causeMessage = getDeepestCauseSummary(error);
     return new Error(
       `Connection failure while contacting ${endpoint}. The OpenAI SDK automatically retried transient connection errors, but the request still failed.${causeMessage ? ` Root cause: ${causeMessage}` : ''}`,
       { cause: error }
@@ -1500,21 +1513,46 @@ function formatStatusAndRequestId(error: Pick<APIError, 'status' | 'requestID'>)
   return `${status}${requestId}`;
 }
 
-function getCauseMessage(error: Error & { cause?: unknown }): string | undefined {
-  const cause = error.cause;
-  if (!cause) {
-    return undefined;
+function getDeepestCauseSummary(error: Error & { cause?: unknown }): string | undefined {
+  let cause = readOwnErrorProperty(error, 'cause');
+  const seen = new WeakSet<object>();
+  let summary: string | undefined;
+
+  for (let depth = 0; depth < MAX_ERROR_TRAVERSAL_DEPTH; depth += 1) {
+    if (cause === undefined || cause === null || cause === UNREADABLE_ERROR_PROPERTY) {
+      break;
+    }
+
+    if (typeof cause === 'string') {
+      summary = cause.trim() || summary;
+      break;
+    }
+
+    if (typeof cause !== 'object') {
+      break;
+    }
+
+    if (seen.has(cause)) {
+      break;
+    }
+    seen.add(cause);
+
+    const message = readOwnErrorProperty(cause, 'message');
+    const code = readOwnErrorProperty(cause, 'code');
+    const messageText = typeof message === 'string' ? message.trim() : '';
+    const codeText = typeof code === 'string' || typeof code === 'number' ? String(code).trim() : '';
+    if (messageText) {
+      summary = codeText && !messageText.toLowerCase().includes(codeText.toLowerCase())
+        ? `${messageText} (${codeText})`
+        : messageText;
+    } else if (codeText) {
+      summary = codeText;
+    }
+
+    cause = readOwnErrorProperty(cause, 'cause');
   }
 
-  if (cause instanceof Error && cause.message.trim()) {
-    return cause.message.trim();
-  }
-
-  if (typeof cause === 'string' && cause.trim()) {
-    return cause.trim();
-  }
-
-  return undefined;
+  return summary;
 }
 
 async function safeReadResponseBody(response: Response): Promise<string> {

@@ -239,7 +239,7 @@ function runToolCallIdCanonicalizationSmokeTest(compareResponsesInputHistory) {
 }
 
 function runBranchStoreSmokeTest(ResponseBranchStore) {
-  const store = new ResponseBranchStore();
+  const store = createTestResponseBranchStore(ResponseBranchStore);
   const envelope = reuseEnvelope('reuse-key-a');
   const toolChangedEnvelope = reuseEnvelope('reuse-key-b');
   const previousInput = [
@@ -287,12 +287,12 @@ function runInputBudgetReuseSmokeTest(buildResponseBranchReuseEnvelope, Response
   assertEqual(standard.requestFingerprint, long.requestFingerprint, 'local budget stays out of request fingerprint');
   assertEqual(standard.identityKey, long.identityKey, 'local budget stays out of reuse identity');
 
-  const upgradeStore = new ResponseBranchStore();
+  const upgradeStore = createTestResponseBranchStore(ResponseBranchStore);
   upgradeStore.recordSuccess(standard, previousInput, 'resp_standard');
   assertEqual(upgradeStore.findReusableBranch(standard, appendInput)?.responseId, 'resp_standard', 'same budget reuses branch');
   assertEqual(upgradeStore.findReusableBranch(long, appendInput)?.responseId, 'resp_standard', 'larger budget reuses smaller-budget branch');
 
-  const downgradeStore = new ResponseBranchStore();
+  const downgradeStore = createTestResponseBranchStore(ResponseBranchStore);
   downgradeStore.recordSuccess(long, previousInput, 'resp_long');
   assertEqual(downgradeStore.findReusableBranch(standard, appendInput), undefined, 'smaller budget rejects larger-budget branch');
   const downgradeDiagnostic = downgradeStore.explainReuseMiss(standard, appendInput);
@@ -300,13 +300,13 @@ function runInputBudgetReuseSmokeTest(buildResponseBranchReuseEnvelope, Response
   assertEqual(downgradeDiagnostic?.previousEffectiveInputBudget, 950000, 'downgrade diagnostic reports stored budget');
   assertEqual(downgradeDiagnostic?.currentEffectiveInputBudget, 258400, 'downgrade diagnostic reports target budget');
 
-  const legacyStore = new ResponseBranchStore();
+  const legacyStore = createTestResponseBranchStore(ResponseBranchStore);
   legacyStore.recordSuccess(legacy, previousInput, 'resp_legacy');
   assertEqual(legacyStore.findReusableBranch(standard, appendInput), undefined, 'missing legacy budget fails closed');
 }
 
 function runBranchStoreDisableReuseSmokeTest(ResponseBranchStore) {
-  const store = new ResponseBranchStore();
+  const store = createTestResponseBranchStore(ResponseBranchStore);
   const envelope = reuseEnvelope('reuse-key-disabled');
   const previousInput = [
     { type: 'message', role: 'user', content: 'hello' },
@@ -330,7 +330,7 @@ function runBranchStoreDisableReuseSmokeTest(ResponseBranchStore) {
 }
 
 function runBranchStoreToolContinuationSmokeTest(ResponseBranchStore) {
-  const store = new ResponseBranchStore();
+  const store = createTestResponseBranchStore(ResponseBranchStore);
   const envelope = reuseEnvelope('reuse-key-tool-continuation');
   const previousInput = [
     { type: 'message', role: 'user', content: 'Find the file that handles auth.' },
@@ -413,7 +413,7 @@ function runToolCompatibilitySmokeTest(buildResponseBranchReuseEnvelope, buildRe
 
   assertEqual(left.identityKey === right.identityKey, false, 'tool catalog busts the semantic request fingerprint');
 
-  const store = new ResponseBranchStore();
+  const store = createTestResponseBranchStore(ResponseBranchStore);
   store.recordSuccess(left, previousInput, 'resp_tool_catalog_base');
   const additiveMatch = store.findReusableBranch(right, currentInput);
   assertEqual(additiveMatch, undefined, 'added tool busts reuse');
@@ -470,7 +470,7 @@ function runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, Res
     'cache_control does not affect tool result serialization'
   );
 
-  const store = new ResponseBranchStore();
+  const store = createTestResponseBranchStore(ResponseBranchStore);
   const envelope = reuseEnvelope('reuse-key-cache-control');
   const previousInput = [
     { type: 'message', role: 'user', content: 'Show me the asset name.' },
@@ -616,7 +616,7 @@ function runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convert
   assertEqual(comparison.matchedPrefixCount, previousInput.length, 'image placeholder matched prefix count');
   assertEqual(JSON.stringify(comparison.appendedInput), JSON.stringify([currentInput[3]]), 'image placeholder delta');
 
-  const store = new ResponseBranchStore();
+  const store = createTestResponseBranchStore(ResponseBranchStore);
   const envelope = reuseEnvelope('reuse-key-image-placeholder');
   store.recordSuccess(envelope, previousInput, 'resp_image_placeholder');
   const reusableMatch = store.findReusableBranch(envelope, currentInput);
@@ -661,12 +661,51 @@ function runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, conve
   assertEqual(comparison.matchedPrefixCount, previousInput.length, 'image URI annotation matched prefix count');
   assertEqual(JSON.stringify(comparison.appendedInput), JSON.stringify([currentInput[3]]), 'image URI annotation delta');
 
-  const store = new ResponseBranchStore();
+  const store = createTestResponseBranchStore(ResponseBranchStore);
   const envelope = reuseEnvelope('reuse-key-image-uri-annotation');
   store.recordSuccess(envelope, previousInput, 'resp_image_uri_annotation');
   const reusableMatch = store.findReusableBranch(envelope, currentInput);
   assertEqual(reusableMatch?.responseId, 'resp_image_uri_annotation', 'image URI annotation reuse previous response id');
   assertEqual(JSON.stringify(reusableMatch?.comparison.appendedInput ?? []), JSON.stringify([currentInput[3]]), 'image URI annotation reuse delta');
+}
+
+function createTestResponseBranchStore(ResponseBranchStore) {
+  const store = new ResponseBranchStore();
+  const recordSuccess = store.recordSuccess.bind(store);
+  store.recordSuccess = (envelope, input, responseId, branchId, state) => recordSuccess(
+    envelope,
+    input,
+    responseId,
+    branchId,
+    state ?? {
+      identity: {
+        installationId: 'test-installation',
+        sessionId: 'test-session',
+        threadId: 'test-thread',
+        windowId: 'test-window'
+      },
+      turn: {
+        id: `turn-${responseId}`,
+        startedAt: Date.now(),
+        completed: true
+      },
+      continuation: {
+        fullRequest: {
+          model: 'test-model',
+          instructions: 'Smoke test instructions',
+          input,
+          store: false,
+          stream: true
+        },
+        responseId,
+        responseItems: [],
+        requestFingerprint: envelope.requestFingerprint,
+        turnId: `turn-${responseId}`
+      },
+      updatedAt: Date.now()
+    }
+  );
+  return store;
 }
 
 function assertEqual(actual, expected, label) {

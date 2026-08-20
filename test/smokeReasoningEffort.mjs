@@ -52,8 +52,9 @@ const { buildProviderModels } = require(modelsBundlePath);
 try {
   const model = buildProviderModels(createConfig(), [createCatalogModel()], 'codexAccessToken')[0];
   const schema = model.info.configurationSchema?.properties?.reasoningEffort;
-  if (!schema) {
-    throw new Error('Expected a reasoning effort configuration schema.');
+  const contextSizeSchema = model.info.configurationSchema?.properties?.contextSize;
+  if (!schema || !contextSizeSchema) {
+    throw new Error('Expected Thinking Effort and Context Size configuration schemas.');
   }
 
   assertEqual(
@@ -67,6 +68,12 @@ try {
     'known and custom reasoning efforts receive readable labels'
   );
   assertEqual(schema.default, 'low', 'catalog default reasoning effort');
+  assertEqual(contextSizeSchema.group, 'tokens', 'context size uses the native tokens group');
+  assertEqual(contextSizeSchema.enum.join(','), '258400,828400', 'context size preserves effective input budgets');
+  assertEqual(contextSizeSchema.enumItemLabels.join(','), '272K,872K', 'context size shows raw context-window picker labels');
+  assertEqual(contextSizeSchema.enumDescriptions.join(','), 'Default context size.,Long context.', 'context size labels the discovered maximum option');
+  assertEqual(contextSizeSchema.default, 258400, 'context size defaults to the active context window');
+  assertEqual(model.info.maxInputTokens, 828400, 'model advertises its maximum selectable context size');
   assertEqual(
     schema.enumDescriptions[3],
     'Use the Future Effort reasoning effort advertised by the selected model.',
@@ -156,8 +163,8 @@ function createCatalogModel() {
   return {
     slug: 'gpt-5.6-sol',
     display_name: 'GPT-5.6-Sol',
-    context_window: 372000,
-    max_context_window: 372000,
+    context_window: 272000,
+    max_context_window: 872000,
     default_reasoning_level: 'low',
     supported_reasoning_levels: [
       { effort: 'low', description: 'Fast responses with lighter reasoning' },

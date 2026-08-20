@@ -6,9 +6,9 @@ import type { ResponsesInputMessage } from './convertMessages';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
 import type { CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
 import {
-  CodexHeader,
-  createCodexTurnMetadata,
-  stableSerializeCodexMetadata,
+  buildCodexClientMetadataProjection,
+  buildCodexProtocolSnapshot,
+  type CodexProtocolSettings,
   type CodexRequestIdentity
 } from './codexProtocol';
 
@@ -41,6 +41,8 @@ export interface CodexRequestBuilderOptions {
   includeEncryptedReasoning?: boolean;
   requestKind?: 'turn' | 'prewarm';
   websocketRequestStartedAt?: number;
+  turnStartedAtUnixMs?: number;
+  protocolSettings?: CodexProtocolSettings;
 }
 
 export type CodexRequestEnvelopeOptions = Omit<
@@ -71,8 +73,17 @@ export function buildCodexResponsesRequestWithMetrics(
   const legacyToolSchemas = options.toolPlan ? undefined : resolveCodexToolSchemas(options.tools);
   const toolPlan = options.toolPlan;
   const tools = toolPlan?.responseTools ?? legacyToolSchemas?.responseTools ?? [];
-  const metadata = options.compatibilityEnabled && options.identity
-    ? buildCodexClientMetadata(options.identity, options.requestKind ?? 'turn', options.websocketRequestStartedAt)
+  const protocolSnapshot = options.compatibilityEnabled && options.identity
+    ? buildCodexProtocolSnapshot({
+        identity: options.identity,
+        requestKind: options.requestKind ?? 'turn',
+        turnStartedAtUnixMs: options.turnStartedAtUnixMs,
+        toolPlan: options.toolPlan,
+        settings: options.protocolSettings
+      })
+    : undefined;
+  const metadata = protocolSnapshot
+    ? buildCodexClientMetadataProjection(protocolSnapshot, options.websocketRequestStartedAt)
     : undefined;
   const compatibilityFields = options.compatibilityEnabled
     ? {
@@ -141,19 +152,10 @@ export function buildCodexClientMetadata(
   requestKind: 'turn' | 'prewarm',
   websocketRequestStartedAt?: number
 ): Record<string, string> {
-  const turnMetadata = stableSerializeCodexMetadata(createCodexTurnMetadata(identity, requestKind));
-  return {
-    [CodexHeader.installationId]: identity.installationId,
-    session_id: identity.sessionId,
-    thread_id: identity.threadId,
-    turn_id: identity.turnId,
-    [CodexHeader.windowId]: identity.windowId,
-    [CodexHeader.turnMetadata]: turnMetadata,
-    ...(identity.parentThreadId ? { [CodexHeader.parentThreadId]: identity.parentThreadId } : {}),
-    ...(websocketRequestStartedAt === undefined
-      ? {}
-      : { 'x-codex-ws-stream-request-start-ms': String(websocketRequestStartedAt) })
-  };
+  return buildCodexClientMetadataProjection(
+    buildCodexProtocolSnapshot({ identity, requestKind }),
+    websocketRequestStartedAt
+  );
 }
 
 export function fingerprintCodexRequest(request: CodexResponsesRequest): string {
@@ -168,10 +170,11 @@ export function fingerprintCodexRequest(request: CodexResponsesRequest): string 
 }
 
 export function fingerprintCodexRequestEnvelope(options: CodexRequestEnvelopeOptions): string {
-  return fingerprintCodexRequest(buildCodexResponsesRequest({
+  const requestFingerprint = fingerprintCodexRequest(buildCodexResponsesRequest({
     ...options,
     input: []
   }));
+  return stableSerialize({ requestFingerprint, protocolSettings: options.protocolSettings ?? null });
 }
 
 export function areCodexRequestsIncrementallyCompatible(

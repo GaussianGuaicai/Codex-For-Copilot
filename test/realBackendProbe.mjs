@@ -19,6 +19,7 @@ const runContinuationProbe = process.env.CODEX_TEST_CONTINUATION === '1';
 const runPreconnectionProbe = process.env.CODEX_TEST_PRECONNECT === '1';
 const shouldRunToolContinuationProbe = process.env.CODEX_TEST_TOOL_CONTINUATION === '1';
 const shouldRunNativeToolSearchProbe = process.env.CODEX_TEST_NATIVE_TOOL_SEARCH === '1';
+const shouldAssertContextCatalog = process.env.CODEX_TEST_ASSERT_CONTEXT_CATALOG === '1';
 const requestStore = process.env.CODEX_TEST_STORE === '1';
 const requestedPrewarm = parsePrewarmSetting(process.env.CODEX_TEST_PREWARM);
 const requestedReasoningEffort = parseReasoningEffort(process.env.CODEX_TEST_REASONING_EFFORT);
@@ -143,6 +144,9 @@ try {
   if (discoveredModels.length === 0) {
     throw new Error('Model discovery returned no callable models.');
   }
+  const contextCatalog = shouldAssertContextCatalog
+    ? assertGpt56ContextCatalog(discoveredModels)
+    : undefined;
 
   const deltas = [];
   const reasoningSources = new Set();
@@ -337,6 +341,7 @@ try {
   console.log(JSON.stringify({
     model: requestedModel,
     discoveredModelCount: discoveredModels.length,
+    contextCatalog,
     transport: requestedTransport,
     continuationProbe: runContinuationProbe,
     preconnectionProbe: preconnection,
@@ -672,6 +677,44 @@ function assertEqual(actual, expected, label) {
   if (actual !== expected) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
+}
+
+function assertGpt56ContextCatalog(models) {
+  const gpt56Models = models.filter((model) => typeof model?.slug === 'string' && model.slug.startsWith('gpt-5.6-'));
+  if (gpt56Models.length === 0) {
+    throw new Error('Context catalog assertion expected at least one GPT-5.6 model.');
+  }
+
+  return gpt56Models.map((model) => {
+    const activeRawContextWindow = getPositiveSafeInteger(model.context_window);
+    const maximumRawContextWindow = getPositiveSafeInteger(model.max_context_window);
+    if (activeRawContextWindow === undefined || maximumRawContextWindow === undefined) {
+      throw new Error(`Context catalog assertion requires valid windows for ${model.slug}.`);
+    }
+    if (maximumRawContextWindow < activeRawContextWindow) {
+      throw new Error(`Context catalog assertion requires a non-decreasing maximum for ${model.slug}.`);
+    }
+
+    const effectiveContextWindowPercent = typeof model.effective_context_window_percent === 'number'
+      && Number.isFinite(model.effective_context_window_percent)
+      && model.effective_context_window_percent > 0
+      && model.effective_context_window_percent <= 100
+      ? model.effective_context_window_percent
+      : 95;
+    return {
+      slug: model.slug,
+      activeRawContextWindow,
+      maximumRawContextWindow,
+      effectiveContextWindowPercent,
+      maximumEffectiveInputBudget: Math.floor(maximumRawContextWindow * effectiveContextWindowPercent / 100)
+    };
+  });
+}
+
+function getPositiveSafeInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 function parsePrewarmSetting(value) {
