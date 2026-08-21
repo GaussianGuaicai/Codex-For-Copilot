@@ -400,7 +400,7 @@ async function runNativeReplayValidationSmokeTest() {
         output_index: 0,
         item: {
           type: 'function_call',
-          call_id: 'call_missing_native_id',
+          call_id: ' call_missing_native_id ',
           name: selectedTool,
           namespace: selectedNamespace,
           arguments: '{}'
@@ -559,7 +559,7 @@ async function runNativeReplayValidationSmokeTest() {
     } catch (error) {
       missingIdError = error;
     }
-    assertEqual(missingIdError?.message.includes('without an item id'), true, 'Native calls reject a call_id substituted for a missing backend item id');
+    assertEqual(missingIdError?.message.includes('without an item id'), true, 'Native calls reject a whitespace-padded call_id substituted for a missing backend item id');
     assertEqual(missingIdParts.some((part) => part instanceof LanguageModelToolCallPart), false, 'missing-id Native calls are never reported');
     assertEqual(getStatefulMarkers(missingIdParts).length, 0, 'missing-id Native calls are never persisted');
 
@@ -3830,6 +3830,7 @@ async function runNativeAutoFallbackRawStateIsolationSmokeTest() {
   const sockets = new Set();
   let selectedNamespace;
   let selectedTool;
+  let selectedNamespaceDefinition;
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -3848,6 +3849,7 @@ async function runNativeAutoFallbackRawStateIsolationSmokeTest() {
       const namespaceTool = body.tools.find((tool) => tool.type === 'namespace');
       selectedNamespace = namespaceTool?.name;
       selectedTool = namespaceTool?.tools?.[0]?.name;
+      selectedNamespaceDefinition = structuredClone(namespaceTool);
       if (!selectedNamespace || !selectedTool) {
         response.writeHead(500, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ error: { message: 'Expected Native Tool Search namespace.' } }));
@@ -3860,6 +3862,17 @@ async function runNativeAutoFallbackRawStateIsolationSmokeTest() {
       });
       const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
       send({ type: 'response.output_text.delta', delta: 'Before native tool. ' });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'rs_http_attempt',
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'Validated replay summary.', injected: 'must-not-replay' }],
+          encrypted_content: 'reasoning-ciphertext',
+          injected: 'must-not-replay'
+        }
+      });
       send({
         type: 'response.output_item.done',
         output_index: 0,
@@ -4070,6 +4083,21 @@ async function runNativeAutoFallbackRawStateIsolationSmokeTest() {
     assertEqual(responseRequests[1].input.some((item) => item.id === 'item_unmapped_search'), false, 'marker replay excludes Tool Search entries outside the submitted catalog');
     assertEqual(responseRequests[1].input.some((item) => item.id === 'item_http_attempt_search'), true, 'marker replay retains successful HTTP raw output');
     assertEqual(JSON.stringify(responseRequests[1].input).includes('must-not-replay'), false, 'marker replay projects away unknown fields from allowed raw items');
+    const replayReasoning = responseRequests[1].input.find((item) => item.id === 'rs_http_attempt');
+    assertEqual(JSON.stringify(replayReasoning), JSON.stringify({
+      type: 'reasoning',
+      id: 'rs_http_attempt',
+      summary: [{ type: 'summary_text', text: 'Validated replay summary.' }],
+      encrypted_content: 'reasoning-ciphertext'
+    }), 'marker replay projects reasoning into the complete input schema');
+    const replaySearchOutput = responseRequests[1].input.find((item) => item.id === 'item_http_attempt_search');
+    const replayNamespace = replaySearchOutput?.tools?.[0];
+    assertEqual(replayNamespace?.description, selectedNamespaceDefinition?.description, 'marker replay restores the trusted namespace description');
+    assertEqual(
+      JSON.stringify(replayNamespace?.tools?.[0]),
+      JSON.stringify(selectedNamespaceDefinition?.tools?.[0]),
+      'marker replay restores the trusted complete function definition'
+    );
     assertEqual(responseRequests[1].input.filter((item) => item.type === 'function_call').length, 1, 'marker replay contains exactly one successful HTTP function call');
     const replayCallIndex = responseRequests[1].input.findIndex((item) => item.type === 'function_call');
     const replayCall = responseRequests[1].input[replayCallIndex];

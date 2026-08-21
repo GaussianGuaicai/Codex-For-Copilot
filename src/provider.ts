@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import type { ResponseUsage } from 'openai/resources/responses/responses';
+import type { NamespaceTool, ResponseReasoningItem, ResponseUsage } from 'openai/resources/responses/responses';
 import {
   compareResponsesInputHistory,
   createStatefulMarkerPayload,
@@ -856,13 +856,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         onToolCall: (call) => {
           const mapped = mapNativeToolCall(toolPlan, call);
           const { callId, input: toolInput, vscodeName: name } = mapped;
+          const itemId = call.itemId.trim();
           if (toolPlan.mode === 'native-hosted'
-            && (!call.itemId.trim() || call.itemId === call.callId)) {
+            && (!itemId || itemId === callId)) {
             throw new Error('Responses returned a Native Tool Search function call without an item id.');
           }
           flushReplayText();
           replayResponseItems.push({
-            ...(toolPlan.mode === 'native-hosted' ? { id: call.itemId } : {}),
+            ...(toolPlan.mode === 'native-hosted' ? { id: itemId } : {}),
             type: 'function_call',
             call_id: callId,
             name: toolPlan.mode === 'native-hosted' ? call.name : name,
@@ -2232,19 +2233,21 @@ export function hasCanonicalReplayContinuationIntegrity(
 const OMIT_LOCAL_REPLAY_ITEM = Symbol('omit-local-replay-item');
 const INVALID_LOCAL_REPLAY_ITEM = Symbol('invalid-local-replay-item');
 
-function projectSafeRawReplayItem(item: unknown, toolPlan: CodexToolPlan): unknown | undefined {
+function projectSafeRawReplayItem(item: unknown, toolPlan: CodexToolPlan): ResponsesInputMessage | undefined {
   if (!isReplayRecord(item)) {
     return undefined;
   }
   if (item.type === 'reasoning') {
-    if (!isNonEmptyString(item.id)) {
+    const summary = projectReasoningSummary(item.summary);
+    if (!isNonEmptyString(item.id) || !summary) {
       return undefined;
     }
     return {
       type: 'reasoning',
       id: item.id,
+      summary,
       ...(typeof item.encrypted_content === 'string' ? { encrypted_content: item.encrypted_content } : {})
-    };
+    } satisfies ResponseReasoningItem;
   }
   if (toolPlan.mode !== 'native-hosted'
     || !isNonEmptyString(item.id)
@@ -2266,25 +2269,48 @@ function projectSafeRawReplayItem(item: unknown, toolPlan: CodexToolPlan): unkno
   if (item.type !== 'tool_search_output' || !Array.isArray(item.tools)) {
     return undefined;
   }
-  const tools = [];
+  const tools: NamespaceTool[] = [];
+  const namespaceNames = new Set<string>();
   for (const namespace of item.tools) {
     if (!isReplayRecord(namespace)
       || namespace.type !== 'namespace'
       || !isNonEmptyString(namespace.name)
-      || !Array.isArray(namespace.tools)) {
+      || !Array.isArray(namespace.tools)
+      || namespaceNames.has(namespace.name)) {
       return undefined;
     }
-    const namespaceTools = [];
+    const trustedNamespace = toolPlan.responseTools.find(
+      (candidate): candidate is NamespaceTool => candidate.type === 'namespace' && candidate.name === namespace.name
+    );
+    if (!trustedNamespace) {
+      return undefined;
+    }
+    namespaceNames.add(namespace.name);
+    const namespaceTools: NamespaceTool['tools'] = [];
+    const toolNames = new Set<string>();
     for (const tool of namespace.tools) {
       if (!isReplayRecord(tool)
         || tool.type !== 'function'
         || !isNonEmptyString(tool.name)
+        || toolNames.has(tool.name)
         || !toolPlan.callMappings.has(createToolCallMappingKey(namespace.name, tool.name))) {
         return undefined;
       }
-      namespaceTools.push({ type: 'function', name: tool.name });
+      const trustedTool = trustedNamespace.tools.find(
+        (candidate) => candidate.type === 'function' && candidate.name === tool.name
+      );
+      if (!trustedTool) {
+        return undefined;
+      }
+      toolNames.add(tool.name);
+      namespaceTools.push(structuredClone(trustedTool));
     }
-    tools.push({ type: 'namespace', name: namespace.name, tools: namespaceTools });
+    tools.push({
+      type: 'namespace',
+      name: trustedNamespace.name,
+      description: trustedNamespace.description,
+      tools: namespaceTools
+    });
   }
   return {
     type: 'tool_search_output',
@@ -2292,7 +2318,21 @@ function projectSafeRawReplayItem(item: unknown, toolPlan: CodexToolPlan): unkno
     execution: 'server',
     status: 'completed',
     tools
-  };
+  } satisfies ResponsesInputMessage;
+}
+
+function projectReasoningSummary(value: unknown): ResponseReasoningItem['summary'] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const summary: ResponseReasoningItem['summary'] = [];
+  for (const part of value) {
+    if (!isReplayRecord(part) || part.type !== 'summary_text' || typeof part.text !== 'string') {
+      return undefined;
+    }
+    summary.push({ type: 'summary_text', text: part.text });
+  }
+  return summary;
 }
 
 function isReplayRecord(value: unknown): value is Record<string, unknown> {
