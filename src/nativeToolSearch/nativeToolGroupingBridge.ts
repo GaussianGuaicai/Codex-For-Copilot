@@ -7,9 +7,32 @@ const NATIVE_TOOL_SEARCH_SETTING = 'nativeToolSearch';
 const RESET_VIRTUAL_TOOL_GROUPS_COMMAND = 'github.copilot.debug.resetVirtualToolGroups';
 export const NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY = 'nativeToolSearch.virtualToolsThresholdOwner';
 const PREVIOUS_KEY = 'nativeToolSearch.virtualToolsThresholdPrevious';
+const SAVED_THRESHOLD_VERSION = 1;
 let groupingBridgeOperation: Promise<void> = Promise.resolve();
 
-interface SavedThreshold { value: unknown; target: vscode.ConfigurationTarget }
+type WindowConfigurationTarget = vscode.ConfigurationTarget.Global | vscode.ConfigurationTarget.Workspace;
+type StoredThresholdTarget = 'global' | 'workspace';
+
+type SavedThresholdRecordV1 = {
+  version: 1;
+  target: StoredThresholdTarget;
+  previous: 'absent';
+} | {
+  version: 1;
+  target: StoredThresholdTarget;
+  previous: 'value';
+  value: number;
+};
+
+interface SavedThreshold {
+  value?: number;
+  target: WindowConfigurationTarget;
+}
+
+interface SettingSnapshot {
+  value: unknown;
+  target: WindowConfigurationTarget;
+}
 
 type ThresholdStateScope = 'legacy-global' | 'workspace';
 
@@ -20,7 +43,14 @@ interface ThresholdState {
 
 interface OwnedThresholdState extends ThresholdState {
   thresholds: SavedThreshold[];
-  retainedThresholds: SavedThreshold[];
+  retainedThresholds: unknown[];
+  policyTargets: WindowConfigurationTarget[];
+}
+
+interface ParsedThresholdEntries {
+  entries: unknown[];
+  actionable: SavedThreshold[];
+  opaque: unknown[];
 }
 
 interface NativeToolGroupingBridgeOwnershipContext {
@@ -35,28 +65,18 @@ export interface NativeToolGroupingBridgeStatus {
 }
 
 export function hasNativeToolGroupingBridgeOwnership(context: NativeToolGroupingBridgeOwnershipContext): boolean {
-  if (context.workspaceState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true) {
+  if (context.workspaceState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true
+    && parseThresholdEntries(context.workspaceState, 'workspace').actionable.length > 0) {
     return true;
   }
   if (context.globalState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) !== true) {
     return false;
   }
-  const savedThresholds = getSavedThresholds(context.globalState, 'legacy-global');
-  if (savedThresholds.length === 0
-    || savedThresholds.some((saved) => saved.target === vscode.ConfigurationTarget.Global)) {
-    return true;
-  }
-  const inspectedThreshold = vscode.workspace
-    .getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION)
-    .inspect<number>(THRESHOLD_SETTING);
-  return getEligibleLegacyGlobalThresholds(context, inspectedThreshold).length > 0;
+  return parseThresholdEntries(context.globalState, 'legacy-global').actionable.length > 0;
 }
 
 export async function migrateNativeToolSearchOptIn(context: vscode.ExtensionContext): Promise<boolean> {
-  const inspectedThreshold = vscode.workspace
-    .getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION)
-    .inspect<number>(THRESHOLD_SETTING);
-  if (!hasEligibleLegacyGlobalOwnership(context, inspectedThreshold)) {
+  if (!hasEligibleLegacyGlobalOwnership(context)) {
     return false;
   }
   const configuration = vscode.workspace.getConfiguration(PROVIDER_CONFIGURATION_SECTION);
@@ -90,25 +110,40 @@ async function enableNativeToolSearchGroupingBridgeImpl(context: vscode.Extensio
   const nativeToolSearchConfiguration = vscode.workspace.getConfiguration(PROVIDER_CONFIGURATION_SECTION);
   const inspectedThreshold = virtualToolsConfiguration.inspect<number>(THRESHOLD_SETTING);
   const inspectedNativeToolSearch = nativeToolSearchConfiguration.inspect<string>(NATIVE_TOOL_SEARCH_SETTING);
-  const thresholdTarget = getEffectiveSettingTarget(inspectedThreshold);
-  const nativeToolSearchTarget = getEffectiveSettingTarget(inspectedNativeToolSearch);
-  const thresholdStore = getStateForTarget(context, thresholdTarget, inspectedThreshold);
+  const thresholdTarget = getSharedEffectiveSettingTarget(inspectedThreshold, inspectedNativeToolSearch);
+  const nativeToolSearchTarget = thresholdTarget;
+  const thresholdStore = getStateForTarget(context, thresholdTarget);
   const thresholdState = thresholdStore.state;
-  const savedThresholds = getSavedThresholds(
-    thresholdState,
-    thresholdStore.scope
-  );
-  if (!savedThresholds.some((saved) => saved.target === thresholdTarget)) {
-    savedThresholds.push({
-      value: getSettingValueAtTarget(inspectedThreshold, thresholdTarget),
-      target: thresholdTarget
-    });
-  }
-
+  const parsedThresholds = parseThresholdEntries(thresholdState, thresholdStore.scope);
   const previousThreshold = getSettingValueAtTarget(inspectedThreshold, thresholdTarget);
+  if (!isValidThresholdValue(previousThreshold)) {
+    void vscode.window.showErrorMessage(
+      'Native Tool Search could not enable its VS Code grouping bridge because the current Virtual Tool threshold is invalid. No settings were changed.'
+    );
+    return;
+  }
   const previousNativeToolSearch = getSettingValueAtTarget(inspectedNativeToolSearch, nativeToolSearchTarget);
   const previousSavedThresholds = thresholdState.get<unknown>(PREVIOUS_KEY);
   const previousOwner = thresholdState.get<unknown>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY);
+  const recognizedThresholds = parsedThresholds.entries.filter((entry) => (
+    isRecognizedThresholdRecord(entry, thresholdTarget)
+  ));
+  if ((previousOwner !== true && recognizedThresholds.length > 0)
+    || (previousOwner === true && parsedThresholds.actionable.length !== 1)) {
+    void vscode.window.showErrorMessage(
+      'Native Tool Search found ambiguous grouping recovery metadata. No settings were changed; restore or clear the previous ownership state before enabling it again.'
+    );
+    return;
+  }
+  const ownedThresholds = previousOwner === true ? parsedThresholds.actionable : [];
+  const ownedThreshold = ownedThresholds.length === 1 ? ownedThresholds[0] : undefined;
+  const savedThresholds = previousOwner === true
+    ? parsedThresholds.entries.filter((entry) => !isRecognizedThresholdRecord(entry, thresholdTarget))
+    : [...parsedThresholds.entries];
+  savedThresholds.push(createSavedThreshold(
+    ownedThreshold ? ownedThreshold.value : previousThreshold,
+    thresholdTarget
+  ));
   let phase: 'persistence' | 'settings' | 'reset' = 'persistence';
   let thresholdUpdateAttempted = false;
   let nativeToolSearchUpdateAttempted = false;
@@ -177,40 +212,41 @@ export function restoreVSCodeToolGrouping(context: vscode.ExtensionContext): Pro
 }
 
 async function restoreVSCodeToolGroupingImpl(context: vscode.ExtensionContext): Promise<void> {
-  const virtualToolsConfiguration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
-  const inspectedThreshold = virtualToolsConfiguration.inspect<number>(THRESHOLD_SETTING);
-  const ownedStates = getOwnedThresholdStates(context, inspectedThreshold);
+  const ownedStates = getOwnedThresholdStates(context);
   const bridgeEnabled = ownedStates.length > 0;
-  const nativeToolSearchConfiguration = vscode.workspace.getConfiguration(PROVIDER_CONFIGURATION_SECTION);
-  const inspectedNativeToolSearch = nativeToolSearchConfiguration.inspect<string>(NATIVE_TOOL_SEARCH_SETTING);
-  const nativeToolSearchTarget = getEffectiveSettingTarget(inspectedNativeToolSearch);
-  const previousNativeToolSearch = getSettingValueAtTarget(inspectedNativeToolSearch, nativeToolSearchTarget);
+  if (!bridgeEnabled) {
+    void vscode.window.showInformationMessage(
+      'No Native Tool Search grouping bridge is owned by this workspace. No settings were changed.'
+    );
+    return;
+  }
+  const nativeToolSearchTargets = [...new Set(ownedStates.flatMap((owned) => owned.policyTargets))];
+  const updatedNativeToolSearchSettings: SettingSnapshot[] = [];
   const restoredThresholds: Array<SavedThreshold & { currentValue: unknown }> = [];
-  let nativeToolSearchUpdateAttempted = false;
   try {
-    if (nativeToolSearchConfiguration.get<string>(NATIVE_TOOL_SEARCH_SETTING, 'disabled') !== 'disabled') {
-      nativeToolSearchUpdateAttempted = true;
-      await nativeToolSearchConfiguration.update(NATIVE_TOOL_SEARCH_SETTING, 'disabled', nativeToolSearchTarget);
+    for (const target of nativeToolSearchTargets) {
+      const nativeToolSearchConfiguration = vscode.workspace.getConfiguration(PROVIDER_CONFIGURATION_SECTION);
+      const inspectedNativeToolSearch = nativeToolSearchConfiguration.inspect<string>(NATIVE_TOOL_SEARCH_SETTING);
+      const previousValue = getSettingValueAtTarget(inspectedNativeToolSearch, target);
+      if (previousValue !== 'disabled') {
+        updatedNativeToolSearchSettings.push({ target, value: previousValue });
+        await nativeToolSearchConfiguration.update(NATIVE_TOOL_SEARCH_SETTING, 'disabled', target);
+      }
     }
-    if (bridgeEnabled) {
-      for (const owned of ownedStates) {
-        for (const previous of owned.thresholds) {
-          const currentInspection = virtualToolsConfiguration.inspect<number>(THRESHOLD_SETTING);
-          const currentValue = getSettingValueAtTarget(currentInspection, previous.target);
-          if (currentValue === 0) {
-            restoredThresholds.push({ ...previous, currentValue });
-            await virtualToolsConfiguration.update(THRESHOLD_SETTING, previous.value, previous.target);
-          }
+    for (const owned of ownedStates) {
+      for (const previous of owned.thresholds) {
+        const virtualToolsConfiguration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
+        const currentInspection = virtualToolsConfiguration.inspect<number>(THRESHOLD_SETTING);
+        const currentValue = getSettingValueAtTarget(currentInspection, previous.target);
+        if (currentValue === 0) {
+          restoredThresholds.push({ ...previous, currentValue });
+          await virtualToolsConfiguration.update(THRESHOLD_SETTING, previous.value, previous.target);
         }
       }
     }
   } catch (error) {
     const rollbackErrors = await rollbackVSCodeToolGroupingRestore({
-      virtualToolsConfiguration,
-      nativeToolSearchConfiguration,
-      nativeToolSearchTarget,
-      previousNativeToolSearch,
-      nativeToolSearchUpdateAttempted,
+      updatedNativeToolSearchSettings,
       restoredThresholds
     });
     const reason = formatErrorReason(error);
@@ -219,20 +255,16 @@ async function restoreVSCodeToolGroupingImpl(context: vscode.ExtensionContext): 
     return;
   }
 
-  if (!bridgeEnabled) {
-    void vscode.window.showInformationMessage('VS Code remains responsible for tool discovery. Native Tool Search is disabled.');
-    return;
-  }
   const resetError = await resetToolGroups();
   if (resetError !== undefined) {
     const rollbackErrors = await rollbackVSCodeToolGroupingRestore({
-      virtualToolsConfiguration,
-      nativeToolSearchConfiguration,
-      nativeToolSearchTarget,
-      previousNativeToolSearch,
-      nativeToolSearchUpdateAttempted,
+      updatedNativeToolSearchSettings,
       restoredThresholds
     });
+    const compensationResetError = await resetToolGroups();
+    if (compensationResetError !== undefined) {
+      rollbackErrors.push(compensationResetError);
+    }
     if (rollbackErrors.length > 0) {
       void vscode.window.showErrorMessage(
         `VS Code Virtual Tool Groups were restored, but Copilot tool groups could not be reset and the restoration could not be rolled back.${formatErrorReason(resetError)}${formatRollbackErrors(rollbackErrors)}`
@@ -256,7 +288,7 @@ export async function getNativeToolGroupingBridgeStatus(context: vscode.Extensio
   const configuration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
   const inspected = configuration.inspect<number>(THRESHOLD_SETTING);
   return {
-    enabledByThisExtension: getOwnedThresholdStates(context, inspected).length > 0,
+    enabledByThisExtension: getOwnedThresholdStates(context).length > 0,
     effectiveThreshold: getEffectiveSettingValue(inspected),
     resetCommandAvailable: await isVirtualToolGroupResetCommandAvailable()
   };
@@ -269,22 +301,17 @@ function getSettingValueAtTarget(
   if (!inspected) {
     return undefined;
   }
-  if (target === vscode.ConfigurationTarget.WorkspaceFolder) {
-    return inspected.workspaceFolderValue;
-  }
   if (target === vscode.ConfigurationTarget.Workspace) {
     return inspected.workspaceValue;
   }
   return inspected.globalValue;
 }
 
-function getEffectiveSettingTarget(
-  inspected: vscode.WorkspaceConfiguration['inspect'] extends (section: string) => infer Result ? Result : never
-): vscode.ConfigurationTarget {
-  if (inspected?.workspaceFolderValue !== undefined) {
-    return vscode.ConfigurationTarget.WorkspaceFolder;
-  }
-  if (inspected?.workspaceValue !== undefined) {
+function getSharedEffectiveSettingTarget(
+  threshold: vscode.WorkspaceConfiguration['inspect'] extends (section: string) => infer Result ? Result : never,
+  nativeToolSearch: vscode.WorkspaceConfiguration['inspect'] extends (section: string) => infer Result ? Result : never
+): WindowConfigurationTarget {
+  if (threshold?.workspaceValue !== undefined || nativeToolSearch?.workspaceValue !== undefined) {
     return vscode.ConfigurationTarget.Workspace;
   }
   return vscode.ConfigurationTarget.Global;
@@ -293,111 +320,180 @@ function getEffectiveSettingTarget(
 function getEffectiveSettingValue(
   inspected: vscode.WorkspaceConfiguration['inspect'] extends (section: string) => infer Result ? Result : never
 ): unknown {
-  return inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? inspected?.globalValue;
+  return inspected?.workspaceValue ?? inspected?.globalValue;
 }
 
 function hasExplicitSettingValue(
   inspected: vscode.WorkspaceConfiguration['inspect'] extends (section: string) => infer Result ? Result : never
 ): boolean {
-  return inspected?.workspaceFolderValue !== undefined
-    || inspected?.workspaceValue !== undefined
+  return inspected?.workspaceValue !== undefined
     || inspected?.globalValue !== undefined;
 }
 
 function getStateForTarget(
   context: vscode.ExtensionContext,
-  target: vscode.ConfigurationTarget,
-  inspectedThreshold: ReturnType<vscode.WorkspaceConfiguration['inspect']>
+  target: WindowConfigurationTarget
 ): ThresholdState {
   if (target === vscode.ConfigurationTarget.Global) {
-    return { state: context.globalState, scope: 'legacy-global' };
-  }
-  if (context.workspaceState.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true) {
-    return { state: context.workspaceState, scope: 'workspace' };
-  }
-  if (getEligibleLegacyGlobalThresholds(context, inspectedThreshold).some((saved) => saved.target === target)) {
     return { state: context.globalState, scope: 'legacy-global' };
   }
   return { state: context.workspaceState, scope: 'workspace' };
 }
 
 function getOwnedThresholdStates(
-  context: vscode.ExtensionContext,
-  inspectedThreshold: ReturnType<vscode.WorkspaceConfiguration['inspect']>
+  context: vscode.ExtensionContext
 ): OwnedThresholdState[] {
   const ownedStates: OwnedThresholdState[] = [];
-  const workspaceOwns = context.workspaceState.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true;
-  if (workspaceOwns) {
+  const workspaceEntries = parseThresholdEntries(context.workspaceState, 'workspace');
+  const workspaceThresholds = workspaceEntries.actionable;
+  if (context.workspaceState.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true
+    && workspaceThresholds.length > 0) {
     ownedStates.push({
       state: context.workspaceState,
       scope: 'workspace',
-      thresholds: getSavedThresholds(context.workspaceState, 'workspace'),
-      retainedThresholds: []
+      thresholds: workspaceThresholds,
+      retainedThresholds: workspaceEntries.opaque,
+      policyTargets: [vscode.ConfigurationTarget.Workspace]
     });
   }
   if (context.globalState === context.workspaceState
     || context.globalState.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) !== true) {
     return ownedStates;
   }
-  const savedThresholds = getSavedThresholds(context.globalState, 'legacy-global');
-  const eligibleThresholds = getEligibleLegacyGlobalThresholds(context, inspectedThreshold);
-  if (savedThresholds.length === 0 || eligibleThresholds.length > 0) {
-    const eligibleTargets = new Set(eligibleThresholds.map((saved) => saved.target));
+  const globalEntries = parseThresholdEntries(context.globalState, 'legacy-global');
+  const eligibleThresholds = globalEntries.actionable;
+  if (eligibleThresholds.length > 0) {
     ownedStates.push({
       state: context.globalState,
       scope: 'legacy-global',
       thresholds: eligibleThresholds,
-      retainedThresholds: savedThresholds.filter((saved) => !eligibleTargets.has(saved.target))
+      retainedThresholds: globalEntries.opaque,
+      policyTargets: [vscode.ConfigurationTarget.Global]
     });
   }
   return ownedStates;
 }
 
-function getEligibleLegacyGlobalThresholds(
-  context: NativeToolGroupingBridgeOwnershipContext,
-  inspectedThreshold: ReturnType<vscode.WorkspaceConfiguration['inspect']>
-): SavedThreshold[] {
-  if (context.globalState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) !== true) {
-    return [];
-  }
-  const savedThresholds = getSavedThresholds(context.globalState, 'legacy-global');
-  const globalThresholds = savedThresholds.filter((saved) => saved.target === vscode.ConfigurationTarget.Global);
-  const workspaceOwns = context.workspaceState !== context.globalState
-    && context.workspaceState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true;
-  const effectiveTarget = getEffectiveSettingTarget(inspectedThreshold);
-  const canAdoptScopedThresholds = !workspaceOwns
-    && getEffectiveSettingValue(inspectedThreshold) === 0
-    && savedThresholds.some((saved) => saved.target === effectiveTarget);
-  if (!canAdoptScopedThresholds) {
-    return globalThresholds;
-  }
-  return [
-    ...globalThresholds,
-    ...savedThresholds.filter((saved) => saved.target !== vscode.ConfigurationTarget.Global
-      && getSettingValueAtTarget(inspectedThreshold, saved.target) === 0)
-  ];
-}
-
 function hasEligibleLegacyGlobalOwnership(
-  context: NativeToolGroupingBridgeOwnershipContext,
-  inspectedThreshold: ReturnType<vscode.WorkspaceConfiguration['inspect']>
+  context: NativeToolGroupingBridgeOwnershipContext
 ): boolean {
   if (context.globalState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) !== true) {
     return false;
   }
-  const savedThresholds = getSavedThresholds(context.globalState, 'legacy-global');
-  return savedThresholds.length === 0
-    || getEligibleLegacyGlobalThresholds(context, inspectedThreshold).length > 0;
+  return parseThresholdEntries(context.globalState, 'legacy-global').actionable.length > 0;
 }
 
-function getSavedThresholds(state: Pick<vscode.Memento, 'get'>, scope: ThresholdStateScope): SavedThreshold[] {
-  const saved = state.get<SavedThreshold | SavedThreshold[]>(PREVIOUS_KEY);
-  const entries = Array.isArray(saved) ? saved : saved ? [saved] : [];
-  return entries.flatMap((entry) => {
-    const target = isConfigurationTarget(entry.target) ? entry.target : vscode.ConfigurationTarget.Global;
-    const accepted = scope === 'legacy-global' || target !== vscode.ConfigurationTarget.Global;
-    return accepted ? [{ value: entry.value, target }] : [];
-  });
+function parseThresholdEntries(
+  state: Pick<vscode.Memento, 'get'>,
+  scope: ThresholdStateScope
+): ParsedThresholdEntries {
+  const saved = state.get<unknown>(PREVIOUS_KEY);
+  const entries = Array.isArray(saved) ? [...saved] : saved === undefined ? [] : [saved];
+  const expectedTarget = scope === 'legacy-global'
+    ? vscode.ConfigurationTarget.Global
+    : vscode.ConfigurationTarget.Workspace;
+  const parsed = entries.map((entry) => parseSavedThresholdRecord(entry, expectedTarget));
+  const useVersionedRecords = entries.some((entry) => typeof entry === 'object'
+    && entry !== null
+    && !Array.isArray(entry)
+    && Object.prototype.hasOwnProperty.call(entry, 'version'));
+  const actionableCandidates: Array<{ threshold: SavedThreshold; index: number }> = [];
+  const opaque: unknown[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const parsedEntry = parsed[index];
+    if (!parsedEntry || parsedEntry.versioned !== useVersionedRecords) {
+      opaque.push(entries[index]);
+      continue;
+    }
+    actionableCandidates.push({ threshold: parsedEntry.threshold, index });
+  }
+  if (actionableCandidates.length !== 1) {
+    return { entries, actionable: [], opaque: [...entries] };
+  }
+  return { entries, actionable: [actionableCandidates[0].threshold], opaque };
+}
+
+function parseSavedThresholdRecord(
+  value: unknown,
+  expectedTarget: WindowConfigurationTarget
+): { threshold: SavedThreshold; versioned: boolean } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(record, 'version')) {
+    const storedTarget = toStoredThresholdTarget(expectedTarget);
+    if (record.version !== SAVED_THRESHOLD_VERSION || record.target !== storedTarget) {
+      return undefined;
+    }
+    if (record.previous === 'absent' && hasExactKeys(record, ['version', 'target', 'previous'])) {
+      return { threshold: { target: expectedTarget }, versioned: true };
+    }
+    if (record.previous === 'value'
+      && hasExactKeys(record, ['version', 'target', 'previous', 'value'])
+      && isFiniteThreshold(record.value)) {
+      return { threshold: { target: expectedTarget, value: record.value }, versioned: true };
+    }
+    return undefined;
+  }
+  if ((hasExactKeys(record, ['target']) || hasExactKeys(record, ['target', 'value']))
+    && record.target === expectedTarget
+    && isValidThresholdValue(record.value)) {
+    return {
+      threshold: createThresholdValue(record.value, expectedTarget),
+      versioned: false
+    };
+  }
+  return undefined;
+}
+
+function createSavedThreshold(
+  value: number | undefined,
+  target: WindowConfigurationTarget
+): SavedThresholdRecordV1 {
+  if (value === undefined) {
+    return {
+      version: SAVED_THRESHOLD_VERSION,
+      target: toStoredThresholdTarget(target),
+      previous: 'absent'
+    };
+  }
+  return {
+    version: SAVED_THRESHOLD_VERSION,
+    target: toStoredThresholdTarget(target),
+    previous: 'value',
+    value
+  };
+}
+
+function isRecognizedThresholdRecord(value: unknown, expectedTarget: WindowConfigurationTarget): boolean {
+  return parseSavedThresholdRecord(value, expectedTarget) !== undefined;
+}
+
+function toStoredThresholdTarget(target: WindowConfigurationTarget): StoredThresholdTarget {
+  return target === vscode.ConfigurationTarget.Workspace ? 'workspace' : 'global';
+}
+
+function hasExactKeys(record: Record<string, unknown>, expectedKeys: readonly string[]): boolean {
+  const keys = Object.keys(record);
+  return keys.length === expectedKeys.length && expectedKeys.every((key) => (
+    Object.prototype.hasOwnProperty.call(record, key)
+  ));
+}
+
+function createThresholdValue(value: unknown, target: WindowConfigurationTarget): SavedThreshold {
+  return {
+    target,
+    ...(typeof value === 'number' ? { value } : {})
+  };
+}
+
+function isValidThresholdValue(value: unknown): value is number | undefined {
+  return value === undefined || isFiniteThreshold(value);
+}
+
+function isFiniteThreshold(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 async function clearRestoredGroupingOwnership(ownedStates: readonly OwnedThresholdState[]): Promise<unknown[]> {
@@ -406,10 +502,9 @@ async function clearRestoredGroupingOwnership(ownedStates: readonly OwnedThresho
     const previousOwner = owned.state.get<unknown>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY);
     const previousThresholds = owned.state.get<unknown>(PREVIOUS_KEY);
     const retainedThresholds = owned.retainedThresholds.length > 0 ? owned.retainedThresholds : undefined;
-    const retainedOwner = retainedThresholds ? true : undefined;
     try {
       await owned.state.update(PREVIOUS_KEY, retainedThresholds);
-      await owned.state.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, retainedOwner);
+      await owned.state.update(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY, undefined);
     } catch (error) {
       errors.push(error);
       try {
@@ -427,12 +522,6 @@ async function clearRestoredGroupingOwnership(ownedStates: readonly OwnedThresho
   return errors;
 }
 
-function isConfigurationTarget(value: unknown): value is vscode.ConfigurationTarget {
-  return value === vscode.ConfigurationTarget.Global
-    || value === vscode.ConfigurationTarget.Workspace
-    || value === vscode.ConfigurationTarget.WorkspaceFolder;
-}
-
 interface NativeToolSearchEnableRollbackOptions {
   virtualToolsConfiguration: vscode.WorkspaceConfiguration;
   nativeToolSearchConfiguration: vscode.WorkspaceConfiguration;
@@ -443,7 +532,7 @@ interface NativeToolSearchEnableRollbackOptions {
   previousNativeToolSearch: unknown;
   previousSavedThresholds: unknown;
   previousOwner: unknown;
-  savedThresholds: SavedThreshold[];
+  savedThresholds: unknown[];
   thresholdUpdateAttempted: boolean;
   nativeToolSearchUpdateAttempted: boolean;
   resetAttempted: boolean;
@@ -512,11 +601,7 @@ async function rollbackNativeToolSearchEnable(options: NativeToolSearchEnableRol
 }
 
 interface VSCodeToolGroupingRestoreRollbackOptions {
-  virtualToolsConfiguration: vscode.WorkspaceConfiguration;
-  nativeToolSearchConfiguration: vscode.WorkspaceConfiguration;
-  nativeToolSearchTarget: vscode.ConfigurationTarget;
-  previousNativeToolSearch: unknown;
-  nativeToolSearchUpdateAttempted: boolean;
+  updatedNativeToolSearchSettings: SettingSnapshot[];
   restoredThresholds: ReadonlyArray<SavedThreshold & { currentValue: unknown }>;
 }
 
@@ -524,17 +609,19 @@ async function rollbackVSCodeToolGroupingRestore(options: VSCodeToolGroupingRest
   const rollbackErrors: unknown[] = [];
   for (const restored of [...options.restoredThresholds].reverse()) {
     try {
-      await options.virtualToolsConfiguration.update(THRESHOLD_SETTING, restored.currentValue, restored.target);
+      const virtualToolsConfiguration = vscode.workspace.getConfiguration(VIRTUAL_TOOLS_CONFIGURATION_SECTION);
+      await virtualToolsConfiguration.update(THRESHOLD_SETTING, restored.currentValue, restored.target);
     } catch (error) {
       rollbackErrors.push(error);
     }
   }
-  if (options.nativeToolSearchUpdateAttempted) {
+  for (const previous of [...options.updatedNativeToolSearchSettings].reverse()) {
     try {
-      await options.nativeToolSearchConfiguration.update(
+      const nativeToolSearchConfiguration = vscode.workspace.getConfiguration(PROVIDER_CONFIGURATION_SECTION);
+      await nativeToolSearchConfiguration.update(
         NATIVE_TOOL_SEARCH_SETTING,
-        options.previousNativeToolSearch,
-        options.nativeToolSearchTarget
+        previous.value,
+        previous.target
       );
     } catch (error) {
       rollbackErrors.push(error);
