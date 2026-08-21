@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.7.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.7.0...v1.7.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* harden Native Tool Search regressions ([#68](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/68)) ([949ea48](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/949ea48e285504c285a2cb6a7ade3c73943fbba7))
+* recover invalid previous response IDs ([#79](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/79)) ([89d3c1b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/89d3c1bca1ee85be52aa82428fa19eb56705357a))
+
 ## [1.7.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.6.0...v1.7.0) (2026-08-21)
 
 
