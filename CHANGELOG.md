@@ -2,6 +2,20 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.7.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.6.0...v1.7.0) (2026-08-21)
+
+
+### Features
+
+* add multi-account support for Codex accounts ([#74](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/74)) ([3135c73](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/3135c73a80a0ea0f1603dbdf2634dd044132b98b))
+* support Agent Host continuation markers ([#77](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/77)) ([b11f536](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/b11f53674d63fff05802b47f041cc8e9710aab67))
+
+
+### Bug Fixes
+
+* honor context size model options ([#76](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/76)) ([fad60c3](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/fad60c37814ee30e842ce58739bf7b34fa7cff9f))
+* refresh vulnerable development dependencies ([#75](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/75)) ([4a81e1d](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/4a81e1db1f19a449e79fb2f752e6d05c368dc40f))
+
 ## [1.6.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.5.1...v1.6.0) (2026-08-18)
 
 
