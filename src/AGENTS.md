@@ -8,6 +8,7 @@
 
 - `config.ts`: user-facing settings normalization, including transport policy.
 - `provider.ts`: VS Code `LanguageModelChatProvider` implementation and logging.
+- `extension.ts`: activates the provider, auth integration, account-management commands, and protocol diagnostics.
 - `responsesClient.ts`: shared request builder and the HTTP/WebSocket transport facade for Responses streaming.
 - `convertMessages.ts`: conversion from VS Code chat messages into Responses input items.
 - `responseBranchStore.ts`: in-memory branch reuse cache keyed by normalized request envelope and transcript prefix.

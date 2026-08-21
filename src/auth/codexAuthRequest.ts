@@ -5,12 +5,13 @@ export async function codexFetch(
   authManager: CodexAuthManager,
   input: Parameters<typeof fetch>[0],
   init: RequestInit = {},
-  performFetch: typeof fetch = fetch
+  performFetch: typeof fetch = fetch,
+  accountKey?: string
 ): Promise<Response> {
   const compatibleManager = authManager as CodexAuthManager & { getAccessToken?: () => Promise<string>; refreshAfter401?: () => Promise<void> };
   const snapshot = typeof compatibleManager.getCredentialSnapshot === 'function'
-    ? await compatibleManager.getCredentialSnapshot()
-    : { accessToken: await compatibleManager.getAccessToken!(), revision: 'legacy' };
+    ? await compatibleManager.getCredentialSnapshot(accountKey)
+    : { accessToken: await compatibleManager.getAccessToken!(), revision: 'legacy', accountKey };
   const first = await performFetch(input, withAuthorization(init, snapshot));
   if (first.status !== 401) {
     return first;
@@ -18,7 +19,7 @@ export async function codexFetch(
 
   await first.body?.cancel().catch(() => undefined);
   const retrySnapshot = typeof compatibleManager.recoverFromUnauthorized === 'function'
-    ? await compatibleManager.recoverFromUnauthorized({ snapshotRevision: snapshot.revision, visibleActivity: false, reason: 'http401' })
+    ? await compatibleManager.recoverFromUnauthorized({ accountKey: accountKey ?? snapshot.accountKey ?? '', snapshotRevision: snapshot.revision, visibleActivity: false, reason: 'http401' })
     : (await compatibleManager.refreshAfter401!(), { accessToken: await compatibleManager.getAccessToken!() });
   const retry = await performFetch(input, withAuthorization(init, retrySnapshot));
   if (retry.status === 401) {
