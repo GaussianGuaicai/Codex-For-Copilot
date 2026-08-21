@@ -70,7 +70,7 @@ export async function fetchCodexAccountUsage(options: {
       signal: options.signal
     };
     const response = options.credentials.authManager
-      ? await codexFetch(options.credentials.authManager, usageURL, requestInit, proxyAwareFetch)
+      ? await codexFetch(options.credentials.authManager, usageURL, requestInit, proxyAwareFetch, options.credentials.accountKey)
       : await proxyAwareFetch(usageURL, {
           ...requestInit,
           headers: {

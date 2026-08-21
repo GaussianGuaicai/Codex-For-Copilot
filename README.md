@@ -68,10 +68,13 @@ Use **`Codex: Enable Native Tool Search`** to opt in. The extension saves the pr
 - `Codex: Use VS Code Virtual Tool Groups`
 - `Codex: Show Native Tool Search Status`
 - `Codex for Copilot: Sign in with ChatGPT`
+- `Codex for Copilot: Add Codex Account`
+- `Codex for Copilot: Switch Codex Account`
+- `Codex for Copilot: Remove Codex Account`
 - `Codex for Copilot: Sign in with Device Code`
 - `Codex for Copilot: Import Codex auth.json`
 - `Codex for Copilot: Show Auth Status`
-- `Codex for Copilot: Sign Out`
+- `Codex for Copilot: Sign Out (All Accounts)`
 
 ## Diagnostics and privacy
 
