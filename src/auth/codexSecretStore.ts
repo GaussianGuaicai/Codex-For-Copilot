@@ -134,15 +134,15 @@ export class CodexSecretStore {
   private async migrateLegacyIfNeeded(): Promise<void> {
     const legacyRaw = await this.secrets.get(CODEX_AUTH_SECRET_KEY);
     if (!legacyRaw) return;
+    const record = parseCredential(legacyRaw);
+    if (!record) return;
+
+    const key = deriveAccountKey(record);
     try {
-      const record = parseCredential(legacyRaw);
-      if (record) {
-        const key = deriveAccountKey(record);
-        await this.secrets.store(this.accountKeyFor(key), JSON.stringify(record));
-        await this.addToIndex(key);
-      }
-    } catch { /* ignore unparsable legacy secret */ }
-    await this.secrets.delete(CODEX_AUTH_SECRET_KEY);
+      await this.secrets.store(this.accountKeyFor(key), JSON.stringify(record));
+      await this.addToIndex(key);
+      await this.secrets.delete(CODEX_AUTH_SECRET_KEY);
+    } catch { /* retain the legacy secret so a later access can retry migration */ }
   }
 }
 

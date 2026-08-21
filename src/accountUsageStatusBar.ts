@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { buildCodexAccountUsageDisplay, fetchCodexAccountUsage, type CodexAccountUsageSnapshot } from './accountUsage';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { getProviderConfig } from './config';
-import { getCodexCredentialsForAccount } from './secrets';
+import { getApiCredentials, getCodexCredentialsForAccount, type ApiCredentials } from './secrets';
 import { type CodexLogSink, CodexLogger, createCodexLogger } from './codexLogger';
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -25,6 +25,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
   private readonly logger: CodexLogger;
 
   constructor(
+    private readonly context: vscode.ExtensionContext,
     logger: CodexLogger | CodexLogSink,
     private readonly authManager?: CodexAuthManager
   ) {
@@ -144,26 +145,36 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
   private async refreshNow(): Promise<void> {
     const logger = this.logger.operation('account-usage.refresh');
     const config = getProviderConfig();
+    const activeCredentials = await getApiCredentials(this.context, this.authManager);
 
-    if (!this.authManager) {
+    if (!activeCredentials || activeCredentials.kind !== 'codexAccessToken') {
       this.usageByAccount.clear();
       this.statusBarItem.hide();
-      logger.debug('refresh.skipped', { reason: 'no-auth-manager' });
+      logger.debug('refresh.skipped', { reason: 'credentials-unavailable' });
       return;
     }
 
-    const accounts = await this.authManager.listAccounts();
-    if (accounts.length === 0) {
-      this.usageByAccount.clear();
-      this.statusBarItem.hide();
-      logger.debug('refresh.skipped', { reason: 'no-accounts' });
-      return;
-    }
+    const storedAccounts = this.authManager && activeCredentials.accountKey
+      ? await this.authManager.listAccounts()
+      : [];
+    const accounts: Array<{ accountKey: string; label: string; isActive: boolean; credentials?: ApiCredentials }> = storedAccounts.length > 0
+      ? storedAccounts.map((account) => ({
+          accountKey: account.accountKey,
+          label: account.email ?? account.accountId ?? account.accountKey,
+          isActive: account.accountKey === activeCredentials.accountKey
+        }))
+      : [{
+          accountKey: activeCredentials.accountKey ?? 'configured-codex-credentials',
+          label: activeCredentials.headers['ChatGPT-Account-ID'] ?? 'Active Codex account',
+          isActive: true,
+          credentials: activeCredentials
+        }];
 
     // Fetch each account's usage in parallel; keep prior snapshots for accounts that fail.
     const results = await Promise.all(accounts.map(async (account) => {
-      const label = account.email ?? account.accountId ?? account.accountKey;
-      const credentials = await getCodexCredentialsForAccount(this.authManager!, account.accountKey);
+      const label = account.label;
+      const credentials = account.credentials
+        ?? (this.authManager ? await getCodexCredentialsForAccount(this.authManager, account.accountKey) : undefined);
       if (!credentials) {
         return { accountKey: account.accountKey, label, isActive: account.isActive, error: true } as AccountUsageEntry;
       }

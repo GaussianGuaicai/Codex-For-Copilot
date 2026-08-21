@@ -57,7 +57,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     logger.child('auth')
   );
   const authenticationProvider = new CodexAuthenticationProvider(authManager);
-  const accountUsageStatusBar = new CodexAccountUsageStatusBar(logger.child('account-usage'), authManager);
+  const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, logger.child('account-usage'), authManager);
   const provider = new CodexModelProvider(context, logger.child('provider'), undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
 
   context.subscriptions.push(authManager, authManager.onDidChangeAuth((event) => {

@@ -165,6 +165,22 @@ try {
   assertEqual(rawImportedSecrets.has('codexForCopilot.codexAuthBundle'), false, 'legacy single-key record is removed after migration');
   assertEqual(JSON.parse(rawImportedSecrets.get(`codexForCopilot.codexAuthAccount.${migratedKey}`)).source, 'importedAuthJson', 'pre-schema auth.json migration persists a stable schema-v2 record');
 
+  for (const failingKey of ['codexForCopilot.codexAuthAccount.acct_1', 'codexForCopilot.codexAuthAccounts']) {
+    const migrationSecrets = new Map([
+      ['codexForCopilot.codexAuthBundle', JSON.stringify({ auth_mode: 'chatgpt', tokens: valid.tokens })]
+    ]);
+    const migrationStore = new auth.CodexSecretStore({
+      async get(key) { return migrationSecrets.get(key); },
+      async store(key, value) {
+        if (key === failingKey) throw new Error('temporary SecretStorage failure');
+        migrationSecrets.set(key, value);
+      },
+      async delete(key) { migrationSecrets.delete(key); }
+    });
+    await migrationStore.listAccountKeys();
+    assertEqual(migrationSecrets.has('codexForCopilot.codexAuthBundle'), true, `legacy secret survives failed migration write for ${failingKey}`);
+  }
+
   const legacySecrets = new Map();
   const legacySecretStorage = {
     async get(key) { return legacySecrets.get(key); },
