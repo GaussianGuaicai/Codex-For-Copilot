@@ -6,7 +6,8 @@
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--disable-extension=gaussian.gaussian-codex-for-copilot"
       ],
       "outFiles": [
         "${workspaceFolder}/out/**/*.js"

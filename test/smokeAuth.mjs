@@ -112,7 +112,7 @@ try {
   let importedRevokeCalls = 0;
   const importedManager = new auth.CodexAuthManager(
     new auth.CodexSecretStore(importedSecretStorage),
-    { async withLock(callback) { return callback(); } },
+    () => ({ async withLock(callback) { return callback(); } }),
     {
       async refresh(refreshToken) {
         importedRefreshCalls.push(refreshToken);
@@ -123,7 +123,7 @@ try {
   );
   const importedEvents = [];
   const importedSubscription = importedManager.onDidChangeAuth((event) => importedEvents.push(event));
-  await importedManager.importAuthJson(JSON.stringify({
+  const importedAccountKey = await importedManager.importAuthJson(JSON.stringify({
     auth_mode: 'chatgpt',
     tokens: {
       id_token: futureToken,
@@ -132,11 +132,12 @@ try {
       account_id: 'acct_1'
     }
   }));
-  const importedBeforeRefresh = JSON.parse(importedSecrets.get('codexForCopilot.codexAuthBundle'));
+  const accountSecretKey = `codexForCopilot.codexAuthAccount.${importedAccountKey}`;
+  const importedBeforeRefresh = JSON.parse(importedSecrets.get(accountSecretKey));
   assertEqual(importedBeforeRefresh.source, 'importedAuthJson', 'auth.json import retains its credential source');
   assertEqual(importedBeforeRefresh.tokens.refresh_token, 'imported-refresh-token', 'auth.json import stores its refresh token');
   const importedSnapshot = await importedManager.getCredentialSnapshot();
-  const importedAfterRefresh = JSON.parse(importedSecrets.get('codexForCopilot.codexAuthBundle'));
+  const importedAfterRefresh = JSON.parse(importedSecrets.get(accountSecretKey));
   assertEqual(importedSnapshot.source, 'importedAuthJson', 'auth.json import remains identifiable after refresh');
   assertEqual(importedSnapshot.refreshable, true, 'auth.json import is refreshable');
   assertEqual(JSON.stringify(importedRefreshCalls), JSON.stringify(['imported-refresh-token']), 'auth.json import enters the automatic refresh path');
@@ -144,7 +145,7 @@ try {
   assertEqual(importedAfterRefresh.tokens.account_id, 'acct_2', 'auth.json refresh persists refreshed account metadata');
   assertEqual(JSON.stringify(importedEvents.map((event) => event.reason)), JSON.stringify(['signedIn', 'tokensRefreshed']), 'auth.json import emits sign-in and refresh events');
   await importedManager.signOut();
-  assertEqual(importedSecrets.has('codexForCopilot.codexAuthBundle'), false, 'sign-out removes the imported credential copy');
+  assertEqual(importedSecrets.has(accountSecretKey), false, 'sign-out removes the imported credential copy');
   assertEqual(importedRevokeCalls, 0, 'sign-out does not revoke an imported auth.json credential');
   importedSubscription.dispose();
   importedManager.dispose();
@@ -160,7 +161,25 @@ try {
   const migratedRawImport = await rawImportedStore.getCredential();
   assertEqual(migratedRawImport.source, 'importedAuthJson', 'pre-schema auth.json import migrates into the refreshable path');
   assertEqual(migratedRawImport.tokens.refresh_token, 'refresh-token', 'pre-schema auth.json migration preserves the refresh token');
-  assertEqual(JSON.parse(rawImportedSecrets.get('codexForCopilot.codexAuthBundle')).source, 'importedAuthJson', 'pre-schema auth.json migration persists a stable schema-v2 record');
+  const migratedKey = (await rawImportedStore.listAccountKeys())[0];
+  assertEqual(rawImportedSecrets.has('codexForCopilot.codexAuthBundle'), false, 'legacy single-key record is removed after migration');
+  assertEqual(JSON.parse(rawImportedSecrets.get(`codexForCopilot.codexAuthAccount.${migratedKey}`)).source, 'importedAuthJson', 'pre-schema auth.json migration persists a stable schema-v2 record');
+
+  for (const failingKey of ['codexForCopilot.codexAuthAccount.acct_1', 'codexForCopilot.codexAuthAccounts']) {
+    const migrationSecrets = new Map([
+      ['codexForCopilot.codexAuthBundle', JSON.stringify({ auth_mode: 'chatgpt', tokens: valid.tokens })]
+    ]);
+    const migrationStore = new auth.CodexSecretStore({
+      async get(key) { return migrationSecrets.get(key); },
+      async store(key, value) {
+        if (key === failingKey) throw new Error('temporary SecretStorage failure');
+        migrationSecrets.set(key, value);
+      },
+      async delete(key) { migrationSecrets.delete(key); }
+    });
+    await migrationStore.listAccountKeys();
+    assertEqual(migrationSecrets.has('codexForCopilot.codexAuthBundle'), true, `legacy secret survives failed migration write for ${failingKey}`);
+  }
 
   const legacySecrets = new Map();
   const legacySecretStorage = {
@@ -168,22 +187,25 @@ try {
     async store(key, value) { legacySecrets.set(key, value); },
     async delete(key) { legacySecrets.delete(key); }
   };
+  const legacyStore = new auth.CodexSecretStore(legacySecretStorage);
   const legacyManager = new auth.CodexAuthManager(
-    new auth.CodexSecretStore(legacySecretStorage),
-    { async withLock(callback) { return callback(); } },
+    legacyStore,
+    () => ({ async withLock(callback) { return callback(); } }),
     { async refresh() { throw new Error('legacy snapshots must not refresh'); }, async revoke() {} }
   );
   await legacyManager.importAuthJson(JSON.stringify({
     auth_mode: 'chatgpt',
     tokens: { id_token: futureToken, access_token: futureToken, refresh_token: 'fresh-import-token' }
   }));
-  await legacySecretStorage.store('codexForCopilot.codexAuthBundle', JSON.stringify({
+  await legacyStore.setLegacyCredential({
     schemaVersion: 2,
     source: 'legacyCodexFile',
     revision: 'legacy',
     accessToken: futureToken,
+    accountId: 'legacy-acct',
     loadedAt: new Date().toISOString()
-  }));
+  });
+  await legacyManager.switchAccount('legacy-acct');
   const legacySnapshot = await legacyManager.getCredentialSnapshot();
   assertEqual(legacySnapshot.source, 'legacyCodexFile', 'stored legacy access-token snapshots remain identifiable');
   assertEqual(legacySnapshot.refreshable, false, 'stored legacy access-token snapshots stay non-refreshable');
@@ -206,11 +228,12 @@ try {
   const manager = {
     async getCredentialSnapshot() {
       calls += 1;
-      return { accessToken: calls === 1 ? 'old-token' : 'new-token', accountId: 'acct_1', revision: calls === 1 ? 'old' : 'new' };
+      return { accessToken: calls === 1 ? 'old-token' : 'new-token', accountId: 'acct_1', accountKey: 'acct_1', revision: calls === 1 ? 'old' : 'new' };
     },
+    async getActiveAccountKey() { return 'acct_1'; },
     async recoverFromUnauthorized() {
       calls += 10;
-      return { accessToken: 'new-token', accountId: 'acct_1', revision: 'new' };
+      return { accessToken: 'new-token', accountId: 'acct_1', accountKey: 'acct_1', revision: 'new' };
     }
   };
   const seenAuth = [];
@@ -293,6 +316,12 @@ try {
         ? { authenticated: true, email: 'user@example.com' }
         : { authenticated: false };
     },
+    async listAccounts() {
+      return signedInSnapshot
+        ? [{ accountKey: 'acct_1', source: 'extensionOAuth', email: 'user@example.com', accountId: signedInSnapshot.accountId, isActive: true, reauthRequired: false }]
+        : [];
+    },
+    async getActiveAccountKey() { return signedInSnapshot ? 'acct_1' : undefined; },
     async getCredentialSnapshot() {
       if (!signedInSnapshot) {
         throw new Error('not signed in');

@@ -732,7 +732,11 @@ async function runProviderLongContextSelectionSmokeTest() {
       ['first reply', 'resp_standard'],
       ['long reply', 'resp_long'],
       ['long follow-up reply', 'resp_long_follow_up'],
-      ['downgrade reply', 'resp_downgrade']
+      ['downgrade reply', 'resp_downgrade'],
+      ['model options seed reply', 'resp_model_options_seed'],
+      ['model options follow-up reply', 'resp_model_options_follow_up'],
+      ['precedence seed reply', 'resp_precedence_seed'],
+      ['precedence follow-up reply', 'resp_precedence_follow_up']
     ];
     const reply = replies[responseRequests.length - 1];
     if (!reply) {
@@ -830,8 +834,51 @@ async function runProviderLongContextSelectionSmokeTest() {
       token
     );
 
-    assertEqual(responseRequests.length, 4, 'context-size transition request count');
-    assertEqual(selectedModels.join(','), 'gpt-5.4,gpt-5.4,gpt-5.4,gpt-5.4', 'context sizes resolve to the real backend model');
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Model options seed')] }],
+      { modelConfiguration: { contextSize: 950000 } },
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Model options seed')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('model options seed reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Model options follow up')] }
+      ],
+      { modelOptions: { contextSize: 950000 } },
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Precedence seed')] }],
+      { modelConfiguration: { contextSize: 950000 } },
+      { report() {} },
+      token
+    );
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Precedence seed')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('precedence seed reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Precedence follow up')] }
+      ],
+      {
+        modelOptions: { contextSize: 258400 },
+        modelConfiguration: { contextSize: 950000 }
+      },
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 8, 'context-size transition request count');
+    assertEqual(selectedModels.join(','), Array(8).fill('gpt-5.4').join(','), 'context sizes resolve to the real backend model');
     for (const body of responseRequests) {
       assertEqual(body.model, 'gpt-5.4', 'context-size request sends the real backend model');
       assertEqual(
@@ -848,6 +895,17 @@ async function runProviderLongContextSelectionSmokeTest() {
       'same context size sends only appended input'
     );
     assertEqual(responseRequests[3].previous_response_id, undefined, 'switching back to the default size starts an isolated chain');
+    assertEqual(responseRequests[5].previous_response_id, 'resp_model_options_seed', 'request-time model options select the matching long-context branch');
+    assertEqual(
+      JSON.stringify(responseRequests[5].input),
+      JSON.stringify([{ role: 'user', content: 'Model options follow up', type: 'message' }]),
+      'request-time model options preserve incremental continuation input'
+    );
+    assertEqual(
+      responseRequests[7].previous_response_id,
+      undefined,
+      'request-time model options override conflicting persisted model configuration'
+    );
   } finally {
     server.close();
   }
