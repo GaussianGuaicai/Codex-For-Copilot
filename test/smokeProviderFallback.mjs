@@ -2119,7 +2119,7 @@ async function runStructuredHttpContinuationRecoverySmokeTest() {
   const warnings = [];
   const infoMessages = [];
   const failureMessages = [];
-  const remoteErrorMessage = 'Remote secret continuation detail must not be logged.';
+  const remoteErrorMessage = 'Invalid previous_response_id.';
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -2144,9 +2144,7 @@ async function runStructuredHttpContinuationRecoverySmokeTest() {
       response.end(JSON.stringify({
         error: {
           type: 'invalid_request_error',
-          code: 'previous_response_not_found',
-          message: remoteErrorMessage,
-          param: 'previous_response_id'
+          message: remoteErrorMessage
         }
       }));
       return;

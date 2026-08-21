@@ -53,6 +53,7 @@ const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = 'previous_response_not_found';
 const PREVIOUS_RESPONSE_ID_PARAM = 'previous_response_id';
+const INVALID_PREVIOUS_RESPONSE_ID_MESSAGE = 'Invalid previous_response_id.';
 const CONTINUATION_MISS_MESSAGE = 'Responses API could not find previous_response_id.';
 const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
@@ -187,6 +188,10 @@ export function isResponsesContinuationMissError(error: unknown): error is Respo
 export function isResponsesContinuationMissPayload(error: unknown): boolean {
   let matched = false;
   walkErrorEnvelope(error, (value) => {
+    if (typeof value === 'string') {
+      matched = value.trim() === INVALID_PREVIOUS_RESPONSE_ID_MESSAGE;
+      return !matched;
+    }
     if (typeof value !== 'object' || value === null) {
       return true;
     }

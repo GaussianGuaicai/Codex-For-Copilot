@@ -113,6 +113,10 @@ function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
     code: 'previous_response_not_found',
     param: 'previous_response_id'
   };
+  const invalidPreviousResponseIdPayload = {
+    type: 'invalid_request_error',
+    message: 'Invalid previous_response_id.'
+  };
   assertEqual(isContinuationMissPayload(exactPayload), true, 'exact continuation code and param classify');
   assertEqual(
     isContinuationMissPayload({ code: 'previous_response_not_found' }),
@@ -128,6 +132,21 @@ function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
     isContinuationMissPayload(new Error('Backend prose mentioned previous_response_not_found during diagnostics.')),
     false,
     'unstructured prose does not classify'
+  );
+  assertEqual(
+    isContinuationMissPayload({ status: 400, error: invalidPreviousResponseIdPayload }),
+    true,
+    'exact invalid previous response message classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error('Invalid previous_response_id.')),
+    true,
+    'managed response failure message classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error('Backend prose mentioned Invalid previous_response_id. during diagnostics.')),
+    false,
+    'surrounding invalid previous response prose does not classify'
   );
   assertEqual(
     isContinuationMissPayload(new Error(JSON.stringify({ error: exactPayload }))),
@@ -1018,9 +1037,7 @@ async function runWebSocketContinuationMissSmokeTest(streamResponseText, isRespo
         type: 'error',
         error: {
           type: 'invalid_request_error',
-          code: 'previous_response_not_found',
-          message: 'Previous response with id \'resp_missing\' not found.',
-          param: 'previous_response_id'
+          message: 'Invalid previous_response_id.'
         },
         status: 400
       }));
@@ -1090,9 +1107,7 @@ async function runManagedWebSocketContinuationMissSmokeTest(streamResponseText, 
           type: 'error',
           error: {
             type: 'invalid_request_error',
-            code: 'previous_response_not_found',
-            message: 'Managed WebSocket error event.',
-            param: 'previous_response_id'
+            message: 'Invalid previous_response_id.'
           },
           status: 400
         }));
