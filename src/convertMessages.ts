@@ -12,6 +12,29 @@ import * as vscode from 'vscode';
 
 export type ResponsesInputMessage = ResponseInputItem;
 
+export const STATEFUL_MARKER_DATA_PART_MIME = 'stateful_marker';
+
+export type StatefulMarkerResult =
+  | { kind: 'none' }
+  | {
+      kind: 'invalid';
+      reason: 'metadata' | 'multiple';
+      isLeadingStandalone: boolean;
+    }
+  | {
+      kind: 'valid';
+      modelId: string;
+      previousResponseId: string;
+      incrementalInput: ResponsesInputMessage[];
+      isLeadingStandalone: boolean;
+    };
+
+export interface ResponsesInputConversionResult {
+  input: ResponsesInputMessage[];
+  systemInstructions?: string;
+  statefulMarker: StatefulMarkerResult;
+}
+
 export interface ResponsesInputHistoryComparison {
   kind: 'initial' | 'append' | 'fork';
   matchedPrefixCount: number;
@@ -26,6 +49,11 @@ export interface ResponsesInputHistoryComparison {
 const textDecoder = new TextDecoder();
 const USAGE_DATA_PART_MIME = 'usage';
 const CACHE_CONTROL_DATA_PART_MIME = 'cache_control';
+const MAX_STATEFUL_MARKER_BYTES = 4096;
+const MAX_STATEFUL_MARKER_MODEL_ID_BYTES = 512;
+const MAX_STATEFUL_MARKER_RESPONSE_ID_BYTES = 512;
+const RUNTIME_SYSTEM_MESSAGE_ROLE = 3;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_DATA_URL_PATTERN = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i;
 const HISTORY_IMAGE_URI_PLACEHOLDER_PATTERN = /^\[Image was previously shown to you\. Image URI: ([^\]]+)\]$/;
 const HISTORY_IMAGE_URI_ANNOTATION_PATTERN = /^\s*\[Image URI: ([^\]]+)\]\s*$/;
@@ -33,6 +61,76 @@ const IGNORED_HISTORY_CONTENT = Symbol('ignored-history-content');
 
 export function convertMessagesToResponsesInput(messages: readonly vscode.LanguageModelChatRequestMessage[]): ResponsesInputMessage[] {
   return normalizeDanglingFunctionCallsForReplay(messages.flatMap((message) => convertMessageToResponsesInput(message)));
+}
+
+export function convertMessagesToResponsesInputWithStatefulMarker(
+  messages: readonly vscode.LanguageModelChatRequestMessage[]
+): ResponsesInputConversionResult {
+  const markerLocations: Array<{
+    messageIndex: number;
+    partIndex: number;
+    part: vscode.LanguageModelDataPart;
+  }> = [];
+
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    for (let partIndex = 0; partIndex < message.content.length; partIndex += 1) {
+      const part = message.content[partIndex];
+      if (part instanceof vscode.LanguageModelDataPart && isStatefulMarkerDataPart(part)) {
+        markerLocations.push({ messageIndex, partIndex, part });
+      }
+    }
+  }
+
+  const input = normalizeDanglingFunctionCallsForReplay(messages.flatMap((message) =>
+    isRuntimeSystemMessage(message) ? [] : convertMessageToResponsesInput(message)
+  ));
+  const systemInstructions = normalizeSystemInstructions(messages);
+  if (markerLocations.length === 0) {
+    return { input, systemInstructions, statefulMarker: { kind: 'none' } };
+  }
+  const firstMarkerLocation = markerLocations[0];
+  const isLeadingStandalone = isLeadingStandaloneMarker(messages, firstMarkerLocation);
+  if (markerLocations.length > 1) {
+    return {
+      input,
+      systemInstructions,
+      statefulMarker: { kind: 'invalid', reason: 'multiple', isLeadingStandalone }
+    };
+  }
+
+  const markerLocation = firstMarkerLocation;
+  const marker = parseStatefulMarker(markerLocation.part);
+  if (!marker) {
+    return {
+      input,
+      systemInstructions,
+      statefulMarker: { kind: 'invalid', reason: 'metadata', isLeadingStandalone }
+    };
+  }
+
+  const markerMessage = messages[markerLocation.messageIndex];
+  const incrementalInput = normalizeDanglingFunctionCallsForReplay([
+    ...convertMessageContentToResponsesInput(
+      markerMessage.role,
+      markerMessage.content.slice(markerLocation.partIndex + 1)
+    ),
+    ...messages
+      .slice(markerLocation.messageIndex + 1)
+      .flatMap((message) => isRuntimeSystemMessage(message) ? [] : convertMessageToResponsesInput(message))
+  ]);
+
+  return {
+    input,
+    systemInstructions,
+    statefulMarker: {
+      kind: 'valid',
+      modelId: marker.modelId,
+      previousResponseId: marker.previousResponseId,
+      incrementalInput,
+      isLeadingStandalone
+    }
+  };
 }
 
 export function estimateTokenCount(value: string | vscode.LanguageModelChatRequestMessage): number {
@@ -133,8 +231,15 @@ export function getTextFromMessage(message: vscode.LanguageModelChatRequestMessa
 }
 
 function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequestMessage): ResponsesInputMessage[] {
+  return convertMessageContentToResponsesInput(message.role, message.content);
+}
+
+function convertMessageContentToResponsesInput(
+  messageRole: vscode.LanguageModelChatMessageRole,
+  content: vscode.LanguageModelChatRequestMessage['content']
+): ResponsesInputMessage[] {
   const items: ResponsesInputMessage[] = [];
-  const role = message.role === vscode.LanguageModelChatMessageRole.User ? 'user' : 'assistant';
+  const role = messageRole === vscode.LanguageModelChatMessageRole.User ? 'user' : 'assistant';
   let bufferedText = '';
   let bufferedContent: ResponseInputMessageContentList = [];
 
@@ -170,7 +275,7 @@ function convertMessageToResponsesInput(message: vscode.LanguageModelChatRequest
     bufferedContent = [];
   };
 
-  for (const part of message.content) {
+  for (const part of content) {
     if (part instanceof vscode.LanguageModelTextPart) {
       const image = tryParseMessageImageDataUrl(part.value);
       if (image) {
@@ -365,7 +470,9 @@ function serializeToolResultContent(content: readonly unknown[]): string | Respo
 function serializeDataPart(part: vscode.LanguageModelDataPart): string {
   const mimeType = part.mimeType.toLowerCase();
 
-  if (mimeType === USAGE_DATA_PART_MIME || mimeType === CACHE_CONTROL_DATA_PART_MIME) {
+  if (mimeType === USAGE_DATA_PART_MIME
+    || mimeType === CACHE_CONTROL_DATA_PART_MIME
+    || mimeType === STATEFUL_MARKER_DATA_PART_MIME) {
     return '';
   }
 
@@ -374,6 +481,83 @@ function serializeDataPart(part: vscode.LanguageModelDataPart): string {
   }
 
   return `[binary data: ${part.mimeType}, ${part.data.byteLength} bytes]`;
+}
+
+function isStatefulMarkerDataPart(part: vscode.LanguageModelDataPart): boolean {
+  return part.mimeType.toLowerCase() === STATEFUL_MARKER_DATA_PART_MIME;
+}
+
+function parseStatefulMarker(part: vscode.LanguageModelDataPart): {
+  modelId: string;
+  previousResponseId: string;
+} | undefined {
+  if (part.data.byteLength > MAX_STATEFUL_MARKER_BYTES) {
+    return undefined;
+  }
+
+  let value: string;
+  try {
+    value = new TextDecoder('utf-8', { fatal: true }).decode(part.data);
+  } catch {
+    return undefined;
+  }
+
+  const delimiterIndex = value.indexOf('\\');
+  if (delimiterIndex < 0) {
+    return undefined;
+  }
+
+  const modelId = value.slice(0, delimiterIndex);
+  const previousResponseId = value.slice(delimiterIndex + 1);
+  if (!isValidStatefulMarkerComponent(modelId, MAX_STATEFUL_MARKER_MODEL_ID_BYTES)
+    || !isValidStatefulMarkerComponent(previousResponseId, MAX_STATEFUL_MARKER_RESPONSE_ID_BYTES)) {
+    return undefined;
+  }
+
+  return { modelId, previousResponseId };
+}
+
+export function createStatefulMarkerPayload(modelId: string, previousResponseId: string): string | undefined {
+  if (modelId.includes('\\')
+    || !isValidStatefulMarkerComponent(modelId, MAX_STATEFUL_MARKER_MODEL_ID_BYTES)
+    || !isValidStatefulMarkerComponent(previousResponseId, MAX_STATEFUL_MARKER_RESPONSE_ID_BYTES)) {
+    return undefined;
+  }
+
+  const payload = `${modelId}\\${previousResponseId}`;
+  return Buffer.byteLength(payload, 'utf8') <= MAX_STATEFUL_MARKER_BYTES ? payload : undefined;
+}
+
+function isValidStatefulMarkerComponent(value: string, maxBytes: number): boolean {
+  return value.length > 0
+    && value.trim() === value
+    && !CONTROL_CHARACTER_PATTERN.test(value)
+    && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+
+function isRuntimeSystemMessage(message: vscode.LanguageModelChatRequestMessage): boolean {
+  return Number(message.role) === RUNTIME_SYSTEM_MESSAGE_ROLE;
+}
+
+function normalizeSystemInstructions(
+  messages: readonly vscode.LanguageModelChatRequestMessage[]
+): string | undefined {
+  const instructions = messages
+    .filter((message) => isRuntimeSystemMessage(message))
+    .map((message) => getTextFromMessage(message).trim())
+    .filter((value) => value.length > 0);
+  return instructions.length > 0 ? instructions.join('\n\n') : undefined;
+}
+
+function isLeadingStandaloneMarker(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  markerLocation: { messageIndex: number; partIndex: number }
+): boolean {
+  if (markerLocation.messageIndex !== 0 || markerLocation.partIndex !== 0) {
+    return false;
+  }
+
+  return messages[0].role === vscode.LanguageModelChatMessageRole.Assistant;
 }
 
 function dataPartToMessageImage(part: vscode.LanguageModelDataPart): ResponseInputImage | undefined {
