@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import type { ResponseUsage } from 'openai/resources/responses/responses';
+import type { NamespaceTool, ResponseReasoningItem, ResponseUsage } from 'openai/resources/responses/responses';
 import {
   compareResponsesInputHistory,
   createStatefulMarkerPayload,
@@ -28,7 +28,11 @@ import {
   preconnectCodexResponsesWebSocket,
   streamResponseText
 } from './responsesClient';
-import { ResponseBranchStore, type ResponseBranchReuseEnvelope, type ResponseBranchToolSignatures } from './responseBranchStore';
+import {
+  ResponseBranchStore,
+  type ResponseBranchReuseEnvelope,
+  type ResponseBranchToolSignatures
+} from './responseBranchStore';
 import { getApiCredentials } from './secrets';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexIdentityManager, inputStartsNewTurn } from './codexIdentity';
@@ -36,7 +40,6 @@ import { getCodexCompatibilityProfile, type CodexRequestIdentity } from './codex
 import { resetCodexFetchCapabilities } from './codexFetchAdapter';
 import {
   buildCodexResponsesRequest,
-  fingerprintCodexRequest,
   fingerprintCodexRequestEnvelope,
   type CodexRequestEnvelopeOptions
 } from './codexRequestBuilder';
@@ -48,7 +51,8 @@ import { createCodexContinuationSnapshot } from './codexContinuation';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
 import { resolveCodexToolPlan } from './nativeToolSearch/nativeToolCatalog';
 import { mapNativeToolCall } from './nativeToolSearch/nativeToolCallMapper';
-import { NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY } from './nativeToolSearch/nativeToolGroupingBridge';
+import { createToolCallMappingKey, type CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
+import { hasNativeToolGroupingBridgeOwnership } from './nativeToolSearch/nativeToolGroupingBridge';
 import {
   canUseNativeToolSearch,
   isNativeToolSearchUnsupportedError,
@@ -368,7 +372,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       this.notifyVirtualToolFallback(
         config.nativeToolSearch,
-        this.context.globalState?.get<boolean>(NATIVE_TOOL_SEARCH_GROUPING_BRIDGE_OWNER_KEY) === true,
+        hasNativeToolGroupingBridgeOwnership(this.context),
         virtualToolPlaceholderNames
       );
     } else {
@@ -450,10 +454,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           incrementalInput: convertedMessages.statefulMarker.incrementalInput
         }
       : undefined;
-    const reusableBranch = convertedMessages.statefulMarker.kind === 'none'
+    const candidateReusableBranch = convertedMessages.statefulMarker.kind === 'none'
       ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input)
       : markerHint
         ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input, markerHint)
+        : undefined;
+    const reusableBranch = markerHint || !candidateReusableBranch
+      ? candidateReusableBranch
+      : hasExactLocalBranchHistory(
+          candidateReusableBranch.state?.continuation,
+          input,
+          candidateReusableBranch.comparison.appendedInput
+        )
+        ? candidateReusableBranch
         : undefined;
     if (markerHint && !reusableBranch) {
       throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
@@ -470,7 +483,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const markerContinuationSnapshot = isMarkerContinuation
       ? reusableBranch?.state?.continuation
       : undefined;
-    if (isMarkerContinuation && !markerContinuationSnapshot) {
+    if (isMarkerContinuation && (!markerContinuationSnapshot
+      || !hasCanonicalReplayContinuationIntegrity(markerContinuationSnapshot.responseItems, appendedInput))) {
       throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
     }
     const markerCanonicalReplayInput = isMarkerContinuation
@@ -505,17 +519,29 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
     const usePreviousResponseId = appendedInput.length > 0
       && (!requiresFullInputForToolOutput || shouldAttemptToolOutputContinuation);
+    const canonicalReplaySnapshot = reusableBranch?.state?.continuation;
+    const canonicalReplayAppendedInput = reusableBranch?.comparison.appendedInput ?? [];
+    const fullReplayInput = toolPlan.mode === 'native-hosted'
+      ? buildCanonicalReplayInput({
+          previousSnapshot: canonicalReplaySnapshot,
+          convertedInput: input,
+          appendedInput: canonicalReplayAppendedInput,
+          catalogHash: toolPlan.catalogHash
+        })
+      : input;
+    const recoveryReplayInput = markerCanonicalReplayInput ?? fullReplayInput;
     const initialRequestInput = usePreviousResponseId
       ? appendedInput
-      : markerCanonicalReplayInput ?? input;
+      : recoveryReplayInput;
     const initialPreviousResponseId = usePreviousResponseId
       ? reusableBranch?.responseId
       : undefined;
     let activeBranchId = initialPreviousResponseId || requiresFullInputForToolOutput
       ? reusableBranch?.branchId
       : undefined;
+    let legacyFallbackReplayInput: ResponsesInputMessage[] | undefined;
     let completedResponseId: string | undefined;
-    const rawResponseItems: unknown[] = [];
+    const replayResponseItems: unknown[] = [];
     const requestIdentity = await this.resolveRequestIdentity(
       reusableBranch?.state,
       reuseMissDiagnostic?.comparison.kind === 'fork' && reuseMissDiagnostic.comparison.matchedPrefixCount > 0
@@ -624,6 +650,34 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       previousResponseId?: string,
       allowToolOutputContinuation = false
     ) => {
+      let pendingResponseText = '';
+      const attemptInitialBranchState: CodexBranchState = {
+        ...branchState,
+        identity: { ...branchState.identity },
+        turn: { ...branchState.turn }
+      };
+      const resetAttemptState = () => {
+        replayResponseItems.length = 0;
+        pendingResponseText = '';
+        completedResponseId = undefined;
+        branchState = {
+          ...attemptInitialBranchState,
+          identity: { ...attemptInitialBranchState.identity },
+          turn: { ...attemptInitialBranchState.turn, completed: false },
+          updatedAt: Date.now()
+        };
+      };
+      const flushReplayText = () => {
+        if (!pendingResponseText) {
+          return;
+        }
+        replayResponseItems.push({
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: pendingResponseText }]
+        });
+        pendingResponseText = '';
+      };
       const streamStartedAt = Date.now();
       let actualTransport: 'http' | 'http-fallback' | 'websocket-fresh' | 'websocket-reused' = config.transport === 'http'
         ? 'http'
@@ -730,7 +784,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       };
 
       try {
-        await streamResponseText({
+        const streamOptions: Parameters<typeof streamResponseText>[0] = {
         baseURL: config.baseURL,
         apiKey: credentials.apiKey,
         headers: credentials.headers,
@@ -761,6 +815,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         maxOutputTokens: requestOptions.maxOutputTokens,
         token,
         onTextDelta: (text) => {
+          pendingResponseText += text;
           if (text) {
             reasoningPresenter.close();
           }
@@ -799,11 +854,22 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           latency.mark('firstToolCallArgumentsDone');
         },
         onToolCall: (call) => {
-          const mapped = toolPlan.mode === 'native-hosted' ? mapNativeToolCall(toolPlan, call) : {
-            ...call,
-            vscodeName: call.name
-          };
+          const mapped = mapNativeToolCall(toolPlan, call);
           const { callId, input: toolInput, vscodeName: name } = mapped;
+          const itemId = call.itemId.trim();
+          if (toolPlan.mode === 'native-hosted'
+            && (!itemId || itemId === callId)) {
+            throw new Error('Responses returned a Native Tool Search function call without an item id.');
+          }
+          flushReplayText();
+          replayResponseItems.push({
+            ...(toolPlan.mode === 'native-hosted' ? { id: itemId } : {}),
+            type: 'function_call',
+            call_id: callId,
+            name: toolPlan.mode === 'native-hosted' ? call.name : name,
+            ...(toolPlan.mode === 'native-hosted' && call.namespace ? { namespace: call.namespace } : {}),
+            arguments: JSON.stringify(toolInput)
+          });
           reasoningPresenter.startNextPhase();
           presenter.flushBoundary();
           const reportedAt = Date.now();
@@ -848,7 +914,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           if (toolSearchEvent) {
             this.outputChannel.debug('native Tool Search event', toolSearchEvent);
           }
-          rawResponseItems.push(item);
+          const replayItem = projectSafeRawReplayItem(item, toolPlan);
+          if (replayItem) {
+            flushReplayText();
+            replayResponseItems.push(replayItem);
+          }
         },
         onTurnState: (turnState) => {
           branchState = {
@@ -866,6 +936,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onTransportMetrics: (metrics) => {
+          if (metrics.retryReason === 'websocket_unauthorized_recovered'
+            || metrics.retryReason === 'websocket_connection_limit_reached') {
+            resetAttemptState();
+          }
           previousResponseIdUsed ||= metrics.previousResponseIdUsed === true;
           if (typeof metrics.websocketConnectedAt === 'number') {
             latency.mark('websocketConnected', metrics.websocketConnectedAt);
@@ -890,6 +964,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onResponseCompleted: (response) => {
+          flushReplayText();
           reasoningPresenter.close();
           this.markReportedToolCallsResponseCompleted(reportedToolCallIds);
           presenter.flushBoundary();
@@ -955,6 +1030,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           });
         },
         onTransportFallback: ({ from, to, reason }) => {
+          resetAttemptState();
+          if (allowToolOutputContinuation && previousResponseId) {
+            streamOptions.input = recoveryReplayInput;
+            streamOptions.previousResponseId = undefined;
+            streamOptions.allowToolOutputContinuation = false;
+            previousResponseIdUsed = false;
+            activeBranchId = undefined;
+          }
           reasoningPresenter.flush();
           actualTransport = 'http-fallback';
           latency.mark('connectionAcquired');
@@ -981,7 +1064,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             previousResponseId: previousResponseId ?? null
           });
         }
-        });
+        };
+        try {
+          await streamResponseText(streamOptions);
+        } catch (error) {
+          resetAttemptState();
+          throw error;
+        }
       } finally {
         reasoningPresenter.close();
         presenter.flushBoundary();
@@ -1040,7 +1129,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           effectiveInputBudget: selectedModel.effectiveInputBudget,
           ...requestOptions
         });
-        rawResponseItems.length = 0;
+        replayResponseItems.length = 0;
         completedResponseId = undefined;
         activeBranchId = undefined;
         latency.recordContext({
@@ -1059,7 +1148,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           requestModel: selectedModel.requestModel,
           nativeToolSearchFallback: true
         });
-        await streamRequest(markerCanonicalReplayInput ?? input);
+        legacyFallbackReplayInput = buildLegacyFallbackReplayInput(markerCanonicalReplayInput ?? input);
+        await streamRequest(legacyFallbackReplayInput);
       } else if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
         if (reportedVisibleOutput) {
           this.responseBranchStore.invalidateResponseId(error.previousResponseId);
@@ -1089,14 +1179,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         });
 
         completedResponseId = undefined;
-        rawResponseItems.length = 0;
+        replayResponseItems.length = 0;
         this.responseBranchStore.disableReuse(reuseEnvelope, !error.disableReuseUntilExpiry);
         this.responseBranchStore.invalidateResponseId(error.previousResponseId);
         if (reusableBranch) {
           this.responseBranchStore.invalidate(reusableBranch.branchId);
         }
         activeBranchId = undefined;
-        await streamRequest(markerCanonicalReplayInput ?? input);
+        await streamRequest(recoveryReplayInput);
       } else {
         if (!initialPreviousResponseId || !isResponsesContinuationMissError(error)) {
           const unavailableModel = getExactModelNotFoundName(error, selectedModel.requestModel);
@@ -1146,9 +1236,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         }
 
         completedResponseId = undefined;
-        rawResponseItems.length = 0;
+        replayResponseItems.length = 0;
         activeBranchId = undefined;
-        await streamRequest(markerCanonicalReplayInput ?? input);
+        await streamRequest(recoveryReplayInput);
       }
     }
 
@@ -1161,24 +1251,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       const builtFullRequest = buildCodexResponsesRequest({
         ...requestOptions,
         identity: requestIdentity,
-        input: recordedInput,
+        input: legacyFallbackReplayInput ?? recordedInput,
       });
       const fullRequest = isMarkerContinuation
         ? builtFullRequest
         : toolPlan.mode === 'native-hosted'
-        ? createCanonicalReplayRequest(builtFullRequest, buildCanonicalReplayInput({
-            previousSnapshot: reusableBranch?.state?.continuation,
-            convertedInput: input,
-            appendedInput,
-            catalogHash: toolPlan.catalogHash
-          }))
+        ? createCanonicalReplayRequest(builtFullRequest, fullReplayInput)
         : builtFullRequest;
       branchState = {
         ...branchState,
         continuation: createCodexContinuationSnapshot(
           fullRequest,
           finalResponseId,
-          rawResponseItems,
+          replayResponseItems,
           requestIdentity.turnId,
           {
             clone: false,
@@ -2110,6 +2195,306 @@ export function buildResponseBranchReuseEnvelope(options: {
     catalogHash: requestOptions.toolPlan?.catalogHash,
     toolPlanMode: requestOptions.toolPlan?.mode
   };
+}
+
+export function hasCanonicalReplayContinuationIntegrity(
+  responseItems: readonly unknown[],
+  appendedInput: readonly ResponsesInputMessage[]
+): boolean {
+  const functionCallIds = new Set<string>();
+  for (const item of responseItems) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const callId = typeof record.call_id === 'string' ? record.call_id.trim() : '';
+    if (record.type === 'function_call') {
+      const name = typeof record.name === 'string' ? record.name.trim() : '';
+      if (!callId || !name || functionCallIds.has(callId)) {
+        return false;
+      }
+      functionCallIds.add(callId);
+    }
+  }
+  const outputCounts = new Map<string, number>();
+  for (const item of appendedInput) {
+    if (item.type !== 'function_call_output') {
+      continue;
+    }
+    const callId = item.call_id.trim();
+    if (!callId || !functionCallIds.has(callId) || outputCounts.has(callId)) {
+      return false;
+    }
+    outputCounts.set(callId, 1);
+  }
+  return [...functionCallIds].every((callId) => outputCounts.get(callId) === 1);
+}
+
+const OMIT_LOCAL_REPLAY_ITEM = Symbol('omit-local-replay-item');
+const INVALID_LOCAL_REPLAY_ITEM = Symbol('invalid-local-replay-item');
+
+function projectSafeRawReplayItem(item: unknown, toolPlan: CodexToolPlan): ResponsesInputMessage | undefined {
+  if (!isReplayRecord(item)) {
+    return undefined;
+  }
+  if (item.type === 'reasoning') {
+    const summary = projectReasoningSummary(item.summary);
+    if (!isNonEmptyString(item.id) || !summary) {
+      return undefined;
+    }
+    return {
+      type: 'reasoning',
+      id: item.id,
+      summary,
+      ...(typeof item.encrypted_content === 'string' ? { encrypted_content: item.encrypted_content } : {})
+    } satisfies ResponseReasoningItem;
+  }
+  if (toolPlan.mode !== 'native-hosted'
+    || !isNonEmptyString(item.id)
+    || item.execution !== 'server'
+    || item.status !== 'completed') {
+    return undefined;
+  }
+  if (item.type === 'tool_search_call') {
+    return isReplayRecord(item.arguments)
+      ? {
+          type: 'tool_search_call',
+          id: item.id,
+          execution: 'server',
+          status: 'completed',
+          arguments: structuredClone(item.arguments)
+        }
+      : undefined;
+  }
+  if (item.type !== 'tool_search_output' || !Array.isArray(item.tools)) {
+    return undefined;
+  }
+  const tools: NamespaceTool[] = [];
+  const namespaceNames = new Set<string>();
+  for (const namespace of item.tools) {
+    if (!isReplayRecord(namespace)
+      || namespace.type !== 'namespace'
+      || !isNonEmptyString(namespace.name)
+      || !Array.isArray(namespace.tools)
+      || namespaceNames.has(namespace.name)) {
+      return undefined;
+    }
+    const trustedNamespace = toolPlan.responseTools.find(
+      (candidate): candidate is NamespaceTool => candidate.type === 'namespace' && candidate.name === namespace.name
+    );
+    if (!trustedNamespace) {
+      return undefined;
+    }
+    namespaceNames.add(namespace.name);
+    const namespaceTools: NamespaceTool['tools'] = [];
+    const toolNames = new Set<string>();
+    for (const tool of namespace.tools) {
+      if (!isReplayRecord(tool)
+        || tool.type !== 'function'
+        || !isNonEmptyString(tool.name)
+        || toolNames.has(tool.name)
+        || !toolPlan.callMappings.has(createToolCallMappingKey(namespace.name, tool.name))) {
+        return undefined;
+      }
+      const trustedTool = trustedNamespace.tools.find(
+        (candidate) => candidate.type === 'function' && candidate.name === tool.name
+      );
+      if (!trustedTool) {
+        return undefined;
+      }
+      toolNames.add(tool.name);
+      namespaceTools.push(structuredClone(trustedTool));
+    }
+    tools.push({
+      type: 'namespace',
+      name: trustedNamespace.name,
+      description: trustedNamespace.description,
+      tools: namespaceTools
+    });
+  }
+  return {
+    type: 'tool_search_output',
+    id: item.id,
+    execution: 'server',
+    status: 'completed',
+    tools
+  } satisfies ResponsesInputMessage;
+}
+
+function projectReasoningSummary(value: unknown): ResponseReasoningItem['summary'] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const summary: ResponseReasoningItem['summary'] = [];
+  for (const part of value) {
+    if (!isReplayRecord(part) || part.type !== 'summary_text' || typeof part.text !== 'string') {
+      return undefined;
+    }
+    summary.push({ type: 'summary_text', text: part.text });
+  }
+  return summary;
+}
+
+function isReplayRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function buildLegacyFallbackReplayInput(input: readonly ResponsesInputMessage[]): ResponsesInputMessage[] {
+  const replay: ResponsesInputMessage[] = [];
+  for (const item of input) {
+    if (item.type === 'tool_search_call'
+      || item.type === 'tool_search_output'
+      || item.type === 'reasoning') {
+      continue;
+    }
+    if (item.type === 'function_call') {
+      replay.push({
+        type: 'function_call',
+        call_id: item.call_id,
+        name: item.name,
+        arguments: item.arguments
+      });
+      continue;
+    }
+    replay.push(item);
+  }
+  return replay;
+}
+
+function hasExactLocalBranchHistory(
+  snapshot: CodexBranchState['continuation'],
+  currentInput: readonly ResponsesInputMessage[],
+  appendedInput: readonly ResponsesInputMessage[]
+): boolean {
+  if (!snapshot
+    || appendedInput.length === 0
+    || appendedInput.length > currentInput.length
+    || !hasCanonicalReplayContinuationIntegrity(snapshot.responseItems, appendedInput)) {
+    return false;
+  }
+
+  const currentSuffix = currentInput.slice(currentInput.length - appendedInput.length);
+  if (!haveEquivalentLocalReplayItems(currentSuffix, appendedInput)) {
+    return false;
+  }
+
+  const previousLocalInput = normalizeLocalReplayItems(snapshot.fullRequest.input as readonly unknown[]);
+  if (!previousLocalInput) {
+    return false;
+  }
+  const responseLocalInput = normalizeLocalReplayItems(snapshot.responseItems);
+  if (!responseLocalInput || responseLocalInput.length === 0) {
+    return false;
+  }
+  const currentLocalHistory = normalizeLocalReplayItems(
+    currentInput.slice(0, currentInput.length - appendedInput.length)
+  );
+  return Boolean(currentLocalHistory
+    && stableSerialize([...previousLocalInput, ...responseLocalInput]) === stableSerialize(currentLocalHistory));
+}
+
+function haveEquivalentLocalReplayItems(
+  left: readonly unknown[],
+  right: readonly unknown[]
+): boolean {
+  const normalizedLeft = normalizeLocalReplayItems(left);
+  const normalizedRight = normalizeLocalReplayItems(right);
+  return Boolean(normalizedLeft
+    && normalizedRight
+    && stableSerialize(normalizedLeft) === stableSerialize(normalizedRight));
+}
+
+function normalizeLocalReplayItems(items: readonly unknown[]): unknown[] | undefined {
+  const normalized: unknown[] = [];
+  for (const item of items) {
+    const normalizedItem = normalizeLocalReplayItem(item);
+    if (normalizedItem === INVALID_LOCAL_REPLAY_ITEM) {
+      return undefined;
+    }
+    if (normalizedItem !== OMIT_LOCAL_REPLAY_ITEM) {
+      normalized.push(normalizedItem);
+    }
+  }
+  return normalized;
+}
+
+function normalizeLocalReplayItem(
+  item: unknown
+): unknown | typeof OMIT_LOCAL_REPLAY_ITEM | typeof INVALID_LOCAL_REPLAY_ITEM {
+  if (typeof item !== 'object' || item === null) {
+    return INVALID_LOCAL_REPLAY_ITEM;
+  }
+  const record = item as Record<string, unknown>;
+  if (record.type === 'tool_search_call'
+    || record.type === 'tool_search_output'
+    || record.type === 'reasoning') {
+    return OMIT_LOCAL_REPLAY_ITEM;
+  }
+  if (record.type === 'message') {
+    if ((record.role !== 'user' && record.role !== 'assistant')) {
+      return INVALID_LOCAL_REPLAY_ITEM;
+    }
+    const content = normalizeLocalReplayMessageContent(record.content);
+    return content === undefined
+      ? INVALID_LOCAL_REPLAY_ITEM
+      : { type: 'message', role: record.role, content };
+  }
+  if (record.type === 'function_call') {
+    return typeof record.call_id === 'string'
+      && record.call_id.trim().length > 0
+      && typeof record.name === 'string'
+      && record.name.trim().length > 0
+      && typeof record.arguments === 'string'
+      ? {
+          type: 'function_call',
+          call_id: record.call_id,
+          name: record.name,
+          arguments: record.arguments
+        }
+      : INVALID_LOCAL_REPLAY_ITEM;
+  }
+  if (record.type === 'function_call_output') {
+    return typeof record.call_id === 'string' && record.call_id.trim().length > 0
+      ? { type: 'function_call_output', call_id: record.call_id, output: record.output }
+      : INVALID_LOCAL_REPLAY_ITEM;
+  }
+  return INVALID_LOCAL_REPLAY_ITEM;
+}
+
+function normalizeLocalReplayMessageContent(content: unknown): unknown[] | undefined {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  const normalized = [];
+  for (const part of content) {
+    if (typeof part !== 'object' || part === null) {
+      return undefined;
+    }
+    const record = part as Record<string, unknown>;
+    if ((record.type === 'input_text' || record.type === 'output_text') && typeof record.text === 'string') {
+      normalized.push({ type: 'text', text: record.text });
+      continue;
+    }
+    if (record.type === 'input_image'
+      && (typeof record.image_url === 'string' || typeof record.file_id === 'string')) {
+      normalized.push({
+        type: 'image',
+        detail: record.detail ?? 'auto',
+        image_url: record.image_url,
+        file_id: record.file_id
+      });
+      continue;
+    }
+    return undefined;
+  }
+  return normalized;
 }
 
 export function buildResponseBranchToolSignatures(

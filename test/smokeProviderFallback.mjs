@@ -4,6 +4,7 @@ import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { build } from 'esbuild';
+import WebSocket, * as webSocketModule from 'ws';
 import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
 const tempDir = await mkdtemp(join(resolveTestTempDirectory(), 'codex-for-copilot-provider-fallback-'));
@@ -14,6 +15,24 @@ const require = createRequire(import.meta.url);
 let performanceNow = () => Date.now();
 const performanceMock = { now: () => performanceNow() };
 const warningMessages = [];
+let rewriteWebSocketURL;
+
+class RewritingWebSocket extends WebSocket {
+  constructor(address, protocols, options) {
+    const rewrittenAddress = rewriteWebSocketURL ? rewriteWebSocketURL(address) : address;
+    if (options === undefined) {
+      super(rewrittenAddress, protocols);
+    } else {
+      super(rewrittenAddress, protocols, options);
+    }
+  }
+}
+
+const testWebSocketModule = {
+  ...webSocketModule,
+  default: RewritingWebSocket,
+  WebSocket: RewritingWebSocket
+};
 
 const configValues = {
   baseURL: '',
@@ -106,6 +125,7 @@ class LanguageModelToolResultPart {
 }
 
 const vscodeMock = {
+  ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
   Disposable,
   EventEmitter,
   LanguageModelTextPart,
@@ -131,6 +151,13 @@ const vscodeMock = {
   },
   workspace: {
     getConfiguration(section) {
+      if (section === 'http') {
+        return {
+          get(_key, defaultValue) {
+            return defaultValue;
+          }
+        };
+      }
       if (section !== 'codexModelProvider') {
         throw new Error(`Unexpected configuration section: ${section}`);
       }
@@ -154,7 +181,7 @@ await build({
   platform: 'node',
   target: 'node20',
   outfile: bundlePath,
-  external: ['vscode']
+  external: ['vscode', 'ws']
 });
 
 await build({
@@ -171,6 +198,9 @@ Module._load = function patchedLoad(request, parent, isMain) {
   if (request === 'vscode') {
     return vscodeMock;
   }
+  if (request === 'ws') {
+    return testWebSocketModule;
+  }
   if (request === 'node:perf_hooks') {
     return { performance: performanceMock };
   }
@@ -178,10 +208,13 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { CodexModelProvider } = require(bundlePath);
+const { CodexModelProvider, hasCanonicalReplayContinuationIntegrity } = require(bundlePath);
 const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
 
 try {
+  runCanonicalReplayIntegritySmokeTest();
+  await runUnauthorizedLegacyToolCallSmokeTest();
+  await runNativeReplayValidationSmokeTest();
   await runModelCatalogMetadataSmokeTest();
   await runProviderMalformedCatalogFallbackSmokeTest();
   await runProviderLongContextSelectionSmokeTest();
@@ -191,6 +224,7 @@ try {
   await runStatefulMarkerContinuationRecoverySmokeTest();
   await runStatefulMarkerOpaqueRecoverySmokeTest();
   await runStatefulMarkerToolOutputReplaySmokeTest();
+  await runStatefulMarkerMalformedRawSnapshotSmokeTest();
   await runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest();
   await runStatefulMarkerRecordFailureSmokeTest();
   await runStatefulMarkerInvalidCompletionIdSmokeTest();
@@ -200,6 +234,10 @@ try {
   await runRequestEnvelopeReuseInvalidationSmokeTest();
   await runToolOutputFullInputReplaySmokeTest();
   await runModelGeneratedToolLoopFullReplaySmokeTest();
+  await runNativeHostedCanonicalReplaySmokeTest();
+  await runNativeHostedCrossThreadBudgetDowngradeSmokeTest();
+  await runNativeAutoFallbackRawStateIsolationSmokeTest();
+  await runNativeHostedToolOutputContinuationRecoverySmokeTest();
   await runDanglingCompletedToolCallFullReplaySmokeTest();
   await runCreatedResponseCancellationDoesNotRecordBranchSmokeTest();
   await runProviderCatalogVersionNeutralSmokeTest();
@@ -215,6 +253,379 @@ try {
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+function runCanonicalReplayIntegritySmokeTest() {
+  const call = {
+    type: 'function_call',
+    call_id: 'call_integrity',
+    name: 'lookup_fixture',
+    arguments: '{}'
+  };
+  const output = { type: 'function_call_output', call_id: 'call_integrity', output: 'ok' };
+  assertEqual(hasCanonicalReplayContinuationIntegrity([call], [output]), true, 'canonical replay accepts one call with exactly one matching output');
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([{ ...call, call_id: '' }], [output]),
+    false,
+    'canonical replay rejects a function call without a valid call id'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([{ ...call, name: '' }], [output]),
+    false,
+    'canonical replay rejects a function call without a valid name'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([call, { ...call }], [output]),
+    false,
+    'canonical replay rejects duplicate function-call ids'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([call], [output, { ...output }]),
+    false,
+    'canonical replay rejects duplicate outputs for one function call'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([call], []),
+    false,
+    'canonical replay rejects a function call without its output'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([call], [{ ...output, call_id: 'call_orphan' }]),
+    false,
+    'canonical replay rejects an orphan output'
+  );
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([], [{ ...output, call_id: 'call_orphan' }]),
+    false,
+    'canonical replay rejects outputs when the snapshot has no calls'
+  );
+}
+
+async function runUnauthorizedLegacyToolCallSmokeTest() {
+  const server = createServer((request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    response.write(`data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: {
+        id: 'fc_unauthorized',
+        type: 'function_call',
+        call_id: 'call_unauthorized',
+        name: 'unauthorized_tool',
+        arguments: '{}'
+      }
+    })}\n\n`);
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const originalBaseURL = configValues.baseURL;
+  const originalTransport = configValues.transport;
+  configValues.baseURL = `http://127.0.0.1:${server.address().port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    { secrets: { async get() { return 'test-api-key'; } }, subscriptions: [] },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  try {
+    const token = createCancellationToken();
+    const model = (await provider.provideLanguageModelChatInformation({ silent: true }, token))
+      .find((candidate) => candidate.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for unauthorized legacy tool-call coverage.');
+    }
+    const parts = [];
+    let rejection;
+    try {
+      await provider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject an unknown tool.')] }],
+        { tools: [{ name: 'allowed_tool', description: 'Allowed.', inputSchema: { type: 'object' } }] },
+        { report(part) { parts.push(part); } },
+        token
+      );
+    } catch (error) {
+      rejection = error;
+    }
+    assertEqual(rejection?.message.includes('unauthorized'), true, 'legacy tool calls are authorized against the submitted plan');
+    assertEqual(parts.some((part) => part instanceof LanguageModelToolCallPart), false, 'unauthorized legacy calls are never reported');
+    assertEqual(getStatefulMarkers(parts).length, 0, 'unauthorized legacy calls are never persisted in a marker');
+  } finally {
+    configValues.baseURL = originalBaseURL;
+    configValues.transport = originalTransport;
+    await closeServer(server);
+  }
+}
+
+async function runNativeReplayValidationSmokeTest() {
+  const responseRequests = [];
+  let selectedNamespace;
+  let selectedTool;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    const namespaceTool = body.tools?.find((tool) => tool.type === 'namespace');
+    selectedNamespace ??= namespaceTool?.name;
+    selectedTool ??= namespaceTool?.tools?.[0]?.name;
+
+    if (body.input?.some((item) => item.content === 'Reject a missing Native item id.')) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      response.write(`data: ${JSON.stringify({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          type: 'function_call',
+          call_id: ' call_missing_native_id ',
+          name: selectedTool,
+          namespace: selectedNamespace,
+          arguments: '{}'
+        }
+      })}\n\n`);
+      response.end();
+      return;
+    }
+
+    const markerRequestIndex = responseRequests.filter((candidate) => (
+      candidate.input?.some((item) => item.content === 'Seed Native rejection.')
+      || candidate.input?.some((item) => item.call_id === 'call_native_rejection')
+      || candidate.input?.some((item) => item.content === 'Continue after Native rejection.')
+    )).length;
+    if (markerRequestIndex === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'item_native_rejection_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            tools: [{ type: 'function', name: selectedTool }]
+          }]
+        }
+      });
+      const call = {
+        id: 'fc_native_rejection',
+        type: 'function_call',
+        call_id: 'call_native_rejection',
+        name: selectedTool,
+        namespace: selectedNamespace,
+        arguments: '{"value":"seed"}'
+      };
+      send({ type: 'response.output_item.added', output_index: 1, item: call });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: call.id,
+        output_index: 1,
+        name: call.name,
+        arguments: call.arguments
+      });
+      send({ type: 'response.output_item.done', output_index: 1, item: call });
+      send({ type: 'response.completed', response: { id: 'resp_native_rejection_seed', status: 'completed' } });
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+    if (markerRequestIndex === 2 && namespaceTool) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'unsupported tool type: namespace' } }));
+      return;
+    }
+    if (markerRequestIndex === 3) {
+      writeSseResponseWithOutputItem(response, 'Legacy retry accepted.', 'resp_legacy_retry', 'msg_legacy_retry');
+      return;
+    }
+    if (markerRequestIndex === 4 && body.previous_response_id) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          code: 'previous_response_not_found',
+          message: 'Legacy retry continuation expired.',
+          param: 'previous_response_id'
+        }
+      }));
+      return;
+    }
+    if (markerRequestIndex === 5) {
+      writeSseResponseWithOutputItem(response, 'Legacy recovery accepted.', 'resp_legacy_recovered', 'msg_legacy_recovered');
+      return;
+    }
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Unexpected Native replay validation request.' } }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalNativeToolSearch = configValues.nativeToolSearch;
+  const originalTransport = configValues.transport;
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.nativeToolSearch = 'enabled';
+  configValues.transport = 'http';
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+  const tools = Array.from({ length: 13 }, (_, index) => ({
+    name: `native_validation_tool_${String(index).padStart(2, '0')}`,
+    description: `Native validation tool ${index}`,
+    inputSchema: { type: 'object', properties: { value: { type: 'string' } } }
+  }));
+  const createProvider = (accountId) => new CodexModelProvider(
+    { subscriptions: [] },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: `native-validation-token-${accountId}`,
+          accountId,
+          revision: 'native-validation-revision',
+          refreshable: false
+        };
+      }
+    }
+  );
+
+  try {
+    const token = createCancellationToken();
+    const model = buildProviderModels(
+      configValues,
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      'codexAccessToken'
+    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    if (!model) {
+      throw new Error('Expected model for Native replay validation coverage.');
+    }
+
+    const missingIdParts = [];
+    let missingIdError;
+    try {
+      await createProvider('missing-id-account').provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Reject a missing Native item id.')] }],
+        { tools },
+        { report(part) { missingIdParts.push(part); } },
+        token
+      );
+    } catch (error) {
+      missingIdError = error;
+    }
+    assertEqual(missingIdError?.message.includes('without an item id'), true, 'Native calls reject a whitespace-padded call_id substituted for a missing backend item id');
+    assertEqual(missingIdParts.some((part) => part instanceof LanguageModelToolCallPart), false, 'missing-id Native calls are never reported');
+    assertEqual(getStatefulMarkers(missingIdParts).length, 0, 'missing-id Native calls are never persisted');
+
+    const provider = createProvider('marker-rejection-account');
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Seed Native rejection.')] }],
+      { tools },
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    const seedMarker = getSingleStatefulMarkerPart(seedParts, 'Native rejection seed');
+    const seedCall = seedParts.find((part) => part instanceof LanguageModelToolCallPart);
+    if (!seedCall) {
+      throw new Error('Expected Native rejection seed tool call.');
+    }
+
+    const legacyParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [seedMarker] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelToolResultPart(
+            'call_native_rejection',
+            [new vscodeMock.LanguageModelTextPart('native rejection output')]
+          )]
+        }
+      ],
+      { tools },
+      { report(part) { legacyParts.push(part); } },
+      token
+    );
+    const nativeRejectedRequest = responseRequests.at(-2);
+    const legacyRetryRequest = responseRequests.at(-1);
+    assertEqual(nativeRejectedRequest.tools.some((tool) => tool.type === 'namespace'), true, 'marker continuation first uses the Native plan');
+    assertEqual(legacyRetryRequest.tools.some((tool) => tool.type === 'namespace'), false, 'explicit Native rejection retries with legacy function tools');
+    assertEqual(legacyRetryRequest.input.some((item) => item.type === 'tool_search_output' || item.type === 'tool_search_call'), false, 'legacy retry strips Native Tool Search items');
+    const legacyRetryCall = legacyRetryRequest.input.find((item) => item.type === 'function_call');
+    assertEqual(legacyRetryCall.id, undefined, 'legacy retry strips Native response item identity');
+    assertEqual(legacyRetryCall.namespace, undefined, 'legacy retry strips Native namespace metadata');
+    const legacyMarker = getSingleStatefulMarkerPart(legacyParts, 'legacy retry completion');
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [legacyMarker] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after Native rejection.')] }
+      ],
+      { tools },
+      { report() {} },
+      token
+    );
+    const recoveryRequest = responseRequests.at(-1);
+    assertEqual(recoveryRequest.input.some((item) => item.type === 'tool_search_output' || item.type === 'tool_search_call'), false, 'persisted legacy recovery excludes Native Tool Search items');
+    assertEqual(recoveryRequest.input.filter((item) => item.type === 'function_call').every((item) => item.id === undefined && item.namespace === undefined), true, 'persisted legacy recovery keeps function calls legacy-compatible');
+  } finally {
+    globalThis.fetch = originalFetch;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.nativeToolSearch = originalNativeToolSearch;
+    configValues.transport = originalTransport;
+    await closeServer(server);
+  }
 }
 
 async function runModelCatalogMetadataSmokeTest() {
@@ -700,7 +1111,7 @@ async function runProviderLongContextSelectionSmokeTest() {
     if (!reply) {
       throw new Error('Unexpected extra context-size request.');
     }
-    writeSseResponse(response, reply[0], reply[1]);
+    writeSseResponseWithOutputItem(response, reply[0], reply[1], `msg_${reply[1]}`);
   });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -1048,7 +1459,12 @@ async function runInterleavedResponsePresentationSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({
+        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+          context_window: 272000,
+          max_context_window: 1000000
+        })]
+      }));
       return;
     }
 
@@ -1407,7 +1823,7 @@ async function runStatefulMarkerContinuationRecoverySmokeTest() {
     assertEqual('previous_response_id' in responseRequests[2], false, 'marker recovery full replay omits previous response id');
     assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
       { role: 'user', content: 'Recovery seed', type: 'message' },
-      { id: 'msg_marker_recovery_seed', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'recovery seed reply' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'recovery seed reply' }] },
       { role: 'user', content: 'Recovery delta', type: 'message' }
     ]), 'marker recovery uses canonical local snapshot input plus response item plus delta');
     assertEqual(decodeStatefulMarker(recoveredMarkerPart), `${model.id}\\resp_marker_recovered`, 'only recovered completion emits a marker');
@@ -1535,7 +1951,6 @@ async function runStatefulMarkerToolOutputReplaySmokeTest() {
     assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
       { role: 'user', content: 'Read the provider file', type: 'message' },
       {
-        id: 'fc_marker_tool',
         type: 'function_call',
         call_id: 'call_marker_tool',
         name: 'read_file',
@@ -1548,6 +1963,110 @@ async function runStatefulMarkerToolOutputReplaySmokeTest() {
       `${model.id}\\resp_marker_tool_done`,
       'HTTP marker tool replay emits the completed marker'
     );
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerMalformedRawSnapshotSmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    if (responseRequests.length > 1) {
+      writeSseResponse(response, 'Deduplicated marker accepted.', 'resp_duplicate_marker_recovered');
+      return;
+    }
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    const duplicateCall = {
+      id: 'fc_duplicate_marker',
+      type: 'function_call',
+      call_id: 'call_duplicate_marker',
+      name: 'read_file',
+      arguments: '{"filePath":"src/provider.ts"}'
+    };
+    send({ type: 'response.output_item.done', output_index: 0, item: duplicateCall });
+    send({ type: 'response.output_item.done', output_index: 1, item: duplicateCall });
+    send({ type: 'response.completed', response: { id: 'resp_duplicate_marker', status: 'completed' } });
+    response.write('data: [DONE]\n\n');
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+  const tools = [{ name: 'read_file', description: 'Reads a file.', inputSchema: { type: 'object' } }];
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for malformed marker snapshot coverage.');
+    }
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Create a malformed raw snapshot.')] }],
+      { tools },
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    const markerPart = getSingleStatefulMarkerPart(seedParts, 'malformed raw snapshot seed');
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [markerPart] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelToolResultPart(
+            'call_duplicate_marker',
+            [new vscodeMock.LanguageModelTextPart('duplicate output')]
+          )]
+        }
+      ],
+      { tools },
+      { report() {} },
+      token
+    );
+    assertEqual(responseRequests.length, 2, 'duplicate raw calls produce one provider-visible canonical replay');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Create a malformed raw snapshot.', type: 'message' },
+      {
+        type: 'function_call',
+        call_id: 'call_duplicate_marker',
+        name: 'read_file',
+        arguments: '{"filePath":"src/provider.ts"}'
+      },
+      { type: 'function_call_output', call_id: 'call_duplicate_marker', output: 'duplicate output' }
+    ]), 'duplicate raw calls cannot duplicate or corrupt the provider-visible call');
   } finally {
     await closeServer(server);
   }
@@ -1581,7 +2100,6 @@ async function runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest() 
       });
       const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
       const item = {
-        id: 'fc_marker_auto_opaque',
         type: 'function_call',
         call_id: 'call_marker_auto_opaque',
         name: 'read_file',
@@ -1601,17 +2119,12 @@ async function runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest() 
       response.end();
       return;
     }
-    if (responseRequests.length === 2 && body.previous_response_id) {
-      response.writeHead(400);
-      response.end();
-      return;
-    }
     const responseIndex = responseRequests.length;
     writeSseResponseWithOutputItem(
       response,
-      responseIndex === 3 ? 'opaque tool recovery accepted' : 'opaque disable follow-up accepted',
-      responseIndex === 3 ? 'resp_marker_auto_opaque_recovered' : 'resp_marker_auto_opaque_followup',
-      responseIndex === 3 ? 'msg_marker_auto_opaque_recovered' : 'msg_marker_auto_opaque_followup'
+      responseIndex === 2 ? 'opaque tool recovery accepted' : 'opaque follow-up accepted',
+      responseIndex === 2 ? 'resp_marker_auto_opaque_recovered' : 'resp_marker_auto_opaque_followup',
+      responseIndex === 2 ? 'msg_marker_auto_opaque_recovered' : 'msg_marker_auto_opaque_followup'
     );
   });
 
@@ -1675,31 +2188,22 @@ async function runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest() 
       token
     );
 
-    assertEqual(responseRequests.length, 3, 'auto opaque tool recovery sends seed, incremental, and canonical HTTP requests');
-    assertEqual(
-      responseRequests[1].previous_response_id,
-      'resp_marker_auto_opaque_seed',
-      'auto fallback first attempts incremental tool-output continuation'
-    );
+    assertEqual(responseRequests.length, 2, 'auto tool-output fallback sends seed and one canonical HTTP request');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'auto tool-output fallback removes the WebSocket continuation id before HTTP');
     assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
-      { type: 'function_call_output', call_id: 'call_marker_auto_opaque', output: 'provider source through auto fallback' }
-    ]), 'auto fallback sends only the incremental tool output before opaque rejection');
-    assertEqual('previous_response_id' in responseRequests[2], false, 'auto opaque tool recovery omits the rejected response id');
-    assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
       { role: 'user', content: 'Read through auto fallback', type: 'message' },
       {
-        id: 'fc_marker_auto_opaque',
         type: 'function_call',
         call_id: 'call_marker_auto_opaque',
         name: 'read_file',
         arguments: '{"filePath":"src/provider.ts"}'
       },
       { type: 'function_call_output', call_id: 'call_marker_auto_opaque', output: 'provider source through auto fallback' }
-    ]), 'auto opaque tool recovery replays the canonical call and output exactly once');
+    ]), 'auto tool-output fallback replays the canonical call and output exactly once over HTTP');
     assertEqual(
-      getStatefulMarkers(recoveredParts).length,
-      0,
-      'auto opaque tool recovery emits no marker while reuse remains disabled until expiry'
+      decodeStatefulMarker(getSingleStatefulMarkerPart(recoveredParts, 'auto fallback canonical completion')),
+      `${model.id}\\resp_marker_auto_opaque_recovered`,
+      'successful canonical HTTP fallback emits a fresh trusted marker'
     );
 
     const followUpParts = [];
@@ -1739,16 +2243,21 @@ async function runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest() 
       { report(part) { followUpParts.push(part); } },
       token
     );
-    assertEqual(responseRequests.length, 4, 'opaque disable follow-up reaches HTTP once');
+    assertEqual(responseRequests.length, 3, 'post-fallback follow-up reaches HTTP once');
     assertEqual(
-      'previous_response_id' in responseRequests[3],
-      false,
-      'opaque disable follow-up does not reuse the recovered response before expiry'
+      responseRequests[2].previous_response_id,
+      'resp_marker_auto_opaque_recovered',
+      'post-fallback follow-up reuses the completed canonical HTTP response'
     );
     assertEqual(
-      getStatefulMarkers(followUpParts).length,
-      0,
-      'opaque disable follow-up still emits no marker before expiry'
+      JSON.stringify(responseRequests[2].input),
+      JSON.stringify([{ role: 'user', content: 'Continue after opaque tool recovery', type: 'message' }]),
+      'post-fallback follow-up sends only verified appended input'
+    );
+    assertEqual(
+      decodeStatefulMarker(getSingleStatefulMarkerPart(followUpParts, 'post-fallback follow-up')),
+      `${model.id}\\resp_marker_auto_opaque_followup`,
+      'post-fallback follow-up emits its completed marker'
     );
   } finally {
     configValues.transport = 'http';
@@ -1834,7 +2343,7 @@ async function runStatefulMarkerOpaqueRecoverySmokeTest() {
     assertEqual('previous_response_id' in responseRequests[2], false, 'opaque recovery replays without previous response id');
     assertEqual(JSON.stringify(responseRequests[2].input), JSON.stringify([
       { role: 'user', content: 'Opaque seed', type: 'message' },
-      { id: 'msg_marker_opaque_seed', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'opaque seed reply' }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'opaque seed reply' }] },
       { role: 'user', content: 'Opaque delta', type: 'message' }
     ]), 'opaque recovery uses the canonical local snapshot');
     assertEqual(getStatefulMarkers(recoveredParts).length, 0, 'opaque HTTP rejection emits no marker while reuse remains disabled');
@@ -2016,7 +2525,13 @@ async function runHttpContinuationRecoverySmokeTest() {
       return;
     }
 
-    writeSseResponse(response, responseRequests.length === 1 ? 'first reply' : 'recovered reply', responseRequests.length === 1 ? 'resp_initial' : 'resp_recovered');
+    const responseId = responseRequests.length === 1 ? 'resp_initial' : 'resp_recovered';
+    writeSseResponseWithOutputItem(
+      response,
+      responseRequests.length === 1 ? 'first reply' : 'recovered reply',
+      responseId,
+      `msg_${responseId}`
+    );
   });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -2135,7 +2650,12 @@ async function runStructuredHttpContinuationRecoverySmokeTest() {
     responseRequests.push(body);
 
     if (responseRequests.length === 1) {
-      writeSseResponse(response, 'first structured reply', 'resp_structured_initial');
+      writeSseResponseWithOutputItem(
+        response,
+        'first structured reply',
+        'resp_structured_initial',
+        'msg_structured_initial'
+      );
       return;
     }
 
@@ -2151,7 +2671,12 @@ async function runStructuredHttpContinuationRecoverySmokeTest() {
     }
 
     if (responseRequests.length === 3) {
-      writeSseResponse(response, 'structured recovered reply', 'resp_structured_recovered');
+      writeSseResponseWithOutputItem(
+        response,
+        'structured recovered reply',
+        'resp_structured_recovered',
+        'msg_structured_recovered'
+      );
       return;
     }
 
@@ -2272,7 +2797,12 @@ async function runContinuationMissAfterVisibleOutputSmokeTest() {
     responseRequests.push(body);
 
     if (responseRequests.length === 1) {
-      writeSseResponse(response, 'visible first reply', 'resp_visible_initial');
+      writeSseResponseWithOutputItem(
+        response,
+        'visible first reply',
+        'resp_visible_initial',
+        'msg_visible_initial'
+      );
       return;
     }
 
@@ -2796,6 +3326,1195 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
   }
 }
 
+async function runNativeHostedCanonicalReplaySmokeTest() {
+  const responseRequests = [];
+  let selectedNamespace;
+  let selectedTool;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+
+    if (responseRequests.length === 3 && body.previous_response_id) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          type: 'invalid_request_error',
+          code: 'previous_response_not_found',
+          message: 'Native replay continuation expired.',
+          param: 'previous_response_id'
+        }
+      }));
+      return;
+    }
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    if (responseRequests.length === 1) {
+      const namespaceTool = body.tools.find((tool) => tool.type === 'namespace');
+      selectedNamespace = namespaceTool?.name;
+      selectedTool = namespaceTool?.tools?.[0]?.name;
+      if (!selectedNamespace || !selectedTool) {
+        throw new Error('Expected native Tool Search request to contain a deferred namespace tool.');
+      }
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'item_native_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            tools: [{ type: 'function', name: selectedTool }]
+          }]
+        }
+      });
+      const item = {
+        id: 'fc_native_replay',
+        type: 'function_call',
+        call_id: 'call_native_replay',
+        name: selectedTool,
+        namespace: selectedNamespace,
+        arguments: '{"value":"first"}'
+      };
+      send({ type: 'response.output_item.added', output_index: 0, item });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: item.id,
+        output_index: 0,
+        name: selectedTool,
+        arguments: item.arguments
+      });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          ...item,
+          call_id: 'call_raw_conflict',
+          name: 'raw_conflict_tool',
+          namespace: 'raw_conflict_namespace',
+          arguments: '{"value":"raw-conflict"}'
+        }
+      });
+      send({ type: 'response.completed', response: { id: 'resp_native_tool', status: 'completed' } });
+    } else if (responseRequests.length === 2) {
+      send({ type: 'response.output_text.delta', delta: 'Native tool result received.' });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'msg_native_result',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Raw assistant conflict.', annotations: [] }]
+        }
+      });
+      send({ type: 'response.completed', response: { id: 'resp_native_result', status: 'completed' } });
+    } else {
+      send({ type: 'response.output_text.delta', delta: 'Native continuation recovered.' });
+      send({ type: 'response.completed', response: { id: 'resp_native_recovered', status: 'completed' } });
+    }
+    response.write('data: [DONE]\n\n');
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalNativeToolSearch = configValues.nativeToolSearch;
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.nativeToolSearch = 'enabled';
+  configValues.transport = 'http';
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+
+  const tools = Array.from({ length: 13 }, (_, index) => ({
+    name: `native_replay_tool_${String(index).padStart(2, '0')}`,
+    description: `Native replay tool ${index}`,
+    inputSchema: {
+      type: 'object',
+      properties: { value: { type: 'string' } },
+      required: ['value']
+    }
+  }));
+  const provider = new CodexModelProvider(
+    { subscriptions: [] },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'native-replay-token',
+          accountId: 'native-replay-account',
+          revision: 'native-replay-revision',
+          refreshable: false
+        };
+      }
+    }
+  );
+
+  try {
+    const token = createCancellationToken();
+    const model = buildProviderModels(
+      configValues,
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        context_window: 272000,
+        max_context_window: 1000000
+      })],
+      'codexAccessToken'
+    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    if (!model) {
+      throw new Error('Expected model for native canonical replay coverage.');
+    }
+
+    const firstParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native tool.')] }],
+      { tools, modelConfiguration: { contextSize: 950000 } },
+      { report(part) { firstParts.push(part); } },
+      token
+    );
+    const toolCall = firstParts.find((part) => part instanceof LanguageModelToolCallPart);
+    if (!toolCall || !selectedNamespace || !selectedTool) {
+      throw new Error('Expected one mapped native tool call.');
+    }
+    assertEqual(toolCall.name, selectedTool, 'native namespaced call maps back to the selected VS Code tool');
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native tool.')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_native_replay', selectedTool, { value: 'first' })]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolResultPart('call_native_replay', [new vscodeMock.LanguageModelTextPart('native output')])]
+        }
+      ],
+      { tools },
+      { report() {} },
+      token
+    );
+
+    const recoveredParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native tool.')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolCallPart('call_native_replay', selectedTool, { value: 'first' })]
+        },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [new vscodeMock.LanguageModelToolResultPart('call_native_replay', [new vscodeMock.LanguageModelTextPart('native output')])]
+        },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Native tool result received.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the tool result.')] }
+      ],
+      { tools },
+      { report(part) { recoveredParts.push(part); } },
+      token
+    );
+
+    assertEqual(responseRequests.length, 4, 'native replay performs initial, full-replay, rejected continuation, and recovery requests');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'native HTTP context downgrade keeps previous response reuse disabled');
+    const initialReplayCall = responseRequests[1].input.find((item) => item.type === 'function_call');
+    assertEqual(initialReplayCall.id, undefined, 'native HTTP context downgrade excludes the raw function-call item id');
+    assertEqual(initialReplayCall.namespace, undefined, 'native HTTP context downgrade excludes the raw function-call namespace');
+    assertEqual(initialReplayCall.call_id, 'call_native_replay', 'native HTTP context downgrade uses the provider-visible call id');
+    assertEqual(initialReplayCall.name, selectedTool, 'native HTTP context downgrade uses the provider-visible tool name');
+    assertEqual(initialReplayCall.arguments, '{"value":"first"}', 'native HTTP context downgrade serializes the provider-visible parsed input');
+    assertEqual(
+      responseRequests[1].input.filter((item) => item.type === 'tool_search_output').length,
+      0,
+      'unmarked native HTTP context downgrade excludes hidden server Tool Search output'
+    );
+    assertEqual(
+      responseRequests[1].input.filter((item) => item.type === 'function_call').length,
+      1,
+      'native HTTP context downgrade does not duplicate the canonical function call'
+    );
+    assertEqual(
+      responseRequests[1].input.filter((item) => item.type === 'function_call_output').length,
+      1,
+      'native HTTP context downgrade includes the matching output exactly once'
+    );
+    assertEqual(responseRequests[1].input.at(-1).type, 'function_call_output', 'native HTTP context downgrade appends the matching output');
+    assertEqual(responseRequests[2].previous_response_id, 'resp_native_result', 'native follow-up first attempts incremental continuation');
+    assertEqual(
+      JSON.stringify(responseRequests[2].input),
+      JSON.stringify([{ role: 'user', content: 'Continue after the tool result.', type: 'message' }]),
+      'native continuation sends only appended input before recovery'
+    );
+    assertEqual('previous_response_id' in responseRequests[3], false, 'native continuation-miss recovery omits the stale response id');
+    assertEqual(
+      JSON.stringify(responseRequests[3].input),
+      JSON.stringify([
+        { role: 'user', content: 'Run a deferred native tool.', type: 'message' },
+        {
+          type: 'function_call',
+          call_id: 'call_native_replay',
+          name: selectedTool,
+          arguments: '{"value":"first"}'
+        },
+        { type: 'function_call_output', call_id: 'call_native_replay', output: 'native output' },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Native tool result received.' }]
+        },
+        { role: 'user', content: 'Continue after the tool result.', type: 'message' }
+      ]),
+      'native continuation-miss recovery sends exact ordered canonical input'
+    );
+    assertEqual(
+      JSON.stringify(responseRequests[3].input).includes('raw-conflict'),
+      false,
+      'native continuation-miss recovery excludes conflicting raw function-call and assistant fields'
+    );
+    assertEqual(
+      responseRequests[3].input.filter((item) => item.type === 'function_call').length,
+      1,
+      'native continuation-miss recovery contains exactly one function call'
+    );
+    assertEqual(
+      responseRequests[3].input.filter((item) => item.type === 'tool_search_output').length,
+      0,
+      'native continuation-miss recovery cannot recover hidden Tool Search output from an unmarked budget miss'
+    );
+    assertEqual(
+      recoveredParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Native continuation recovered.',
+      'native continuation-miss recovery reports only recovered output'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.nativeToolSearch = originalNativeToolSearch;
+    configValues.transport = 'http';
+    await closeServer(server);
+  }
+}
+
+async function runNativeHostedCrossThreadBudgetDowngradeSmokeTest() {
+  const responseRequests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+          context_window: 272000,
+          max_context_window: 1000000
+        })]
+      }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    if (responseRequests.length % 2 === 1) {
+      const pairIndex = Math.ceil(responseRequests.length / 2);
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: `item_thread_a_search_${pairIndex}`,
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: []
+        }
+      });
+      send({ type: 'response.output_text.delta', delta: 'Thread A assistant context.' });
+      send({
+        type: 'response.output_item.done',
+        output_index: 1,
+        item: {
+          id: `msg_thread_a_context_${pairIndex}`,
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Thread A assistant context.', annotations: [] }]
+        }
+      });
+      send({ type: 'response.completed', response: { id: `resp_thread_a_${pairIndex}`, status: 'completed' } });
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+    const pairIndex = responseRequests.length / 2;
+    writeSseResponseWithOutputItem(response, 'Thread B accepted.', `resp_thread_b_${pairIndex}`, `msg_thread_b_${pairIndex}`);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalNativeToolSearch = configValues.nativeToolSearch;
+  const originalTransport = configValues.transport;
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.nativeToolSearch = 'enabled';
+  configValues.transport = 'http';
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+  const tools = Array.from({ length: 13 }, (_, index) => ({
+    name: `cross_thread_tool_${String(index).padStart(2, '0')}`,
+    description: `Cross-thread tool ${index}`,
+    inputSchema: { type: 'object', properties: { value: { type: 'string' } } }
+  }));
+  const createCrossThreadProvider = () => new CodexModelProvider(
+    { subscriptions: [] },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'cross-thread-token',
+          accountId: 'cross-thread-account',
+          revision: 'cross-thread-revision',
+          refreshable: false
+        };
+      }
+    }
+  );
+  const provider = createCrossThreadProvider();
+
+  try {
+    const token = createCancellationToken();
+    const model = buildProviderModels(
+      configValues,
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        context_window: 272000,
+        max_context_window: 1000000
+      })],
+      'codexAccessToken'
+    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    if (!model) {
+      throw new Error('Expected model for cross-thread budget downgrade coverage.');
+    }
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Shared user history.')] }],
+      { tools, modelConfiguration: { contextSize: 950000 } },
+      { report() {} },
+      token
+    );
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Shared user history.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Thread A assistant context.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue in copied thread B.')] }
+      ],
+      { tools },
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'cross-thread context downgrade sends one request per thread');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'cross-thread context downgrade does not reuse thread A response id');
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'Shared user history.', type: 'message' },
+      { role: 'assistant', content: 'Thread A assistant context.', type: 'message' },
+      { role: 'user', content: 'Continue in copied thread B.', type: 'message' }
+    ]), 'identical visible transcript in another thread uses only its converted input');
+    assertEqual(responseRequests[1].input.some((item) => item.id === 'item_thread_a_search_1'), false, 'thread B never replays thread A Tool Search output');
+    assertEqual(responseRequests[1].input.some((item) => item.id === 'msg_thread_a_context_1'), false, 'thread B never replays thread A assistant response item');
+
+    const equalBudgetProvider = createCrossThreadProvider();
+    await equalBudgetProvider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Equal-budget shared history.')] }],
+      { tools },
+      { report() {} },
+      token
+    );
+    await equalBudgetProvider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Equal-budget shared history.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Equal-budget thread B context.')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue equal-budget thread B.')] }
+      ],
+      { tools },
+      { report() {} },
+      token
+    );
+    assertEqual(responseRequests.length, 4, 'equal-budget sibling coverage sends one request per thread');
+    assertEqual('previous_response_id' in responseRequests[3], false, 'equal-budget sibling does not reuse thread A response id');
+    assertEqual(JSON.stringify(responseRequests[3].input), JSON.stringify([
+      { role: 'user', content: 'Equal-budget shared history.', type: 'message' },
+      { role: 'assistant', content: 'Equal-budget thread B context.', type: 'message' },
+      { role: 'user', content: 'Continue equal-budget thread B.', type: 'message' }
+    ]), 'equal-budget sibling uses only its local converted input');
+    assertEqual(responseRequests[3].input.some((item) => item.id === 'item_thread_a_search_2'), false, 'equal-budget sibling excludes thread A Tool Search output');
+    assertEqual(responseRequests[3].input.some((item) => item.id === 'msg_thread_a_context_2'), false, 'equal-budget sibling excludes thread A assistant response item');
+  } finally {
+    globalThis.fetch = originalFetch;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.nativeToolSearch = originalNativeToolSearch;
+    configValues.transport = originalTransport;
+    await closeServer(server);
+  }
+}
+
+async function runNativeAutoFallbackRawStateIsolationSmokeTest() {
+  const responseRequests = [];
+  const responseRequestHeaders = [];
+  const sockets = new Set();
+  let selectedNamespace;
+  let selectedTool;
+  let selectedNamespaceDefinition;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    responseRequests.push(body);
+    responseRequestHeaders.push(request.headers);
+    if (responseRequests.length === 1) {
+      const namespaceTool = body.tools.find((tool) => tool.type === 'namespace');
+      selectedNamespace = namespaceTool?.name;
+      selectedTool = namespaceTool?.tools?.[0]?.name;
+      selectedNamespaceDefinition = structuredClone(namespaceTool);
+      if (!selectedNamespace || !selectedTool) {
+        response.writeHead(500, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'Expected Native Tool Search namespace.' } }));
+        return;
+      }
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+      send({ type: 'response.output_text.delta', delta: 'Before native tool. ' });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'rs_http_attempt',
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'Validated replay summary.', injected: 'must-not-replay' }],
+          encrypted_content: 'reasoning-ciphertext',
+          injected: 'must-not-replay'
+        }
+      });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'item_fake_search',
+          type: 'tool_search_injected',
+          execution: 'server',
+          status: 'completed',
+          tools: []
+        }
+      });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'item_unmapped_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            tools: [{ type: 'function', name: 'unmapped_tool' }]
+          }]
+        }
+      });
+      send({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'item_http_attempt_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          injected: 'must-not-replay',
+          tools: [{
+            type: 'namespace',
+            name: selectedNamespace,
+            description: 'must-not-replay',
+            tools: [{ type: 'function', name: selectedTool, parameters: { injected: true } }]
+          }]
+        }
+      });
+      const item = {
+        id: 'fc_http_attempt',
+        type: 'function_call',
+        call_id: 'call_http_attempt',
+        name: selectedTool,
+        namespace: selectedNamespace,
+        arguments: '{"value":"http"}'
+      };
+      send({ type: 'response.output_item.added', output_index: 1, item });
+      send({
+        type: 'response.function_call_arguments.done',
+        item_id: item.id,
+        output_index: 1,
+        name: item.name,
+        arguments: item.arguments
+      });
+      send({ type: 'response.output_item.done', output_index: 1, item });
+      send({ type: 'response.output_text.delta', delta: 'After native tool.' });
+      send({ type: 'response.completed', response: { id: 'resp_http_attempt', status: 'completed' } });
+      response.write('data: [DONE]\n\n');
+      response.end();
+      return;
+    }
+    writeSseResponseWithOutputItem(response, 'HTTP marker replay accepted.', 'resp_http_marker_replay', 'msg_http_marker_replay');
+  });
+  const webSocketServer = new webSocketModule.WebSocketServer({ noServer: true });
+  webSocketServer.on('headers', (headers) => {
+    headers.push('x-codex-turn-state: failed-websocket-turn-state');
+  });
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+  webSocketServer.on('connection', (webSocket) => {
+    sockets.add(webSocket);
+    webSocket.once('close', () => sockets.delete(webSocket));
+    webSocket.once('message', () => {
+      webSocket.send(JSON.stringify({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          id: 'item_failed_ws_search',
+          type: 'tool_search_output',
+          execution: 'server',
+          status: 'completed',
+          tools: []
+        }
+      }), () => webSocket.close(1011, 'WebSocket unavailable after non-visible output'));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalNativeToolSearch = configValues.nativeToolSearch;
+  const originalTransport = configValues.transport;
+  const originalWebsocketPrewarm = configValues.websocketPrewarm;
+  const originalNoProxy = process.env.NO_PROXY;
+  const originalRewriteWebSocketURL = rewriteWebSocketURL;
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.nativeToolSearch = 'enabled';
+  configValues.transport = 'auto';
+  configValues.websocketPrewarm = 'disabled';
+  process.env.NO_PROXY = [originalNoProxy, 'chatgpt.com'].filter(Boolean).join(',');
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+  rewriteWebSocketURL = (input) => {
+    const targetUrl = new URL(input.toString());
+    targetUrl.protocol = 'ws:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return targetUrl;
+  };
+  const tools = Array.from({ length: 13 }, (_, index) => ({
+    name: `fallback_isolation_tool_${String(index).padStart(2, '0')}`,
+    description: `Fallback isolation tool ${index}`,
+    inputSchema: { type: 'object', properties: { value: { type: 'string' } } }
+  }));
+  const context = { subscriptions: [] };
+  const provider = new CodexModelProvider(
+    context,
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'fallback-isolation-token',
+          accountId: 'fallback-isolation-account',
+          revision: 'fallback-isolation-revision',
+          refreshable: false
+        };
+      }
+    }
+  );
+
+  try {
+    const token = createCancellationToken();
+    const model = buildProviderModels(
+      configValues,
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      'codexAccessToken'
+    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    if (!model) {
+      throw new Error('Expected model for auto fallback raw-state isolation coverage.');
+    }
+
+    const firstParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run through auto fallback.')] }],
+        { tools },
+        { report(part) { firstParts.push(part); } },
+        token
+      ),
+      token,
+      'native auto fallback raw-state seed'
+    );
+    const markerPart = getSingleStatefulMarkerPart(firstParts, 'native auto fallback seed');
+    const toolCall = firstParts.find((part) => part instanceof LanguageModelToolCallPart);
+    if (!toolCall || !selectedNamespace || !selectedTool) {
+      throw new Error('Expected HTTP-attempt native tool call after WebSocket fallback.');
+    }
+
+    configValues.transport = 'http';
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [markerPart] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.User,
+          content: [new vscodeMock.LanguageModelToolResultPart(
+            'call_http_attempt',
+            [new vscodeMock.LanguageModelTextPart('HTTP attempt output')]
+          )]
+        }
+      ],
+      { tools },
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'auto fallback and marker replay each reach HTTP exactly once');
+    assertEqual('previous_response_id' in responseRequests[1], false, 'HTTP marker replay uses canonical full input');
+    assertEqual(responseRequests[1].input.filter((item) => item.type === 'tool_search_output').length, 1, 'marker replay contains exactly one successful HTTP Tool Search output');
+    assertEqual(responseRequests[1].input.some((item) => item.id === 'item_failed_ws_search'), false, 'marker replay excludes failed-WebSocket raw output');
+    assertEqual(responseRequests[1].input.some((item) => item.id === 'item_fake_search'), false, 'marker replay excludes unknown Tool Search item types');
+    assertEqual(responseRequests[1].input.some((item) => item.id === 'item_unmapped_search'), false, 'marker replay excludes Tool Search entries outside the submitted catalog');
+    assertEqual(responseRequests[1].input.some((item) => item.id === 'item_http_attempt_search'), true, 'marker replay retains successful HTTP raw output');
+    assertEqual(JSON.stringify(responseRequests[1].input).includes('must-not-replay'), false, 'marker replay projects away unknown fields from allowed raw items');
+    const replayReasoning = responseRequests[1].input.find((item) => item.id === 'rs_http_attempt');
+    assertEqual(JSON.stringify(replayReasoning), JSON.stringify({
+      type: 'reasoning',
+      id: 'rs_http_attempt',
+      summary: [{ type: 'summary_text', text: 'Validated replay summary.' }],
+      encrypted_content: 'reasoning-ciphertext'
+    }), 'marker replay projects reasoning into the complete input schema');
+    const replaySearchOutput = responseRequests[1].input.find((item) => item.id === 'item_http_attempt_search');
+    const replayNamespace = replaySearchOutput?.tools?.[0];
+    assertEqual(replayNamespace?.description, selectedNamespaceDefinition?.description, 'marker replay restores the trusted namespace description');
+    assertEqual(
+      JSON.stringify(replayNamespace?.tools?.[0]),
+      JSON.stringify(selectedNamespaceDefinition?.tools?.[0]),
+      'marker replay restores the trusted complete function definition'
+    );
+    assertEqual(responseRequests[1].input.filter((item) => item.type === 'function_call').length, 1, 'marker replay contains exactly one successful HTTP function call');
+    const replayCallIndex = responseRequests[1].input.findIndex((item) => item.type === 'function_call');
+    const replayCall = responseRequests[1].input[replayCallIndex];
+    assertEqual(replayCall.id, 'fc_http_attempt', 'trusted Native marker replay retains the authoritative item id');
+    assertEqual(replayCall.namespace, selectedNamespace, 'trusted Native marker replay retains the authoritative namespace');
+    assertEqual(replayCall.name, selectedTool, 'trusted Native marker replay retains the authoritative backend name');
+    assertEqual(responseRequests[1].input[1].content[0].text, 'Before native tool. ', 'text emitted before hidden/tool events remains before them in replay');
+    assertEqual(responseRequests[1].input[replayCallIndex + 1].content[0].text, 'After native tool.', 'text emitted after a tool call remains after it in replay');
+    assertEqual(responseRequests[1].input.at(-1).call_id, 'call_http_attempt', 'marker replay appends the matching local tool output');
+    assertEqual(responseRequestHeaders[1]['x-codex-turn-state'], undefined, 'failed-WebSocket Turn State is not retained by the successful snapshot');
+  } finally {
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    globalThis.fetch = originalFetch;
+    rewriteWebSocketURL = originalRewriteWebSocketURL;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.nativeToolSearch = originalNativeToolSearch;
+    configValues.transport = originalTransport;
+    if (originalWebsocketPrewarm === undefined) {
+      delete configValues.websocketPrewarm;
+    } else {
+      configValues.websocketPrewarm = originalWebsocketPrewarm;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    for (const socket of sockets) {
+      socket.terminate();
+    }
+    await closeWebSocketServer(webSocketServer);
+    await closeServer(server);
+  }
+}
+
+async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
+  const frames = [];
+  const sockets = new Set();
+  const warnings = [];
+  let httpResponseRequestCount = 0;
+  let selectedNamespace;
+  let selectedTool;
+  const server = createServer((request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+          context_window: 272000,
+          max_context_window: 1000000
+        })]
+      }));
+      return;
+    }
+    httpResponseRequestCount += 1;
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Native WebSocket replay must not fall back to HTTP.' } }));
+  });
+  const webSocketServer = new webSocketModule.WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+  webSocketServer.on('connection', (webSocket) => {
+    sockets.add(webSocket);
+    webSocket.once('close', () => sockets.delete(webSocket));
+    webSocket.on('message', (data) => {
+      const frame = JSON.parse(data.toString('utf8'));
+      frames.push(frame);
+      if (frames.length === 1) {
+        const namespaceTool = frame.tools.find((tool) => tool.type === 'namespace');
+        selectedNamespace = namespaceTool?.name;
+        selectedTool = namespaceTool?.tools?.[0]?.name;
+        if (!selectedNamespace || !selectedTool) {
+          webSocket.send(JSON.stringify({
+            type: 'response.failed',
+            response: { id: 'resp_native_ws_invalid', status: 'failed', error: { message: 'Missing native namespace tool.' } }
+          }));
+          return;
+        }
+        webSocket.send(JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            id: 'item_native_ws_search',
+            type: 'tool_search_output',
+            execution: 'server',
+            status: 'completed',
+            tools: [{
+              type: 'namespace',
+              name: selectedNamespace,
+              tools: [{ type: 'function', name: selectedTool }]
+            }]
+          }
+        }));
+        const item = {
+          id: 'fc_native_ws_replay',
+          type: 'function_call',
+          call_id: 'call_native_ws_replay',
+          name: selectedTool,
+          namespace: selectedNamespace,
+          arguments: '{"value":"websocket"}'
+        };
+        webSocket.send(JSON.stringify({ type: 'response.output_item.added', output_index: 0, item }));
+        webSocket.send(JSON.stringify({
+          type: 'response.function_call_arguments.done',
+          item_id: item.id,
+          output_index: 0,
+          name: selectedTool,
+          arguments: item.arguments
+        }));
+        webSocket.send(JSON.stringify({ type: 'response.output_item.done', output_index: 0, item }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_tool', status: 'completed' } }));
+        return;
+      }
+      if (frames.length === 2) {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'Native WebSocket tool result received.' }));
+        webSocket.send(JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            id: 'msg_native_ws_result',
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: 'Native WebSocket tool result received.', annotations: [] }]
+          }
+        }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_result', status: 'completed' } }));
+        return;
+      }
+      if (frames.length === 3) {
+        webSocket.send(JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            code: 'previous_response_not_found',
+            message: 'Native WebSocket context-downgrade continuation expired.',
+            param: 'previous_response_id'
+          },
+          status: 400
+        }));
+        return;
+      }
+      if (frames.length === 4) {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'Native WebSocket continuation recovered.' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_recovered', status: 'completed' } }));
+        return;
+      }
+      webSocket.send(JSON.stringify({
+        type: 'response.failed',
+        response: { id: 'resp_native_ws_extra', status: 'failed', error: { message: 'Unexpected extra provider frame.' } }
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalNativeToolSearch = configValues.nativeToolSearch;
+  const originalTransport = configValues.transport;
+  const originalWebsocketPrewarm = configValues.websocketPrewarm;
+  const originalNoProxy = process.env.NO_PROXY;
+  const originalRewriteWebSocketURL = rewriteWebSocketURL;
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.nativeToolSearch = 'enabled';
+  configValues.transport = 'websocket';
+  configValues.websocketPrewarm = 'disabled';
+  process.env.NO_PROXY = [originalNoProxy, 'chatgpt.com'].filter(Boolean).join(',');
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+  rewriteWebSocketURL = (input) => {
+    const targetUrl = new URL(input.toString());
+    targetUrl.protocol = 'ws:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return targetUrl;
+  };
+
+  const tools = Array.from({ length: 13 }, (_, index) => ({
+    name: `native_ws_replay_tool_${String(index).padStart(2, '0')}`,
+    description: `Native WebSocket replay tool ${index}`,
+    inputSchema: {
+      type: 'object',
+      properties: { value: { type: 'string' } },
+      required: ['value']
+    }
+  }));
+  const context = { subscriptions: [] };
+  const provider = new CodexModelProvider(
+    context,
+    {
+      debug() {},
+      info() {},
+      warn(message, data) {
+        warnings.push({ message, data });
+      },
+      error() {}
+    },
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'native-ws-replay-token',
+          accountId: 'native-ws-replay-account',
+          revision: 'native-ws-replay-revision',
+          refreshable: false
+        };
+      }
+    }
+  );
+  const token = createMutableCancellationToken();
+
+  try {
+    const model = buildProviderModels(
+      configValues,
+      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        context_window: 272000,
+        max_context_window: 1000000
+      })],
+      'codexAccessToken'
+    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    if (!model) {
+      throw new Error('Expected model for native WebSocket replay coverage.');
+    }
+
+    const firstParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] }],
+        { tools, modelConfiguration: { contextSize: 950000 } },
+        { report(part) { firstParts.push(part); } },
+        token
+      ),
+      token,
+      'native WebSocket function-call response'
+    );
+    const toolCall = firstParts.find((part) => part instanceof LanguageModelToolCallPart);
+    if (!toolCall || !selectedNamespace || !selectedTool) {
+      throw new Error('Expected one mapped native WebSocket tool call.');
+    }
+    assertEqual(toolCall.name, selectedTool, 'native WebSocket namespaced call maps to the selected VS Code tool');
+
+    const downgradedParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, { value: 'websocket' })]
+          },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolResultPart('call_native_ws_replay', [new vscodeMock.LanguageModelTextPart('native websocket output')])]
+          }
+        ],
+        { tools },
+        { report(part) { downgradedParts.push(part); } },
+        token
+      ),
+      token,
+      'native WebSocket context-downgrade canonical replay'
+    );
+
+    assertEqual(frames.length, 2, 'native WebSocket context downgrade sends one canonical replay frame after the initial request');
+    assertEqual('previous_response_id' in frames[1], false, 'native WebSocket context downgrade keeps previous response reuse disabled');
+    assertEqual(
+      JSON.stringify(frames[1].input),
+      JSON.stringify([
+        { role: 'user', content: 'Run a deferred native WebSocket tool.', type: 'message' },
+        {
+          type: 'function_call',
+          call_id: 'call_native_ws_replay',
+          name: selectedTool,
+          arguments: '{"value":"websocket"}'
+        },
+        { type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' }
+      ]),
+      'native WebSocket context downgrade sends exact ordered canonical call and output'
+    );
+    assertEqual(frames[1].input.filter((item) => item.type === 'tool_search_output').length, 0, 'unmarked native WebSocket context downgrade excludes hidden Tool Search output');
+    assertEqual(frames[1].input.filter((item) => item.type === 'function_call').length, 1, 'native WebSocket context downgrade includes one namespaced call');
+    assertEqual(frames[1].input.filter((item) => item.type === 'function_call_output').length, 1, 'native WebSocket context downgrade includes one matching output');
+    assertEqual(
+      downgradedParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Native WebSocket tool result received.',
+      'native WebSocket context downgrade reports the completed replay response'
+    );
+
+    const recoveredParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, { value: 'websocket' })]
+          },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolResultPart('call_native_ws_replay', [new vscodeMock.LanguageModelTextPart('native websocket output')])]
+          },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Native WebSocket tool result received.')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the context downgrade.')] }
+        ],
+        { tools },
+        { report(part) { recoveredParts.push(part); } },
+        token
+      ),
+      token,
+      'native WebSocket context-downgrade continuation recovery'
+    );
+
+    assertEqual(frames.length, 4, 'native WebSocket recovery sends incremental continuation and canonical retry after downgrade replay');
+    assertEqual(frames[2].previous_response_id, 'resp_native_ws_result', 'post-downgrade follow-up first uses the new completed response id');
+    assertEqual(
+      JSON.stringify(frames[2].input),
+      JSON.stringify([{ role: 'user', content: 'Continue after the context downgrade.', type: 'message' }]),
+      'post-downgrade continuation sends only appended user input'
+    );
+    assertEqual('previous_response_id' in frames[3], false, 'post-downgrade continuation-miss retry omits the stale response id');
+    assertEqual(
+      JSON.stringify(frames[3].input),
+      JSON.stringify([
+        { role: 'user', content: 'Run a deferred native WebSocket tool.', type: 'message' },
+        {
+          type: 'function_call',
+          call_id: 'call_native_ws_replay',
+          name: selectedTool,
+          arguments: '{"value":"websocket"}'
+        },
+        { type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Native WebSocket tool result received.' }]
+        },
+        { role: 'user', content: 'Continue after the context downgrade.', type: 'message' }
+      ]),
+      'post-downgrade continuation-miss retry sends exact ordered canonical replay'
+    );
+    assertEqual(frames[3].input.filter((item) => item.type === 'tool_search_output').length, 0, 'post-downgrade recovery cannot import hidden Tool Search output without a marker');
+    assertEqual(
+      frames[3].input.filter((item) => item.type === 'function_call').length,
+      1,
+      'post-downgrade recovery contains exactly one namespaced function call'
+    );
+    assertEqual(
+      frames[3].input.filter((item) => item.type === 'function_call_output').length,
+      1,
+      'post-downgrade recovery contains exactly one matching output'
+    );
+    assertEqual(
+      warnings.filter((entry) => entry.message === 'response continuation reset').length,
+      1,
+      'post-downgrade continuation miss executes generic continuation recovery'
+    );
+    assertEqual(
+      warnings.some((entry) => entry.message === 'response tool-output continuation reset'),
+      false,
+      'budget downgrade never executes tool-output incremental recovery'
+    );
+    assertEqual(httpResponseRequestCount, 0, 'structured WebSocket continuation miss never falls back to HTTP');
+    assertEqual(
+      recoveredParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Native WebSocket continuation recovered.',
+      'tool-output continuation recovery reports only retry output'
+    );
+  } finally {
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    globalThis.fetch = originalFetch;
+    rewriteWebSocketURL = originalRewriteWebSocketURL;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.nativeToolSearch = originalNativeToolSearch;
+    configValues.transport = originalTransport;
+    if (originalWebsocketPrewarm === undefined) {
+      delete configValues.websocketPrewarm;
+    } else {
+      configValues.websocketPrewarm = originalWebsocketPrewarm;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    for (const socket of sockets) {
+      socket.terminate();
+    }
+    await closeWebSocketServer(webSocketServer);
+    await closeServer(server);
+  }
+}
+
 async function runDanglingCompletedToolCallFullReplaySmokeTest() {
   const responseRequests = [];
   const server = createServer(async (request, response) => {
@@ -3229,6 +4948,23 @@ function createMutableCancellationToken() {
   };
 }
 
+async function withSmokeTimeout(promise, token, label, timeoutMs = 5_000) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          token.cancel();
+          reject(new Error(`${label} timed out after ${timeoutMs}ms.`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function writeSseResponse(response, text, responseId) {
   response.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -3292,15 +5028,20 @@ async function runProviderVirtualToolFallbackNotificationSmokeTest() {
     baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
     transport: 'http',
     model: 'gpt-5.5',
-    nativeToolSearch: 'enabled',
+    nativeToolSearch: 'auto',
     disabledModels: [],
     modelAliases: {}
   });
   const globalState = new Map();
+  const workspaceState = new Map([
+    ['nativeToolSearch.virtualToolsThresholdOwner', true],
+    ['nativeToolSearch.virtualToolsThresholdPrevious', [{ value: 32, target: 2 }]]
+  ]);
   const provider = new CodexModelProvider(
     {
       secrets: { async get() { return 'test-api-key'; } },
       globalState: { get: (key) => globalState.get(key), update: async (key, value) => globalState.set(key, value) },
+      workspaceState: { get: (key) => workspaceState.get(key), update: async (key, value) => workspaceState.set(key, value) },
       subscriptions: []
     },
     createOutputChannel(),
@@ -3330,7 +5071,7 @@ async function runProviderVirtualToolFallbackNotificationSmokeTest() {
     );
 
     assertEqual(responseRequests[0].tools[0].name, 'activate_group_workspace', 'Virtual Tool fallback preserves the VS Code placeholder for this request');
-    assertEqual(warningMessages.length, warningCount + 1, 'Virtual Tool fallback warns once for a persistent placeholder set');
+    assertEqual(warningMessages.length, warningCount + 1, 'automatic Virtual Tool fallback warns once under workspace ownership');
     assertEqual(
       warningMessages.at(-1)?.includes('falling back to VS Code Virtual Tools'),
       true,
@@ -3341,6 +5082,20 @@ async function runProviderVirtualToolFallbackNotificationSmokeTest() {
     delete configValues.nativeToolSearch;
     await closeServer(server);
   }
+}
+
+async function closeWebSocketServer(server) {
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('WebSocket server cleanup timed out.')), 5_000);
+    server.close((error) => {
+      clearTimeout(timeout);
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    });
+  });
 }
 
 function assertEqual(actual, expected, label) {
@@ -3438,15 +5193,12 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
     responseRequests.push(body);
     requestedModels.push(body.model);
     requestedReasoningEfforts.push(body.reasoning?.effort ?? 'none');
-    response.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive'
-    });
-    response.write('data: {"type":"response.output_text.delta","delta":"alias ok"}\n\n');
-    response.write('data: {"type":"response.completed","response":{"id":"resp_alias","object":"response","status":"completed"}}\n\n');
-    response.write('data: [DONE]\n\n');
-    response.end();
+    writeSseResponseWithOutputItem(
+      response,
+      'alias ok',
+      'resp_alias',
+      `msg_alias_${responseRequests.length}`
+    );
   });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
