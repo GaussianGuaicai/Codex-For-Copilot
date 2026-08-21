@@ -28,7 +28,8 @@ try {
     reasoning: { effort: 'high', summary: 'auto' },
     maxOutputTokens: 100,
     omitMaxOutputTokens: true,
-    textVerbosity: 'medium'
+    textVerbosity: 'medium',
+    turnStartedAtUnixMs: 1_787_000_000_000
   };
   const request = buildCodexResponsesRequest(base);
   const compatibilityDefaultReasoningRequest = buildCodexResponsesRequest({
@@ -71,6 +72,7 @@ try {
   const secondBuild = buildCodexResponsesRequestWithMetrics(base);
   assertEqual(request.prompt_cache_key, identity.threadId, 'stable prompt cache key');
   assertEqual(request.client_metadata.turn_id, identity.turnId, 'turn metadata');
+  assertEqual(JSON.parse(request.client_metadata['x-codex-turn-metadata']).turn_started_at_unix_ms, base.turnStartedAtUnixMs, 'turn start metadata');
   assertEqual(request.parallel_tool_calls, true, 'parallel tools');
   assertEqual(request.instructions, base.instructions, 'configured instructions preserved with tools');
   assertEqual(request.include[0], 'reasoning.encrypted_content', 'encrypted reasoning include');
