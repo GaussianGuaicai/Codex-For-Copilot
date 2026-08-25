@@ -76,11 +76,7 @@ export interface CodexLatencyContext {
   coalescedDeltaCount?: number;
   coalescingDelayP95Ms?: number;
   coalescingDelayMaxMs?: number;
-  presentedCharacters?: number;
-  averageCharactersPerReport?: number;
-  reportsPerSecond?: number;
-  rawReasoningFallbackCharactersAtToolCall?: number;
-  rawReasoningFallbackDiscardedAtToolCall?: boolean;
+  discardedReasoningCharactersAtToolCall?: number;
   pendingPresentationCharactersAtToolCall?: number;
   websocketSerializeMs?: number;
 }
@@ -195,20 +191,8 @@ export class CodexLatencyRecorder {
     if (context.coalescingDelayMaxMs !== undefined) {
       this.context.coalescingDelayMaxMs = context.coalescingDelayMaxMs;
     }
-    if (context.presentedCharacters !== undefined) {
-      this.context.presentedCharacters = context.presentedCharacters;
-    }
-    if (context.averageCharactersPerReport !== undefined) {
-      this.context.averageCharactersPerReport = context.averageCharactersPerReport;
-    }
-    if (context.reportsPerSecond !== undefined) {
-      this.context.reportsPerSecond = context.reportsPerSecond;
-    }
-    if (context.rawReasoningFallbackCharactersAtToolCall !== undefined) {
-      this.context.rawReasoningFallbackCharactersAtToolCall = context.rawReasoningFallbackCharactersAtToolCall;
-    }
-    if (context.rawReasoningFallbackDiscardedAtToolCall !== undefined) {
-      this.context.rawReasoningFallbackDiscardedAtToolCall = context.rawReasoningFallbackDiscardedAtToolCall;
+    if (context.discardedReasoningCharactersAtToolCall !== undefined) {
+      this.context.discardedReasoningCharactersAtToolCall = context.discardedReasoningCharactersAtToolCall;
     }
     if (context.pendingPresentationCharactersAtToolCall !== undefined) {
       this.context.pendingPresentationCharactersAtToolCall = context.pendingPresentationCharactersAtToolCall;

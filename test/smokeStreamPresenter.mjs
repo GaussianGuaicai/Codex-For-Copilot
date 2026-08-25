@@ -118,7 +118,7 @@ try {
     });
   }
   assertEqual(
-    backpressurePresenter.metrics().pendingPresentationCharacters,
+    backpressurePresenter.pendingCharacters,
     462,
     'backpressure metrics expose characters waiting at a semantic boundary'
   );
