@@ -49,6 +49,16 @@ try {
     }]),
     'raw reasoning is emitted only as the bounded no-summary fallback'
   );
+
+  const toolBoundary = [];
+  const toolBoundaryPresenter = new ReasoningStreamPresenter((update) => toolBoundary.push(update));
+  toolBoundaryPresenter.push({
+    source: 'reasoning-text', text: 'raw reasoning before a tool', itemId: 'rs_tool', partIndex: 0, outputIndex: 0
+  });
+  const boundaryMetrics = toolBoundaryPresenter.startNextPhase({ rawFallback: 'discard' });
+  assertEqual(toolBoundary.length, 0, 'a tool boundary does not enqueue raw reasoning ahead of the tool loop');
+  assertEqual(boundaryMetrics.rawFallbackCharacters, 27, 'tool-boundary telemetry records buffered reasoning size');
+  assertEqual(boundaryMetrics.rawFallbackDiscarded, true, 'tool-boundary telemetry records fallback suppression');
   console.log('Smoke test passed: reasoning summary streaming uses VS Code-safe aggregation and bounded raw fallback.');
 } finally {
   await loaded.dispose();

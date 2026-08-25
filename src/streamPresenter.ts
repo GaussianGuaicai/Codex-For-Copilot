@@ -15,6 +15,12 @@ export interface StreamPresentationMetrics {
   firstReportAt?: number;
   coalescingDelayP95Ms?: number;
   coalescingDelayMaxMs?: number;
+  presentedCharacters: number;
+  pendingPresentationCharacters: number;
+  averageCharactersPerReport?: number;
+  reportsPerSecond?: number;
+  /** Internal sample timestamp used when several presenters share one response. */
+  sampledAt: number;
   /** Internal timing samples used when several presenters share one response. */
   coalescingDelaysMs: readonly number[];
 }
@@ -44,14 +50,15 @@ export class StreamPresenter {
   private coalescedDeltaCount = 0;
   private firstBackendDeltaAt?: number;
   private firstReportAt?: number;
+  private presentedCharacters = 0;
   private readonly coalescingDelaysMs: number[] = [];
 
   constructor(
     private readonly onBackendDelta?: (kind: StreamPresentationKind, at: number) => void,
     private readonly onReport?: (kind: StreamPresentationKind, at: number) => void,
     private readonly now: () => number = Date.now,
-    private readonly maxDelayMs = 8,
-    private readonly maxCharacters = 256,
+    private readonly maxDelayMs = 32,
+    private readonly maxCharacters = 768,
     private readonly timerApi: StreamPresenterTimer = {
       set: (callback, delayMs) => setTimeout(callback, delayMs),
       clear: (timer) => clearTimeout(timer)
@@ -119,6 +126,10 @@ export class StreamPresenter {
 
   metrics(): StreamPresentationMetrics {
     const delays = [...this.coalescingDelaysMs].sort((left, right) => left - right);
+    const sampledAt = this.now();
+    const elapsedMs = this.firstBackendDeltaAt === undefined
+      ? undefined
+      : Math.max(1, sampledAt - this.firstBackendDeltaAt);
     return {
       backendDeltaCount: this.backendDeltaCount,
       progressReportCount: this.progressReportCount,
@@ -127,12 +138,22 @@ export class StreamPresenter {
       firstReportAt: this.firstReportAt,
       coalescingDelayP95Ms: percentile(delays, 0.95),
       coalescingDelayMaxMs: delays.at(-1),
+      presentedCharacters: this.presentedCharacters,
+      pendingPresentationCharacters: this.pending?.text.length ?? 0,
+      averageCharactersPerReport: this.progressReportCount === 0
+        ? undefined
+        : Math.round(this.presentedCharacters / this.progressReportCount),
+      reportsPerSecond: elapsedMs === undefined
+        ? undefined
+        : roundToTenths((this.progressReportCount * 1_000) / elapsedMs),
+      sampledAt,
       coalescingDelaysMs: delays
     };
   }
 
   private report(part: StreamPresentationPart, text: string, reportedAt: number): void {
     part.emit(text);
+    this.presentedCharacters += text.length;
     this.progressReportCount += 1;
     this.firstReportAt ??= reportedAt;
     this.onReport?.(part.kind, reportedAt);
@@ -157,16 +178,36 @@ export function mergeStreamPresentationMetrics(
   ...metrics: readonly StreamPresentationMetrics[]
 ): StreamPresentationMetrics {
   const delays = metrics.flatMap((metric) => metric.coalescingDelaysMs).sort((left, right) => left - right);
+  const presentedCharacters = metrics.reduce((total, metric) => total + metric.presentedCharacters, 0);
+  const progressReportCount = metrics.reduce((total, metric) => total + metric.progressReportCount, 0);
+  const firstBackendDeltaAt = firstDefined(metrics.map((metric) => metric.firstBackendDeltaAt));
+  const lastSampleAt = Math.max(...metrics.map((metric) => metric.sampledAt));
   return {
     backendDeltaCount: metrics.reduce((total, metric) => total + metric.backendDeltaCount, 0),
-    progressReportCount: metrics.reduce((total, metric) => total + metric.progressReportCount, 0),
+    progressReportCount,
     coalescedDeltaCount: metrics.reduce((total, metric) => total + metric.coalescedDeltaCount, 0),
-    firstBackendDeltaAt: firstDefined(metrics.map((metric) => metric.firstBackendDeltaAt)),
+    firstBackendDeltaAt,
     firstReportAt: firstDefined(metrics.map((metric) => metric.firstReportAt)),
     coalescingDelayP95Ms: percentile(delays, 0.95),
     coalescingDelayMaxMs: delays.at(-1),
+    presentedCharacters,
+    pendingPresentationCharacters: metrics.reduce(
+      (total, metric) => total + metric.pendingPresentationCharacters,
+      0
+    ),
+    averageCharactersPerReport: progressReportCount === 0
+      ? undefined
+      : Math.round(presentedCharacters / progressReportCount),
+    reportsPerSecond: firstBackendDeltaAt === undefined
+      ? undefined
+      : roundToTenths((progressReportCount * 1_000) / Math.max(1, lastSampleAt - firstBackendDeltaAt)),
+    sampledAt: lastSampleAt,
     coalescingDelaysMs: delays
   };
+}
+
+function roundToTenths(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 function percentile(values: readonly number[], fraction: number): number | undefined {

@@ -778,7 +778,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           progressReportCount: metrics.progressReportCount,
           coalescedDeltaCount: metrics.coalescedDeltaCount,
           coalescingDelayP95Ms: metrics.coalescingDelayP95Ms,
-          coalescingDelayMaxMs: metrics.coalescingDelayMaxMs
+          coalescingDelayMaxMs: metrics.coalescingDelayMaxMs,
+          presentedCharacters: metrics.presentedCharacters,
+          averageCharactersPerReport: metrics.averageCharactersPerReport,
+          reportsPerSecond: metrics.reportsPerSecond
         });
         this.outputChannel.trace('response stream presentation', { ...metrics });
       };
@@ -870,7 +873,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             ...(toolPlan.mode === 'native-hosted' && call.namespace ? { namespace: call.namespace } : {}),
             arguments: JSON.stringify(toolInput)
           });
-          reasoningPresenter.startNextPhase();
+          const textMetricsBeforeToolCall = presenter.metrics();
           presenter.flushBoundary();
           const reportedAt = Date.now();
           latency.mark('firstToolCall', reportedAt);
@@ -878,6 +881,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           latency.mark('firstToolCallReported', reportedAt);
           this.rememberReportedToolCall(callId, name, reportedAt);
           reportedToolCallIds.add(callId);
+          const textMetricsAtToolCall = presenter.metrics();
+          const reasoningBoundary = reasoningPresenter.startNextPhase({ rawFallback: 'discard' });
+          latency.recordContext({
+            pendingPresentationCharactersAtToolCall: textMetricsBeforeToolCall.pendingPresentationCharacters,
+            rawReasoningFallbackCharactersAtToolCall: reasoningBoundary.rawFallbackCharacters,
+            rawReasoningFallbackDiscardedAtToolCall: reasoningBoundary.rawFallbackDiscarded
+          });
           const lifecycle = toolCallLifecycleAt.get(callId);
           this.outputChannel.trace('response tool call timing', {
             callId,
@@ -885,6 +895,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             backendName: call.name,
             namespace: call.namespace ?? null,
             toolPlanMode: toolPlan.mode,
+            pendingPresentationCharacters: textMetricsBeforeToolCall.pendingPresentationCharacters,
+            rawReasoningFallbackCharacters: reasoningBoundary.rawFallbackCharacters,
+            rawReasoningFallbackDiscarded: reasoningBoundary.rawFallbackDiscarded,
+            progressReportCount: textMetricsAtToolCall.progressReportCount,
+            reportsPerSecond: textMetricsAtToolCall.reportsPerSecond,
+            averageCharactersPerReport: textMetricsAtToolCall.averageCharactersPerReport,
             toolArgumentsDoneToReportedMs: lifecycle?.argumentsDoneAt === undefined
               ? null
               : Math.max(0, reportedAt - lifecycle.argumentsDoneAt)

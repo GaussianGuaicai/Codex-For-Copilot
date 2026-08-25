@@ -18,6 +18,11 @@ export interface ReasoningStreamPresenterOptions {
   onBackendDelta?: (at: number) => void;
 }
 
+export interface ReasoningPhaseBoundaryMetrics {
+  rawFallbackCharacters: number;
+  rawFallbackDiscarded: boolean;
+}
+
 const MAX_RAW_FALLBACK_CHARACTERS = 8_192;
 
 /** Owns one response's thinking presentation lifecycle, independently of transport and VS Code APIs. */
@@ -30,6 +35,7 @@ export class ReasoningStreamPresenter {
   private rawProgressReportCount = 0;
   private rawFirstBackendDeltaAt?: number;
   private rawFirstReportAt?: number;
+  private rawPresentedCharacters = 0;
   private hasPresentedSummary = false;
   private lastSummaryIdentity?: string;
   private readonly stream: StreamPresenter;
@@ -85,17 +91,18 @@ export class ReasoningStreamPresenter {
   }
 
   /** Starts a new visual reasoning phase after a tool call. */
-  startNextPhase(): void {
-    this.finishPhase();
+  startNextPhase(options: { rawFallback?: 'emit' | 'discard' } = {}): ReasoningPhaseBoundaryMetrics {
+    const boundary = this.finishPhase(options.rawFallback ?? 'emit');
     this.phase += 1;
     this.mode = 'idle';
     this.hasPresentedSummary = false;
     this.lastSummaryIdentity = undefined;
+    return boundary;
   }
 
   close(): void {
     if (this.mode !== 'closed') {
-      this.finishPhase();
+      this.finishPhase('emit');
       this.mode = 'closed';
     }
   }
@@ -110,17 +117,28 @@ export class ReasoningStreamPresenter {
       ...summaryMetrics,
       backendDeltaCount: summaryMetrics.backendDeltaCount + this.rawBackendDeltaCount,
       progressReportCount: summaryMetrics.progressReportCount + this.rawProgressReportCount,
+      presentedCharacters: summaryMetrics.presentedCharacters + this.rawPresentedCharacters,
       firstBackendDeltaAt: firstDefined(summaryMetrics.firstBackendDeltaAt, this.rawFirstBackendDeltaAt),
       firstReportAt: firstDefined(summaryMetrics.firstReportAt, this.rawFirstReportAt)
     };
   }
 
-  private finishPhase(): void {
+  private finishPhase(rawFallback: 'emit' | 'discard'): ReasoningPhaseBoundaryMetrics {
     if (this.mode === 'reasoning-text') {
-      this.emitRawFallback();
-      return;
+      const rawFallbackCharacters = this.rawFallback?.text.length ?? 0;
+      if (rawFallback === 'emit') {
+        this.emitRawFallback();
+      } else {
+        this.rawFallback = undefined;
+        this.rawFallbackTruncated = false;
+      }
+      return {
+        rawFallbackCharacters,
+        rawFallbackDiscarded: rawFallback === 'discard' && rawFallbackCharacters > 0
+      };
     }
     this.stream.flushBoundary();
+    return { rawFallbackCharacters: 0, rawFallbackDiscarded: false };
   }
 
   private bufferRawFallback(delta: ReasoningStreamDelta): void {
@@ -159,6 +177,7 @@ export class ReasoningStreamPresenter {
       id
     });
     this.rawProgressReportCount += 1;
+    this.rawPresentedCharacters += rawFallback.text.length;
     this.rawFirstReportAt ??= reportedAt;
     this.rawFallbackTruncated = false;
   }
