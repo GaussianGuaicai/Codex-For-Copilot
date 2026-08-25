@@ -221,6 +221,7 @@ try {
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
   await runStatefulMarkerRoundTripSmokeTest();
+  await runNonLeadingStatefulMarkerHistoryReuseSmokeTest();
   await runStatefulMarkerContinuationRecoverySmokeTest();
   await runStatefulMarkerOpaqueRecoverySmokeTest();
   await runStatefulMarkerToolOutputReplaySmokeTest();
@@ -1720,6 +1721,104 @@ async function runStatefulMarkerRoundTripSmokeTest() {
     } finally {
       Date.now = originalNow;
     }
+  } finally {
+    await closeServer(server);
+  }
+}
+
+async function runNonLeadingStatefulMarkerHistoryReuseSmokeTest() {
+  const responseRequests = [];
+  const replies = [
+    ['history seed reply', 'resp_non_leading_marker_seed', 'msg_non_leading_marker_seed'],
+    ['history continuation reply', 'resp_non_leading_marker_continued', 'msg_non_leading_marker_continued']
+  ];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const reply = replies[responseRequests.length - 1];
+    if (!reply) {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Unexpected non-leading marker request.' } }));
+      return;
+    }
+    writeSseResponseWithOutputItem(response, reply[0], reply[1], reply[2]);
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  const provider = new CodexModelProvider(
+    {
+      secrets: { async get() { return 'test-api-key'; } },
+      subscriptions: []
+    },
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for non-leading stateful marker history reuse coverage.');
+    }
+
+    const seedParts = [];
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        createSystemMessage('History reuse instructions'),
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('History seed')] }
+      ],
+      {},
+      { report(part) { seedParts.push(part); } },
+      token
+    );
+    const seedTextPart = seedParts.find((part) => part instanceof LanguageModelTextPart);
+    if (!seedTextPart) {
+      throw new Error('Expected visible seed response text for non-leading marker history reuse coverage.');
+    }
+    const seedMarkerPart = getSingleStatefulMarkerPart(seedParts, 'non-leading marker seed completion');
+
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [
+        createSystemMessage('History reuse instructions'),
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('History seed')] },
+        {
+          role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+          content: [seedTextPart, seedMarkerPart]
+        },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('History delta')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+
+    assertEqual(responseRequests.length, 2, 'non-leading marker history continuation request count');
+    assertEqual(
+      responseRequests[1].previous_response_id,
+      'resp_non_leading_marker_seed',
+      'non-leading marker uses the locally verified history response id'
+    );
+    assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
+      { role: 'user', content: 'History delta', type: 'message' }
+    ]), 'non-leading marker sends only the locally verified delta');
   } finally {
     await closeServer(server);
   }
@@ -4139,6 +4238,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
   const sockets = new Set();
   const warnings = [];
   let httpResponseRequestCount = 0;
+  let connectionCount = 0;
   let selectedNamespace;
   let selectedTool;
   const server = createServer((request, response) => {
@@ -4163,6 +4263,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
     });
   });
   webSocketServer.on('connection', (webSocket) => {
+    connectionCount += 1;
     sockets.add(webSocket);
     webSocket.once('close', () => sockets.delete(webSocket));
     webSocket.on('message', (data) => {
@@ -4179,6 +4280,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           }));
           return;
         }
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'I will inspect the native tool output.' }));
         webSocket.send(JSON.stringify({
           type: 'response.output_item.done',
           output_index: 0,
@@ -4200,7 +4302,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           call_id: 'call_native_ws_replay',
           name: selectedTool,
           namespace: selectedNamespace,
-          arguments: '{"value":"websocket"}'
+          arguments: '{"zebra":"last","alpha":"first","middle":"middle"}'
         };
         webSocket.send(JSON.stringify({ type: 'response.output_item.added', output_index: 0, item }));
         webSocket.send(JSON.stringify({
@@ -4236,7 +4338,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           error: {
             type: 'invalid_request_error',
             code: 'previous_response_not_found',
-            message: 'Native WebSocket context-downgrade continuation expired.',
+            message: 'Native WebSocket tool-output continuation expired.',
             param: 'previous_response_id'
           },
           status: 400
@@ -4358,8 +4460,13 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
       throw new Error('Expected one mapped native WebSocket tool call.');
     }
     assertEqual(toolCall.name, selectedTool, 'native WebSocket namespaced call maps to the selected VS Code tool');
+    assertEqual(
+      firstParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'I will inspect the native tool output.',
+      'native WebSocket continuation seed includes visible text before the tool call'
+    );
 
-    const downgradedParts = [];
+    const continuedParts = [];
     await withSmokeTimeout(
       provider.provideLanguageModelChatResponse(
         model,
@@ -4367,44 +4474,45 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] },
           {
             role: vscodeMock.LanguageModelChatMessageRole.Assistant,
-            content: [new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, { value: 'websocket' })]
+            content: [
+              new vscodeMock.LanguageModelTextPart('I will inspect the native tool output.'),
+              new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, {
+                alpha: 'first',
+                middle: 'middle',
+                zebra: 'last'
+              })
+            ]
           },
           {
             role: vscodeMock.LanguageModelChatMessageRole.Assistant,
             content: [new vscodeMock.LanguageModelToolResultPart('call_native_ws_replay', [new vscodeMock.LanguageModelTextPart('native websocket output')])]
           }
         ],
-        { tools },
-        { report(part) { downgradedParts.push(part); } },
+        { tools, modelConfiguration: { contextSize: 950000 } },
+        { report(part) { continuedParts.push(part); } },
         token
       ),
       token,
-      'native WebSocket context-downgrade canonical replay'
+      'native WebSocket stable tool-argument continuation'
     );
 
-    assertEqual(frames.length, 2, 'native WebSocket context downgrade sends one canonical replay frame after the initial request');
-    assertEqual('previous_response_id' in frames[1], false, 'native WebSocket context downgrade keeps previous response reuse disabled');
+    assertEqual(frames.length, 2, 'native WebSocket stable tool arguments send one continuation frame after the initial request');
+    assertEqual(frames[1].previous_response_id, 'resp_native_ws_tool', 'native WebSocket tool result reuses the completed response id');
     assertEqual(
       JSON.stringify(frames[1].input),
       JSON.stringify([
-        { role: 'user', content: 'Run a deferred native WebSocket tool.', type: 'message' },
-        {
-          type: 'function_call',
-          call_id: 'call_native_ws_replay',
-          name: selectedTool,
-          arguments: '{"value":"websocket"}'
-        },
         { type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' }
       ]),
-      'native WebSocket context downgrade sends exact ordered canonical call and output'
+      'native WebSocket tool-result continuation sends only the incremental output'
     );
-    assertEqual(frames[1].input.filter((item) => item.type === 'tool_search_output').length, 0, 'unmarked native WebSocket context downgrade excludes hidden Tool Search output');
-    assertEqual(frames[1].input.filter((item) => item.type === 'function_call').length, 1, 'native WebSocket context downgrade includes one namespaced call');
-    assertEqual(frames[1].input.filter((item) => item.type === 'function_call_output').length, 1, 'native WebSocket context downgrade includes one matching output');
+    assertEqual(connectionCount, 1, 'native WebSocket tool-result continuation reuses the existing socket');
+    assertEqual(frames[1].input.filter((item) => item.type === 'tool_search_output').length, 0, 'native WebSocket continuation excludes hidden Tool Search output');
+    assertEqual(frames[1].input.filter((item) => item.type === 'function_call').length, 0, 'native WebSocket continuation excludes already acknowledged function calls');
+    assertEqual(frames[1].input.filter((item) => item.type === 'function_call_output').length, 1, 'native WebSocket continuation includes one matching output');
     assertEqual(
-      downgradedParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      continuedParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
       'Native WebSocket tool result received.',
-      'native WebSocket context downgrade reports the completed replay response'
+      'native WebSocket tool-result continuation reports the completed response'
     );
 
     const recoveredParts = [];
@@ -4415,40 +4523,54 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] },
           {
             role: vscodeMock.LanguageModelChatMessageRole.Assistant,
-            content: [new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, { value: 'websocket' })]
+            content: [
+              new vscodeMock.LanguageModelTextPart('I will inspect the native tool output.'),
+              new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, {
+                alpha: 'first',
+                middle: 'middle',
+                zebra: 'last'
+              })
+            ]
           },
           {
             role: vscodeMock.LanguageModelChatMessageRole.Assistant,
             content: [new vscodeMock.LanguageModelToolResultPart('call_native_ws_replay', [new vscodeMock.LanguageModelTextPart('native websocket output')])]
           },
           { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Native WebSocket tool result received.')] },
-          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the context downgrade.')] }
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the tool result.')] }
         ],
-        { tools },
+        { tools, modelConfiguration: { contextSize: 950000 } },
         { report(part) { recoveredParts.push(part); } },
         token
       ),
       token,
-      'native WebSocket context-downgrade continuation recovery'
+      'native WebSocket tool-output continuation recovery'
     );
 
-    assertEqual(frames.length, 4, 'native WebSocket recovery sends incremental continuation and canonical retry after downgrade replay');
-    assertEqual(frames[2].previous_response_id, 'resp_native_ws_result', 'post-downgrade follow-up first uses the new completed response id');
+    assertEqual(frames.length, 4, 'native WebSocket recovery sends an incremental continuation and canonical retry');
+    assertEqual(frames[2].previous_response_id, 'resp_native_ws_result', 'post-tool follow-up first uses the new completed response id');
     assertEqual(
       JSON.stringify(frames[2].input),
-      JSON.stringify([{ role: 'user', content: 'Continue after the context downgrade.', type: 'message' }]),
-      'post-downgrade continuation sends only appended user input'
+      JSON.stringify([{ role: 'user', content: 'Continue after the tool result.', type: 'message' }]),
+      'post-tool continuation sends only appended user input'
     );
-    assertEqual('previous_response_id' in frames[3], false, 'post-downgrade continuation-miss retry omits the stale response id');
+    assertEqual('previous_response_id' in frames[3], false, 'tool-output continuation-miss retry omits the stale response id');
     assertEqual(
-      JSON.stringify(frames[3].input),
+      JSON.stringify(frames[3].input.filter((item) => item.type !== 'tool_search_output')),
       JSON.stringify([
         { role: 'user', content: 'Run a deferred native WebSocket tool.', type: 'message' },
         {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'I will inspect the native tool output.' }]
+        },
+        {
+          id: 'fc_native_ws_replay',
           type: 'function_call',
           call_id: 'call_native_ws_replay',
           name: selectedTool,
-          arguments: '{"value":"websocket"}'
+          namespace: selectedNamespace,
+          arguments: '{"alpha":"first","middle":"middle","zebra":"last"}'
         },
         { type: 'function_call_output', call_id: 'call_native_ws_replay', output: 'native websocket output' },
         {
@@ -4456,30 +4578,25 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
           role: 'assistant',
           content: [{ type: 'output_text', text: 'Native WebSocket tool result received.' }]
         },
-        { role: 'user', content: 'Continue after the context downgrade.', type: 'message' }
+        { role: 'user', content: 'Continue after the tool result.', type: 'message' }
       ]),
-      'post-downgrade continuation-miss retry sends exact ordered canonical replay'
+      'tool-output continuation-miss retry sends exact ordered canonical replay outside the trusted Tool Search result'
     );
-    assertEqual(frames[3].input.filter((item) => item.type === 'tool_search_output').length, 0, 'post-downgrade recovery cannot import hidden Tool Search output without a marker');
+    assertEqual(frames[3].input.filter((item) => item.type === 'tool_search_output').length, 1, 'tool-output recovery preserves one trusted Tool Search result');
     assertEqual(
       frames[3].input.filter((item) => item.type === 'function_call').length,
       1,
-      'post-downgrade recovery contains exactly one namespaced function call'
+      'tool-output recovery contains exactly one namespaced function call'
     );
     assertEqual(
       frames[3].input.filter((item) => item.type === 'function_call_output').length,
       1,
-      'post-downgrade recovery contains exactly one matching output'
+      'tool-output recovery contains exactly one matching output'
     );
     assertEqual(
       warnings.filter((entry) => entry.message === 'response continuation reset').length,
       1,
-      'post-downgrade continuation miss executes generic continuation recovery'
-    );
-    assertEqual(
-      warnings.some((entry) => entry.message === 'response tool-output continuation reset'),
-      false,
-      'budget downgrade never executes tool-output incremental recovery'
+      'post-tool continuation miss executes generic continuation recovery'
     );
     assertEqual(httpResponseRequestCount, 0, 'structured WebSocket continuation miss never falls back to HTTP');
     assertEqual(

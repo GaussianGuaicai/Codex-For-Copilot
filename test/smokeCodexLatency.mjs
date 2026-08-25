@@ -33,16 +33,21 @@ try {
   latency.mark('requestSent', 1_135);
   latency.mark('responseCreated', 1_200);
   latency.mark('firstBackendDelta', 1_220);
+  latency.recordBackendDelta(1_220);
   latency.mark('firstReasoning', 1_225);
+  latency.recordProgressReport(1_225);
   latency.mark('firstText', 1_240);
+  latency.recordProgressReport(1_240);
+  latency.recordBackendDelta(1_260);
   latency.mark('firstToolCallAdded', 1_250);
   latency.mark('firstToolCallArgumentsDelta', 1_260);
   latency.mark('firstToolCallArgumentsDone', 1_290);
   latency.mark('firstToolCallReported', 1_294);
   latency.mark('firstToolCall', 1_294);
   latency.mark('responseCompleted', 1_300);
+  latency.mark('providerReturned', 1_315);
   latency.recordContext({
-    metricVersion: 2,
+    metricVersion: 4,
     connectionOrigin: 'prewarm',
     connectionReused: false,
     previousResponseIdUsed: true,
@@ -62,6 +67,11 @@ try {
     coalescedDeltaCount: 9,
     coalescingDelayP95Ms: 8,
     coalescingDelayMaxMs: 10,
+    largestReportCharacters: 512,
+    boundaryDrainReportCount: 2,
+    boundaryDrainDurationMs: 500,
+    continuationSnapshotMs: 2.5,
+    continuationStoreMs: 1.5,
     websocketSerializeMs: 1.5,
     reasoningEffort: 'low',
     serviceTier: 'auto'
@@ -79,17 +89,21 @@ try {
   assertEqual(snapshot.trace.requestToCreatedMs, 65, 'request to created duration');
   assertEqual(snapshot.trace.responseCreatedToFirstBackendDeltaMs, 20, 'created to first backend delta duration');
   assertEqual(snapshot.trace.firstBackendDeltaToFirstReportMs, 5, 'backend delta to first report duration');
+  assertEqual(snapshot.trace.lastBackendDeltaToResponseCompletedMs, 40, 'last backend delta to completed duration');
+  assertEqual(snapshot.trace.lastProgressReportToResponseCompletedMs, 60, 'last report to completed duration');
   assertEqual(snapshot.trace.providerToFirstReportMs, 225, 'provider to first report duration');
   assertEqual(snapshot.trace.createdToFirstVisibleMs, 25, 'created to first visible duration');
   assertEqual(snapshot.trace.providerToFirstVisibleMs, 225, 'provider to first visible duration');
   assertEqual(snapshot.trace.toolCallAddedToFirstArgumentsDeltaMs, 10, 'tool call added to first arguments duration');
   assertEqual(snapshot.trace.toolCallArgumentsToDoneMs, 30, 'tool arguments to done duration');
   assertEqual(snapshot.trace.toolCallDoneToReportedMs, 4, 'tool call done to reported duration');
+  assertEqual(snapshot.trace.responseCompletedToProviderReturnMs, 15, 'completed to provider return duration');
   assertEqual(snapshot.trace.totalMs, 300, 'total duration');
   assertEqual(snapshot.firstVisibleStage, 'firstReasoning', 'first visible stage');
   assertEqual(snapshot.stageOffsetsMs.responseCompleted, 300, 'completed stage offset');
   assertEqual(snapshot.stageOffsetsMs.firstToolCallAdded, 250, 'tool call added stage offset');
   assertEqual(snapshot.stageOffsetsMs.firstToolCallReported, 294, 'tool call reported stage offset');
+  assertEqual(snapshot.stageOffsetsMs.providerReturned, 315, 'provider returned stage offset');
   assertEqual(snapshot.context.connectionOrigin, 'prewarm', 'connection origin context');
   assertEqual(snapshot.context.incrementalInputCount, 1, 'incremental input context');
   assertEqual(snapshot.context.modelDiscoveryCacheState, 'stale', 'model cache context');
@@ -98,10 +112,16 @@ try {
   assertEqual(snapshot.context.legacyToolSchemaCacheHit, true, 'legacy tool schema cache context');
   assertEqual(snapshot.context.nativeToolCatalogCacheHit, true, 'native tool catalog cache context');
   assertEqual(snapshot.context.requestBuildMs, 4.5, 'request build context');
-  assertEqual(snapshot.context.metricVersion, 2, 'metric version context');
+  assertEqual(snapshot.context.metricVersion, 4, 'metric version context');
+  assertEqual(snapshot.context.backendDeltaGapMaxMs, 40, 'largest backend delta gap context');
+  assertEqual(snapshot.context.continuationSnapshotMs, 2.5, 'continuation snapshot context');
+  assertEqual(snapshot.context.continuationStoreMs, 1.5, 'continuation store context');
   assertEqual(snapshot.context.backendDeltaCount, 12, 'backend delta count context');
   assertEqual(snapshot.context.progressReportCount, 4, 'progress report count context');
   assertEqual(snapshot.context.coalescingDelayP95Ms, 8, 'coalescing delay context');
+  assertEqual(snapshot.context.largestReportCharacters, 512, 'largest report size context');
+  assertEqual(snapshot.context.boundaryDrainReportCount, 2, 'boundary drain report count context');
+  assertEqual(snapshot.context.boundaryDrainDurationMs, 500, 'boundary drain duration context');
   assertEqual(snapshot.context.websocketSerializeMs, 1.5, 'WebSocket serialization context');
   console.log('Smoke test passed: latency tracing records redacted stage durations deterministically.');
 } finally {
