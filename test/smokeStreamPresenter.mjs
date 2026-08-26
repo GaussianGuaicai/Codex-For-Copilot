@@ -93,6 +93,86 @@ try {
   assertEqual(backend.length, 7, 'backend callback retains every delta');
   assertEqual(reported[0].at, 1_000, 'first report remains synchronous');
 
+  let defaultScheduled;
+  const defaultEmitted = [];
+  const defaultPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    timerApi: {
+      set(callback, delayMs) {
+        const timer = {
+          callback,
+          delayMs,
+          dueAt: now + delayMs
+        };
+        defaultScheduled = timer;
+        return timer;
+      },
+      clear(timer) {
+        if (defaultScheduled === timer) {
+          defaultScheduled = undefined;
+        }
+      }
+    }
+  });
+  now = 5_000;
+  defaultPresenter.push({
+    kind: 'text',
+    identity: 'text',
+    text: 'x'.repeat(100),
+    emit: (presented) => defaultEmitted.push(presented)
+  });
+  assertEqual(defaultEmitted[0].length, 64, 'default first report stays within the Chat playback budget');
+  assertEqual(defaultPresenter.pendingCharacters, 36, 'default presenter queues text beyond the playback budget');
+  assertEqual(defaultScheduled?.dueAt, 5_250, 'default queued text advances at the bounded report cadence');
+
+  let observedScheduled;
+  const observedTimers = {
+    set(callback, delayMs) {
+      const timer = {
+        callback() {
+          if (observedScheduled === timer) {
+            observedScheduled = undefined;
+          }
+          callback();
+        },
+        dueAt: now + delayMs
+      };
+      observedScheduled = timer;
+      return timer;
+    },
+    clear(timer) {
+      if (observedScheduled === timer) {
+        observedScheduled = undefined;
+      }
+    }
+  };
+  const observedPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    timerApi: observedTimers
+  });
+  now = 7_000;
+  const observedStreamEndsAt = now + 12_000;
+  let observedNextDeltaAt = now;
+  while (observedNextDeltaAt <= observedStreamEndsAt) {
+    while (observedScheduled && observedScheduled.dueAt <= observedNextDeltaAt) {
+      now = observedScheduled.dueAt;
+      observedScheduled.callback();
+    }
+    now = observedNextDeltaAt;
+    observedPresenter.push({
+      kind: 'text',
+      identity: 'text',
+      text: 'x',
+      emit() {}
+    });
+    observedNextDeltaAt += 7;
+  }
+  assertEqual(
+    observedPresenter.pendingCharacters <= 64,
+    true,
+    'default pacing keeps up with the observed backend character rate'
+  );
+
   let boundedScheduled;
   const boundedEmitted = [];
   const boundedTimers = {

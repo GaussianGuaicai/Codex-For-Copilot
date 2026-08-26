@@ -42,8 +42,8 @@ interface PendingPresentationPart extends StreamPresentationPart {
 }
 
 const DEFAULT_MIN_REPORT_INTERVAL_MS = 250;
-const DEFAULT_MAX_REPORT_INTERVAL_MS = 2_000;
-const DEFAULT_MAX_REPORT_CHARACTERS = 512;
+const DEFAULT_MAX_REPORT_INTERVAL_MS = 250;
+const DEFAULT_MAX_REPORT_CHARACTERS = 64;
 
 /**
  * Presents one response stream as a paced sequence of bounded updates.
