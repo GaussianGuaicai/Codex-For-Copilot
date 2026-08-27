@@ -10,7 +10,17 @@ try {
   const reported = [];
   const timers = {
     set(callback, delayMs) {
-      scheduled = { callback, delayMs };
+      const timer = {
+        callback() {
+          if (scheduled === timer) {
+            scheduled = undefined;
+          }
+          callback();
+        },
+        delayMs,
+        dueAt: now + delayMs
+      };
+      scheduled = timer;
       return scheduled;
     },
     clear(timer) {
@@ -22,10 +32,13 @@ try {
   const presenter = new StreamPresenter(
     (kind, at) => backend.push({ kind, at }),
     (kind, at) => reported.push({ kind, at }),
-    () => now,
-    8,
-    256,
-    timers
+    {
+      now: () => now,
+      minReportIntervalMs: 64,
+      maxReportIntervalMs: 256,
+      maxReportCharacters: 4,
+      timerApi: timers
+    }
   );
   const text = (value) => presenter.push({
     kind: 'text',
@@ -42,64 +55,336 @@ try {
   text('b');
   now = 1_003;
   text('c');
-  assertEqual(scheduled?.delayMs, 8, 'later delta uses an eight millisecond timer');
+  assertEqual(scheduled?.dueAt, 1_256, 'small deltas use the maximum presentation latency');
   assertEqual(emitted.length, 1, 'small adjacent deltas are buffered');
 
-  now = 1_009;
+  now = 1_256;
   scheduled.callback();
   assertEqual(JSON.stringify(emitted), JSON.stringify([
     { kind: 'text', text: 'a' },
     { kind: 'text', text: 'bc' }
   ]), 'timer flush preserves text order');
 
-  now = 1_010;
-  text('d');
+  now = 1_257;
+  text('de');
+  now = 1_258;
+  text('fg');
+  assertEqual(scheduled?.dueAt, 1_320, 'a full chunk advances to the minimum presentation interval');
+  now = 1_320;
+  scheduled.callback();
+  assertEqual(emitted.at(-1)?.text, 'defg', 'a full chunk is emitted without exceeding its bound');
+
+  now = 1_321;
+  text('h');
   presenter.flushBoundary();
-  now = 1_011;
-  text('e');
-  assertEqual(JSON.stringify(emitted), JSON.stringify([
-    { kind: 'text', text: 'a' },
-    { kind: 'text', text: 'bc' },
-    { kind: 'text', text: 'd' },
-    { kind: 'text', text: 'e' }
-  ]), 'a boundary flushes and makes the next logical stream immediate');
+  now = 1_322;
+  text('i');
+  assertEqual(emitted.at(-2)?.text, 'h', 'a semantic boundary flushes pending text');
+  assertEqual(emitted.at(-1)?.text, 'i', 'a new semantic phase starts immediately');
 
   const metrics = presenter.metrics();
-  assertEqual(metrics.backendDeltaCount, 5, 'all backend deltas are counted');
-  assertEqual(metrics.progressReportCount, 4, 'report count reflects coalescing');
-  assertEqual(metrics.coalescedDeltaCount, 1, 'only collapsed delta reports are counted');
+  assertEqual(metrics.backendDeltaCount, 7, 'all backend deltas are counted');
+  assertEqual(metrics.progressReportCount, 5, 'report count reflects coalescing');
+  assertEqual(metrics.coalescedDeltaCount, 2, 'collapsed backend deltas are counted');
+  assertEqual(metrics.largestReportCharacters, 4, 'reported text never exceeds the configured bound');
   assertEqual(metrics.firstBackendDeltaAt, 1_000, 'first backend delta timestamp');
   assertEqual(metrics.firstReportAt, 1_000, 'first report timestamp');
-  assertEqual(metrics.coalescingDelayP95Ms, 8, 'coalescing delay uses the deterministic clock');
-  assertEqual(JSON.stringify(backend), JSON.stringify([
-    { kind: 'text', at: 1_000 },
-    { kind: 'text', at: 1_001 },
-    { kind: 'text', at: 1_003 },
-    { kind: 'text', at: 1_010 },
-    { kind: 'text', at: 1_011 }
-  ]), 'backend callbacks retain every delta');
+  assertEqual(metrics.coalescingDelayP95Ms, 255, 'coalescing delay uses the deterministic clock');
+  assertEqual(backend.length, 7, 'backend callback retains every delta');
   assertEqual(reported[0].at, 1_000, 'first report remains synchronous');
 
-  const thresholdEmitted = [];
-  const thresholdPresenter = new StreamPresenter(
-    undefined,
-    undefined,
-    () => now,
-    8,
-    3,
-    { set: () => ({ unref() {} }), clear() {} }
+  let defaultScheduled;
+  const defaultEmitted = [];
+  const defaultPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    timerApi: {
+      set(callback, delayMs) {
+        const timer = {
+          callback,
+          delayMs,
+          dueAt: now + delayMs
+        };
+        defaultScheduled = timer;
+        return timer;
+      },
+      clear(timer) {
+        if (defaultScheduled === timer) {
+          defaultScheduled = undefined;
+        }
+      }
+    }
+  });
+  now = 5_000;
+  defaultPresenter.push({
+    kind: 'text',
+    identity: 'text',
+    text: 'x'.repeat(100),
+    emit: (presented) => defaultEmitted.push(presented)
+  });
+  assertEqual(defaultEmitted[0].length, 64, 'default first report stays within the Chat playback budget');
+  assertEqual(defaultPresenter.pendingCharacters, 36, 'default presenter queues text beyond the playback budget');
+  assertEqual(defaultScheduled?.dueAt, 5_080, 'default queued text advances at a smooth bounded cadence');
+
+  let observedScheduled;
+  const observedTimers = {
+    set(callback, delayMs) {
+      const timer = {
+        callback() {
+          if (observedScheduled === timer) {
+            observedScheduled = undefined;
+          }
+          callback();
+        },
+        dueAt: now + delayMs
+      };
+      observedScheduled = timer;
+      return timer;
+    },
+    clear(timer) {
+      if (observedScheduled === timer) {
+        observedScheduled = undefined;
+      }
+    }
+  };
+  const observedPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    timerApi: observedTimers
+  });
+  now = 7_000;
+  const observedStreamEndsAt = now + 12_000;
+  let observedNextDeltaAt = now;
+  while (observedNextDeltaAt <= observedStreamEndsAt) {
+    while (observedScheduled && observedScheduled.dueAt <= observedNextDeltaAt) {
+      now = observedScheduled.dueAt;
+      observedScheduled.callback();
+    }
+    now = observedNextDeltaAt;
+    observedPresenter.push({
+      kind: 'text',
+      identity: 'text',
+      text: 'x',
+      emit() {}
+    });
+    observedNextDeltaAt += 7;
+  }
+  assertEqual(
+    observedPresenter.pendingCharacters <= 64,
+    true,
+    'default pacing keeps up with the observed backend character rate'
   );
-  const thresholdText = (value) => thresholdPresenter.push({
+  assertEqual(
+    observedPresenter.metrics().progressReportCount >= 120,
+    true,
+    'default pacing presents a sustained stream at ten or more updates per second'
+  );
+  assertEqual(
+    observedPresenter.metrics().progressReportCount <= 160,
+    true,
+    'default pacing remains bounded below fourteen updates per second'
+  );
+
+  let boundedScheduled;
+  const boundedEmitted = [];
+  const boundedTimers = {
+    set(callback, delayMs) {
+      const timer = {
+        callback() {
+          if (boundedScheduled === timer) {
+            boundedScheduled = undefined;
+          }
+          callback();
+        },
+        delayMs,
+        dueAt: now + delayMs
+      };
+      boundedScheduled = timer;
+      return boundedScheduled;
+    },
+    clear(timer) {
+      if (boundedScheduled === timer) {
+        boundedScheduled = undefined;
+      }
+    }
+  };
+  const boundedPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    minReportIntervalMs: 250,
+    maxReportIntervalMs: 2_000,
+    maxReportCharacters: 512,
+    timerApi: boundedTimers
+  });
+  const boundedText = (value) => boundedPresenter.push({
     kind: 'text',
     identity: 'text',
     text: value,
-    emit: (presented) => thresholdEmitted.push(presented)
+    emit: (presented) => boundedEmitted.push(presented)
   });
-  thresholdText('a');
-  thresholdText('b');
-  thresholdText('cd');
-  assertEqual(JSON.stringify(thresholdEmitted), JSON.stringify(['a', 'bcd']), 'character threshold flushes without waiting for a timer');
-  console.log('Smoke test passed: stream presentation coalesces adjacent deltas without delaying a new logical stream.');
+  now = 10_000;
+  const streamEndsAt = now + 60_000;
+  let nextDeltaAt = now;
+  let boundedCharacters = 0;
+  while (nextDeltaAt <= streamEndsAt) {
+    while (boundedScheduled && boundedScheduled.dueAt <= nextDeltaAt) {
+      now = boundedScheduled.dueAt;
+      boundedScheduled.callback();
+    }
+    now = nextDeltaAt;
+    boundedText('x');
+    boundedCharacters += 1;
+    nextDeltaAt += 10;
+  }
+  now = streamEndsAt;
+  boundedPresenter.flushBoundary();
+  assertEqual(boundedEmitted.join('').length, boundedCharacters, 'a one-minute dense stream preserves every character');
+  assertEqual(boundedEmitted.length <= 32, true, 'a one-minute dense stream keeps UI updates bounded');
+  assertEqual(boundedPresenter.metrics().largestReportCharacters <= 512, true, 'a dense stream never creates a large tail block');
+
+  let drainScheduled;
+  const drained = [];
+  const drainTimers = {
+    set(callback, delayMs) {
+      const timer = {
+        callback() {
+          if (drainScheduled === timer) {
+            drainScheduled = undefined;
+          }
+          callback();
+        },
+        delayMs,
+        dueAt: now + delayMs
+      };
+      drainScheduled = timer;
+      return drainScheduled;
+    },
+    clear(timer) {
+      if (drainScheduled === timer) {
+        drainScheduled = undefined;
+      }
+    }
+  };
+  const drainPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    minReportIntervalMs: 250,
+    maxReportIntervalMs: 2_000,
+    maxReportCharacters: 512,
+    timerApi: drainTimers
+  });
+  now = 100_000;
+  for (let index = 0; index < 1_000; index += 1) {
+    drainPresenter.push({
+      kind: 'text',
+      identity: 'text',
+      text: 'ab',
+      emit: (presented) => drained.push(presented)
+    });
+  }
+  assertEqual(drainPresenter.pendingCharacters, 1_998, 'a burst remains queued instead of flooding the UI');
+  const drainPromise = drainPresenter.drainBoundary();
+  while (drainPresenter.pendingCharacters > 0) {
+    while (!drainScheduled && drainPresenter.pendingCharacters > 0) {
+      await Promise.resolve();
+    }
+    if (drainPresenter.pendingCharacters === 0) {
+      break;
+    }
+    const current = drainScheduled;
+    now = current.dueAt;
+    current.callback();
+  }
+  await drainPromise;
+  const drainMetrics = drainPresenter.metrics();
+  assertEqual(drained.join('').length, 2_000, 'completion drain preserves every buffered character');
+  assertEqual(drained.length, 5, 'completion drain uses bounded chunks');
+  assertEqual(drainMetrics.largestReportCharacters, 512, 'completion drain has a strict chunk-size ceiling');
+  assertEqual(drainMetrics.boundaryDrainReportCount, 4, 'completion drain reports its paced tail work');
+  assertEqual(drainMetrics.boundaryDrainDurationMs, 1_000, 'completion waits for paced tail delivery');
+
+  let smoothingScheduled;
+  const smoothed = [];
+  const smoothingTimers = {
+    set(callback, delayMs) {
+      const timer = {
+        callback() {
+          if (smoothingScheduled === timer) {
+            smoothingScheduled = undefined;
+          }
+          callback();
+        },
+        dueAt: now + delayMs
+      };
+      smoothingScheduled = timer;
+      return timer;
+    },
+    clear(timer) {
+      if (smoothingScheduled === timer) {
+        smoothingScheduled = undefined;
+      }
+    }
+  };
+  const smoothingPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    minReportIntervalMs: 80,
+    maxReportIntervalMs: 100,
+    maxReportCharacters: 64,
+    targetReportCharacters: 20,
+    smoothingBufferCharacters: 100,
+    timerApi: smoothingTimers
+  });
+  now = 200_000;
+  smoothingPresenter.push({
+    kind: 'text',
+    identity: 'text',
+    text: 'x'.repeat(240),
+    emit: (presented) => smoothed.push({ at: now, text: presented })
+  });
+  while (smoothingScheduled?.dueAt <= 200_560) {
+    now = smoothingScheduled.dueAt;
+    smoothingScheduled.callback();
+  }
+  assertEqual(
+    JSON.stringify(smoothed.slice(-4).map((part) => part.at)),
+    JSON.stringify([200_260, 200_360, 200_460, 200_560]),
+    'a buffered burst keeps presenting through a backend delta gap'
+  );
+  assertEqual(smoothingPresenter.pendingCharacters, 12, 'normal playback retains a small smoothing reserve');
+  const smoothingDrainPromise = smoothingPresenter.drainBoundary();
+  while (smoothingPresenter.pendingCharacters > 0) {
+    while (!smoothingScheduled && smoothingPresenter.pendingCharacters > 0) {
+      await Promise.resolve();
+    }
+    if (smoothingPresenter.pendingCharacters === 0) {
+      break;
+    }
+    now = smoothingScheduled.dueAt;
+    smoothingScheduled.callback();
+  }
+  await smoothingDrainPromise;
+  assertEqual(smoothed.map((part) => part.text).join('').length, 240, 'buffered playback preserves every character');
+  const smoothingMetrics = smoothingPresenter.metrics();
+  assertEqual(smoothingMetrics.reportedCharacterCount, 240, 'buffered playback reports its aggregate character count');
+  assertEqual(smoothingMetrics.maxPendingCharacters, 220, 'buffered playback reports its peak reserve depth');
+  assertEqual(smoothingMetrics.catchUpReportCount, 3, 'buffered playback reports threshold and completion catch-up frames');
+  assertEqual(smoothingMetrics.reportGapMaxMs, 100, 'buffered playback reports its largest visible frame gap');
+  assertEqual(smoothingMetrics.boundaryDrainDurationMs, 0, 'completion immediately emits one small remaining frame');
+
+  const unicode = [];
+  const unicodePresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    minReportIntervalMs: 0,
+    maxReportIntervalMs: 0,
+    maxReportCharacters: 2,
+    timerApi: { set: () => ({ unref() {} }), clear() {} }
+  });
+  unicodePresenter.push({
+    kind: 'text',
+    identity: 'text',
+    text: 'a😀b',
+    emit: (presented) => unicode.push(presented)
+  });
+  unicodePresenter.flushBoundary();
+  assertEqual(unicode.join(''), 'a😀b', 'bounded chunks do not split a Unicode surrogate pair');
+
+  console.log('Smoke test passed: stream presentation uses a paced bounded queue and drains completion backlog.');
 } finally {
   await loaded.dispose();
 }

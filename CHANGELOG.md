@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.7.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.7.1...v1.7.2) (2026-08-27)
+
+
+### Bug Fixes
+
+* **streaming:** smooth Chat playback and stabilize continuation reuse ([#81](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/81)) ([df05c3f](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/df05c3f17a2ad98a798cfa3bf49f26eb03e05160))
+
 ## [1.7.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.7.0...v1.7.1) (2026-08-21)
 
 

@@ -13,14 +13,17 @@ export type CodexLatencyStage =
   | 'requestSent'
   | 'responseCreated'
   | 'firstBackendDelta'
+  | 'lastBackendDelta'
   | 'firstReasoning'
   | 'firstText'
+  | 'lastProgressReport'
   | 'firstToolCallAdded'
   | 'firstToolCallArgumentsDelta'
   | 'firstToolCallArgumentsDone'
   | 'firstToolCallReported'
   | 'firstToolCall'
-  | 'responseCompleted';
+  | 'responseCompleted'
+  | 'providerReturned';
 
 export interface CodexLatencyTrace {
   providerSetupMs: number;
@@ -34,17 +37,20 @@ export interface CodexLatencyTrace {
   requestToCreatedMs?: number;
   responseCreatedToFirstBackendDeltaMs?: number;
   firstBackendDeltaToFirstReportMs?: number;
+  lastBackendDeltaToResponseCompletedMs?: number;
+  lastProgressReportToResponseCompletedMs?: number;
   providerToFirstReportMs?: number;
   createdToFirstVisibleMs?: number;
   providerToFirstVisibleMs?: number;
   toolCallAddedToFirstArgumentsDeltaMs?: number;
   toolCallArgumentsToDoneMs?: number;
   toolCallDoneToReportedMs?: number;
+  responseCompletedToProviderReturnMs?: number;
   totalMs: number;
 }
 
 export interface CodexLatencyContext {
-  metricVersion?: 2;
+  metricVersion?: 4;
   connectionOrigin?: 'fresh' | 'preconnected' | 'prewarm' | 'previous-response';
   connectionReused?: boolean;
   previousResponseIdUsed?: boolean;
@@ -76,6 +82,14 @@ export interface CodexLatencyContext {
   coalescedDeltaCount?: number;
   coalescingDelayP95Ms?: number;
   coalescingDelayMaxMs?: number;
+  largestReportCharacters?: number;
+  boundaryDrainReportCount?: number;
+  boundaryDrainDurationMs?: number;
+  backendDeltaGapMaxMs?: number;
+  continuationSnapshotMs?: number;
+  continuationStoreMs?: number;
+  discardedReasoningCharactersAtToolCall?: number;
+  pendingPresentationCharactersAtToolCall?: number;
   websocketSerializeMs?: number;
 }
 
@@ -102,6 +116,21 @@ export class CodexLatencyRecorder {
     if (!this.timestamps.has(stage)) {
       this.timestamps.set(stage, at);
     }
+  }
+
+  /** Records every backend text/reasoning delta while preserving first-delta latency. */
+  recordBackendDelta(at = Date.now()): void {
+    const previousAt = this.at('lastBackendDelta');
+    if (previousAt !== undefined) {
+      this.context.backendDeltaGapMaxMs = Math.max(this.context.backendDeltaGapMaxMs ?? 0, at - previousAt);
+    }
+    this.mark('firstBackendDelta', at);
+    this.timestamps.set('lastBackendDelta', at);
+  }
+
+  /** Records every visible report so the response tail can be attributed separately from presentation batching. */
+  recordProgressReport(at = Date.now()): void {
+    this.timestamps.set('lastProgressReport', at);
   }
 
   recordContext(context: CodexLatencyContext): void {
@@ -189,6 +218,27 @@ export class CodexLatencyRecorder {
     if (context.coalescingDelayMaxMs !== undefined) {
       this.context.coalescingDelayMaxMs = context.coalescingDelayMaxMs;
     }
+    if (context.largestReportCharacters !== undefined) {
+      this.context.largestReportCharacters = context.largestReportCharacters;
+    }
+    if (context.boundaryDrainReportCount !== undefined) {
+      this.context.boundaryDrainReportCount = context.boundaryDrainReportCount;
+    }
+    if (context.boundaryDrainDurationMs !== undefined) {
+      this.context.boundaryDrainDurationMs = context.boundaryDrainDurationMs;
+    }
+    if (context.continuationSnapshotMs !== undefined) {
+      this.context.continuationSnapshotMs = context.continuationSnapshotMs;
+    }
+    if (context.continuationStoreMs !== undefined) {
+      this.context.continuationStoreMs = context.continuationStoreMs;
+    }
+    if (context.discardedReasoningCharactersAtToolCall !== undefined) {
+      this.context.discardedReasoningCharactersAtToolCall = context.discardedReasoningCharactersAtToolCall;
+    }
+    if (context.pendingPresentationCharactersAtToolCall !== undefined) {
+      this.context.pendingPresentationCharactersAtToolCall = context.pendingPresentationCharactersAtToolCall;
+    }
     if (context.websocketSerializeMs !== undefined) {
       this.context.websocketSerializeMs = context.websocketSerializeMs;
     }
@@ -201,6 +251,7 @@ export class CodexLatencyRecorder {
     const requestSent = this.at('requestSent');
     const responseCreated = this.at('responseCreated');
     const firstBackendDelta = this.at('firstBackendDelta');
+    const lastBackendDelta = this.at('lastBackendDelta');
     const firstVisible = this.firstVisibleAt();
     const responseCompleted = this.at('responseCompleted') ?? completedAt;
 
@@ -217,6 +268,11 @@ export class CodexLatencyRecorder {
         requestToCreatedMs: this.optionalDuration(requestSent, responseCreated),
         responseCreatedToFirstBackendDeltaMs: this.optionalDuration(responseCreated, firstBackendDelta),
         firstBackendDeltaToFirstReportMs: this.optionalDuration(firstBackendDelta, firstVisible),
+        lastBackendDeltaToResponseCompletedMs: this.optionalDuration(lastBackendDelta, responseCompleted),
+        lastProgressReportToResponseCompletedMs: this.optionalDuration(
+          this.at('lastProgressReport'),
+          responseCompleted
+        ),
         providerToFirstReportMs: this.optionalDuration(providerEntry, firstVisible),
         createdToFirstVisibleMs: this.optionalDuration(responseCreated, firstVisible),
         providerToFirstVisibleMs: this.optionalDuration(providerEntry, firstVisible),
@@ -231,6 +287,10 @@ export class CodexLatencyRecorder {
         toolCallDoneToReportedMs: this.optionalDuration(
           this.at('firstToolCallArgumentsDone'),
           this.at('firstToolCallReported')
+        ),
+        responseCompletedToProviderReturnMs: this.optionalDuration(
+          this.at('responseCompleted'),
+          this.at('providerReturned')
         ),
         totalMs: this.duration(providerEntry, responseCompleted, completedAt)
       },
