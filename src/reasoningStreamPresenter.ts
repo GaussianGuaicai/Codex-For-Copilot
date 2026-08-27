@@ -85,17 +85,18 @@ export class ReasoningStreamPresenter {
   }
 
   /** Starts a new visual reasoning phase after a tool call. */
-  startNextPhase(): void {
-    this.finishPhase();
+  startNextPhase(): number {
+    const discardedRawCharacters = this.finishPhase(false);
     this.phase += 1;
     this.mode = 'idle';
     this.hasPresentedSummary = false;
     this.lastSummaryIdentity = undefined;
+    return discardedRawCharacters;
   }
 
   close(): void {
     if (this.mode !== 'closed') {
-      this.finishPhase();
+      this.finishPhase(true);
       this.mode = 'closed';
     }
   }
@@ -115,12 +116,19 @@ export class ReasoningStreamPresenter {
     };
   }
 
-  private finishPhase(): void {
+  private finishPhase(emitRawFallback: boolean): number {
     if (this.mode === 'reasoning-text') {
-      this.emitRawFallback();
-      return;
+      const rawFallbackCharacters = this.rawFallback?.text.length ?? 0;
+      if (emitRawFallback) {
+        this.emitRawFallback();
+      } else {
+        this.rawFallback = undefined;
+        this.rawFallbackTruncated = false;
+      }
+      return emitRawFallback ? 0 : rawFallbackCharacters;
     }
     this.stream.flushBoundary();
+    return 0;
   }
 
   private bufferRawFallback(delta: ReasoningStreamDelta): void {

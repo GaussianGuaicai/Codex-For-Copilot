@@ -104,6 +104,11 @@ const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
 const MAX_TOOL_OUTPUT_CONTINUATION_CAPABILITIES = 64;
 const MAX_LOCAL_TOKEN_ESTIMATE_DIAGNOSTICS = 64;
 const STATEFUL_MARKER_LOCAL_ERROR = 'Stateful continuation marker could not be resolved locally.';
+const TEXT_STREAM_MIN_REPORT_INTERVAL_MS = 80;
+const TEXT_STREAM_MAX_REPORT_INTERVAL_MS = 100;
+const TEXT_STREAM_TARGET_REPORT_CHARACTERS = 20;
+const TEXT_STREAM_MAX_REPORT_CHARACTERS = 64;
+const TEXT_STREAM_SMOOTHING_BUFFER_CHARACTERS = 1_024;
 // The WebSocket tool-output continuation path passed the real-backend release
 // gate: five consecutive store:false tool loops completed with a matching
 // previous_response_id and a single incremental function_call_output.
@@ -179,6 +184,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
   private readonly toolOutputContinuationCapabilities = new Map<string, ToolOutputContinuationCapability>();
   private readonly localTokenEstimateDiagnostics = new Set<string>();
+  private localTokenEstimateCount = 0;
+  private localTokenEstimateDurationMs = 0;
   private readonly modelCache = new CodexModelCache<ProviderModelCatalog>({
     freshTtlMs: MODEL_CACHE_FRESH_TTL_MS,
     staleTtlMs: MODEL_CACHE_STALE_TTL_MS
@@ -447,31 +454,37 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       ...requestOptions
     });
     latency.recordContext({ requestBuildMs: Math.max(0, performance.now() - requestBuildStartedAt) });
-    const markerHint = convertedMessages.statefulMarker.kind === 'valid'
-      && convertedMessages.statefulMarker.isLeadingStandalone
+    const statefulMarker = convertedMessages.statefulMarker;
+    const markerHint = statefulMarker.kind === 'valid'
+      && statefulMarker.isLeadingStandalone
       ? {
-          responseId: convertedMessages.statefulMarker.previousResponseId,
-          incrementalInput: convertedMessages.statefulMarker.incrementalInput
+          responseId: statefulMarker.previousResponseId,
+          incrementalInput: statefulMarker.incrementalInput
         }
       : undefined;
-    const candidateReusableBranch = convertedMessages.statefulMarker.kind === 'none'
-      ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input)
-      : markerHint
-        ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input, markerHint)
+    const useHistoryFallback = !markerHint
+      && (statefulMarker.kind === 'none' || !statefulMarker.isLeadingStandalone);
+    const candidateReusableBranch = markerHint
+      ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input, markerHint)
+      : useHistoryFallback
+        ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input)
         : undefined;
-    const reusableBranch = markerHint || !candidateReusableBranch
-      ? candidateReusableBranch
-      : hasExactLocalBranchHistory(
+    const localHistoryStatus = !markerHint && candidateReusableBranch
+      ? getExactLocalBranchHistoryStatus(
           candidateReusableBranch.state?.continuation,
           input,
           candidateReusableBranch.comparison.appendedInput
         )
+      : undefined;
+    const reusableBranch = markerHint || !candidateReusableBranch
+      ? candidateReusableBranch
+      : localHistoryStatus === 'compatible'
         ? candidateReusableBranch
         : undefined;
     if (markerHint && !reusableBranch) {
       throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
     }
-    const reuseMissDiagnostic = reusableBranch || convertedMessages.statefulMarker.kind !== 'none'
+    const reuseMissDiagnostic = reusableBranch || markerHint
       ? undefined
       : this.responseBranchStore.explainReuseMiss(reuseEnvelope, input);
     latency.mark('branchResolved');
@@ -620,8 +633,22 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       toolCount: options.tools?.length ?? 0,
       toolMode: getToolModeName(options.toolMode),
       toolNames: summarizeToolNames(options.tools),
+      localTokenEstimatesSinceActivation: {
+        count: this.localTokenEstimateCount,
+        durationMs: this.localTokenEstimateDurationMs
+      },
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
       maxOutputTokens: config.maxOutputTokens
+    });
+
+    requestLogger.debug('response continuation eligibility', {
+      markerKind: statefulMarker.kind,
+      markerIsLeadingStandalone: statefulMarker.kind === 'none' ? false : statefulMarker.isLeadingStandalone,
+      markerContinuation: Boolean(markerHint),
+      historyFallback: useHistoryFallback,
+      candidateBranchFound: Boolean(candidateReusableBranch),
+      localHistoryStatus: localHistoryStatus ?? null,
+      reusableBranchFound: Boolean(reusableBranch)
     });
 
     if (reuseMissDiagnostic) {
@@ -736,6 +763,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         reportedAt = Date.now()
       ) => {
         progress.report(part);
+        latency.recordProgressReport(reportedAt);
         reportedVisibleOutput = true;
         recordFirstVisibleOutput(kind, reportedAt);
         if (kind === 'text') {
@@ -746,7 +774,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       };
 
       const presenter = new StreamPresenter(
-        (_kind, receivedAt) => latency.mark('firstBackendDelta', receivedAt)
+        (_kind, receivedAt) => latency.recordBackendDelta(receivedAt),
+        undefined,
+        {
+          minReportIntervalMs: TEXT_STREAM_MIN_REPORT_INTERVAL_MS,
+          maxReportIntervalMs: TEXT_STREAM_MAX_REPORT_INTERVAL_MS,
+          targetReportCharacters: TEXT_STREAM_TARGET_REPORT_CHARACTERS,
+          maxReportCharacters: TEXT_STREAM_MAX_REPORT_CHARACTERS,
+          smoothingBufferCharacters: TEXT_STREAM_SMOOTHING_BUFFER_CHARACTERS
+        }
       );
       let loggedMissingThinkingPart = false;
       const reasoningPresenter = new ReasoningStreamPresenter((update) => {
@@ -763,9 +799,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           this.outputChannel.debug('Reasoning output received, but LanguageModelThinkingPart is unavailable.');
         }
       }, {
-        onBackendDelta: (receivedAt) => latency.mark('firstBackendDelta', receivedAt)
+        onBackendDelta: (receivedAt) => latency.recordBackendDelta(receivedAt)
       });
       let presentationMetricsRecorded = false;
+      let completedUsagePart: vscode.LanguageModelResponsePart | undefined;
       const recordPresentationMetrics = () => {
         if (presentationMetricsRecorded) {
           return;
@@ -773,12 +810,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         presentationMetricsRecorded = true;
         const metrics = mergeStreamPresentationMetrics(presenter.metrics(), reasoningPresenter.metrics());
         latency.recordContext({
-          metricVersion: 2,
+          metricVersion: 4,
           backendDeltaCount: metrics.backendDeltaCount,
           progressReportCount: metrics.progressReportCount,
           coalescedDeltaCount: metrics.coalescedDeltaCount,
           coalescingDelayP95Ms: metrics.coalescingDelayP95Ms,
-          coalescingDelayMaxMs: metrics.coalescingDelayMaxMs
+          coalescingDelayMaxMs: metrics.coalescingDelayMaxMs,
+          largestReportCharacters: metrics.largestReportCharacters,
+          boundaryDrainReportCount: metrics.boundaryDrainReportCount,
+          boundaryDrainDurationMs: metrics.boundaryDrainDurationMs
         });
         this.outputChannel.trace('response stream presentation', { ...metrics });
       };
@@ -868,16 +908,21 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             call_id: callId,
             name: toolPlan.mode === 'native-hosted' ? call.name : name,
             ...(toolPlan.mode === 'native-hosted' && call.namespace ? { namespace: call.namespace } : {}),
-            arguments: JSON.stringify(toolInput)
+            arguments: stableSerialize(toolInput)
           });
-          reasoningPresenter.startNextPhase();
+          const pendingPresentationCharacters = presenter.pendingCharacters;
           presenter.flushBoundary();
+          const discardedReasoningCharacters = reasoningPresenter.startNextPhase();
           const reportedAt = Date.now();
           latency.mark('firstToolCall', reportedAt);
           reportVisiblePart('tool_call', new vscode.LanguageModelToolCallPart(callId, name, toolInput), reportedAt);
           latency.mark('firstToolCallReported', reportedAt);
           this.rememberReportedToolCall(callId, name, reportedAt);
           reportedToolCallIds.add(callId);
+          latency.recordContext({
+            pendingPresentationCharactersAtToolCall: pendingPresentationCharacters,
+            discardedReasoningCharactersAtToolCall: discardedReasoningCharacters
+          });
           const lifecycle = toolCallLifecycleAt.get(callId);
           this.outputChannel.trace('response tool call timing', {
             callId,
@@ -885,6 +930,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             backendName: call.name,
             namespace: call.namespace ?? null,
             toolPlanMode: toolPlan.mode,
+            pendingPresentationCharacters,
+            discardedReasoningCharacters,
             toolArgumentsDoneToReportedMs: lifecycle?.argumentsDoneAt === undefined
               ? null
               : Math.max(0, reportedAt - lifecycle.argumentsDoneAt)
@@ -967,8 +1014,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           flushReplayText();
           reasoningPresenter.close();
           this.markReportedToolCallsResponseCompleted(reportedToolCallIds);
-          presenter.flushBoundary();
-          recordPresentationMetrics();
           if (allowToolOutputContinuation && previousResponseIdUsed) {
             latency.recordContext({
               toolOutputContinuation: 'supported',
@@ -1001,10 +1046,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             transportConfigured: config.transport
           });
 
-          const usagePart = createUsageDataPart(response.usage);
-          if (usagePart) {
-            progress.report(usagePart);
-          }
+          completedUsagePart = createUsageDataPart(response.usage);
 
           if (response.usage) {
             this.usageSink?.record({
@@ -1018,8 +1060,6 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         },
         onResponseFailed: (message) => {
           reasoningPresenter.close();
-          presenter.flushBoundary();
-          recordPresentationMetrics();
           if (token.isCancellationRequested) {
             requestLogger.debug('response.cancelled', { requestModel: selectedModel.requestModel });
             return;
@@ -1073,7 +1113,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         }
       } finally {
         reasoningPresenter.close();
-        presenter.flushBoundary();
+        if (token.isCancellationRequested) {
+          presenter.flushBoundary();
+        } else {
+          await presenter.drainBoundary(() => token.isCancellationRequested);
+        }
+        if (completedUsagePart) {
+          progress.report(completedUsagePart);
+        }
         recordPresentationMetrics();
       }
       return { previousResponseIdUsed };
@@ -1247,6 +1294,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       ? createStatefulMarkerPayload(model.id, finalResponseId)
       : undefined;
     if (finalResponseId && statefulMarkerPayload) {
+      const continuationSnapshotStartedAt = performance.now();
       const recordedInput = markerCanonicalReplayInput ?? input;
       const builtFullRequest = buildCodexResponsesRequest({
         ...requestOptions,
@@ -1274,6 +1322,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         ),
         updatedAt: Date.now()
       };
+      const continuationSnapshotMs = Math.max(0, performance.now() - continuationSnapshotStartedAt);
+      const continuationStoreStartedAt = performance.now();
       activeBranchId = this.responseBranchStore.recordSuccess(
         reuseEnvelope,
         recordedInput,
@@ -1281,6 +1331,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         activeBranchId,
         branchState
       );
+      latency.recordContext({
+        continuationSnapshotMs,
+        continuationStoreMs: Math.max(0, performance.now() - continuationStoreStartedAt)
+      });
       if (!token.isCancellationRequested && !this.responseBranchStore.isReuseDisabled(reuseEnvelope)) {
         progress.report(createStatefulMarkerDataPart(statefulMarkerPayload));
       }
@@ -1289,6 +1343,18 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         requestModel: selectedModel.requestModel
       });
     }
+    const providerReturnedAt = Date.now();
+    latency.mark('providerReturned', providerReturnedAt);
+    const providerTail = latency.snapshot(providerReturnedAt);
+    requestLogger.debug('response provider tail', {
+      responseCompletedToProviderReturnMs: providerTail.trace.responseCompletedToProviderReturnMs ?? null,
+      progressReportCount: providerTail.context.progressReportCount ?? null,
+      largestReportCharacters: providerTail.context.largestReportCharacters ?? null,
+      boundaryDrainReportCount: providerTail.context.boundaryDrainReportCount ?? null,
+      boundaryDrainDurationMs: providerTail.context.boundaryDrainDurationMs ?? null,
+      continuationSnapshotMs: providerTail.context.continuationSnapshotMs ?? null,
+      continuationStoreMs: providerTail.context.continuationStoreMs ?? null
+    });
   }
 
   private notifyVirtualToolFallback(
@@ -1380,16 +1446,27 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<number> {
     const config = getProviderConfig();
-    const credentials = await getApiCredentials(this.context, this.authManager);
-
-    if (!credentials || !supportsOfficialTokenCounting(config.baseURL)) {
-      const estimated = estimateTokenCount(text);
+    if (!supportsOfficialTokenCounting(config.baseURL)) {
+      const estimated = this.estimateTokenCountLocally(text);
       this.logLocalTokenEstimateDiagnosticOnce({
         baseURL: config.baseURL,
         modelId: model.id,
         requestModel: parseModelIdentifier(model.id || config.model).requestModel,
         count: estimated,
-        reason: credentials ? 'official-counting-unavailable-for-backend' : 'missing-credentials'
+        reason: 'official-counting-unavailable-for-backend'
+      });
+      return estimated;
+    }
+
+    const credentials = await getApiCredentials(this.context, this.authManager);
+    if (!credentials) {
+      const estimated = this.estimateTokenCountLocally(text);
+      this.logLocalTokenEstimateDiagnosticOnce({
+        baseURL: config.baseURL,
+        modelId: model.id,
+        requestModel: parseModelIdentifier(model.id || config.model).requestModel,
+        count: estimated,
+        reason: 'missing-credentials'
       });
       return estimated;
     }
@@ -1420,7 +1497,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       if (token.isCancellationRequested || isAbortError(error)) {
         throw error;
       }
-      const estimated = estimateTokenCount(text);
+      const estimated = this.estimateTokenCountLocally(text);
       const requestModel = parseModelIdentifier(model.id || config.model).requestModel;
       this.outputChannel.warn('provideTokenCount fell back to local estimate after counting request failure', {
         modelId: model.id,
@@ -1432,6 +1509,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       return estimated;
     }
+  }
+
+  private estimateTokenCountLocally(text: string | vscode.LanguageModelChatRequestMessage): number {
+    const startedAt = performance.now();
+    const estimated = estimateTokenCount(text);
+    this.localTokenEstimateCount += 1;
+    this.localTokenEstimateDurationMs += Math.max(0, performance.now() - startedAt);
+    return estimated;
   }
 
   private logLocalTokenEstimateDiagnosticOnce(options: {
@@ -2365,36 +2450,58 @@ function buildLegacyFallbackReplayInput(input: readonly ResponsesInputMessage[])
   return replay;
 }
 
-function hasExactLocalBranchHistory(
+type ExactLocalBranchHistoryStatus =
+  | 'compatible'
+  | 'missing-snapshot'
+  | 'empty-appended-input'
+  | 'appended-input-out-of-range'
+  | 'function-call-integrity-mismatch'
+  | 'appended-input-mismatch'
+  | 'previous-input-invalid'
+  | 'response-items-invalid'
+  | 'current-history-invalid'
+  | 'history-mismatch';
+
+function getExactLocalBranchHistoryStatus(
   snapshot: CodexBranchState['continuation'],
   currentInput: readonly ResponsesInputMessage[],
   appendedInput: readonly ResponsesInputMessage[]
-): boolean {
-  if (!snapshot
-    || appendedInput.length === 0
-    || appendedInput.length > currentInput.length
-    || !hasCanonicalReplayContinuationIntegrity(snapshot.responseItems, appendedInput)) {
-    return false;
+): ExactLocalBranchHistoryStatus {
+  if (!snapshot) {
+    return 'missing-snapshot';
+  }
+  if (appendedInput.length === 0) {
+    return 'empty-appended-input';
+  }
+  if (appendedInput.length > currentInput.length) {
+    return 'appended-input-out-of-range';
+  }
+  if (!hasCanonicalReplayContinuationIntegrity(snapshot.responseItems, appendedInput)) {
+    return 'function-call-integrity-mismatch';
   }
 
   const currentSuffix = currentInput.slice(currentInput.length - appendedInput.length);
   if (!haveEquivalentLocalReplayItems(currentSuffix, appendedInput)) {
-    return false;
+    return 'appended-input-mismatch';
   }
 
   const previousLocalInput = normalizeLocalReplayItems(snapshot.fullRequest.input as readonly unknown[]);
   if (!previousLocalInput) {
-    return false;
+    return 'previous-input-invalid';
   }
   const responseLocalInput = normalizeLocalReplayItems(snapshot.responseItems);
   if (!responseLocalInput || responseLocalInput.length === 0) {
-    return false;
+    return 'response-items-invalid';
   }
   const currentLocalHistory = normalizeLocalReplayItems(
     currentInput.slice(0, currentInput.length - appendedInput.length)
   );
-  return Boolean(currentLocalHistory
-    && stableSerialize([...previousLocalInput, ...responseLocalInput]) === stableSerialize(currentLocalHistory));
+  if (!currentLocalHistory) {
+    return 'current-history-invalid';
+  }
+  return stableSerialize([...previousLocalInput, ...responseLocalInput]) === stableSerialize(currentLocalHistory)
+    ? 'compatible'
+    : 'history-mismatch';
 }
 
 function haveEquivalentLocalReplayItems(
