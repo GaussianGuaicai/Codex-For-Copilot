@@ -46,12 +46,15 @@ try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
   await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runHttpTransportSmokeTest(streamResponseText);
+  await runHttpStreamRateLimitRetrySmokeTest(streamResponseText);
+  await runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
   await runManagedAutoFallbackVisibilitySmokeTest(streamResponseText);
   await runAutoModelNotFoundDoesNotFallbackSmokeTest(streamResponseText);
   await runWebSocketTransportSmokeTest(streamResponseText);
+  await runWebSocketStreamRateLimitRetrySmokeTest(streamResponseText);
   await runWebSocketLowercaseNoProxySmokeTest(streamResponseText, shouldBypassProxy);
   await runWebSocketContinuationSmokeTest(streamResponseText);
   await runWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
@@ -106,6 +109,140 @@ async function runNestedConnectionCauseSmokeTest(streamResponseText) {
     'Connection failure while contacting https://chatgpt.invalid/backend-api/codex/responses. The OpenAI SDK automatically retried transient connection errors, but the request still failed. Root cause: getaddrinfo ENOTFOUND chatgpt.invalid',
     'connection failure reports the deepest useful cause'
   );
+}
+
+async function runHttpStreamRateLimitRetrySmokeTest(streamResponseText) {
+  let requestCount = 0;
+  const retryReasons = [];
+  const failures = [];
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      writeSseFailedResponse(response, 'rate_limit_exceeded', 'Please try again in 1ms.');
+      return;
+    }
+    writeSseResponse(response, ['retried']);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const deltas = [];
+    await streamResponseText({
+      ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
+      onTextDelta: (text) => deltas.push(text),
+      onResponseFailed: (message) => failures.push(message),
+      onTransportMetrics: (metrics) => {
+        if (metrics.retryReason) retryReasons.push(metrics.retryReason);
+      }
+    });
+
+    assertEqual(requestCount, 2, 'HTTP in-stream rate limit retries once');
+    assertEqual(deltas.join(''), 'retried', 'HTTP rate-limit retry returns the second response');
+    assertEqual(JSON.stringify(retryReasons), JSON.stringify(['stream_rate_limit_exceeded']), 'HTTP retry reason');
+    assertEqual(failures.length, 0, 'recovered HTTP rate limit is not reported as terminal');
+  } finally {
+    server.close();
+  }
+}
+
+async function runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText) {
+  let requestCount = 0;
+  const failures = [];
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write('data: {"type":"response.output_text.delta","delta":"visible"}\n\n');
+    response.write('data: {"type":"response.failed","response":{"id":"resp_limited","status":"failed","error":{"code":"rate_limit_exceeded","message":"Please try again in 1ms."}}}\n\n');
+    response.end('data: [DONE]\n\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    let capturedError;
+    try {
+      await streamResponseText({
+        ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
+        onTextDelta() {},
+        onResponseFailed: (message) => failures.push(message)
+      });
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(requestCount, 1, 'HTTP rate limit after visible output is not retried');
+    assertEqual(capturedError?.message.includes('OpenAI rate limit exceeded'), true, 'HTTP rate limit surfaces a real error');
+    assertEqual(failures.length, 1, 'unsafe HTTP rate limit is reported as terminal');
+  } finally {
+    server.close();
+  }
+}
+
+async function runWebSocketStreamRateLimitRetrySmokeTest(streamResponseText) {
+  let requestCount = 0;
+  let connectionCount = 0;
+  const deltas = [];
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      connectionCount += 1;
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        webSocket.send(JSON.stringify({
+          type: 'response.failed',
+          response: {
+            id: 'resp_limited',
+            status: 'failed',
+            error: { code: 'rate_limit_exceeded', message: 'Please try again in 1ms.' }
+          }
+        }));
+        return;
+      }
+      webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'retried' }));
+      webSocket.send(JSON.stringify({
+        type: 'response.completed',
+        response: { id: 'resp_retried', status: 'completed' }
+      }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    await streamResponseText({
+      ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'websocket'),
+      onTextDelta: (text) => deltas.push(text)
+    });
+    assertEqual(requestCount, 2, 'WebSocket in-stream rate limit retries once');
+    assertEqual(connectionCount, 2, 'failed WebSocket is discarded before retry');
+    assertEqual(deltas.join(''), 'retried', 'WebSocket rate-limit retry returns the second response');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+function createStreamOptions(baseURL, transport) {
+  return {
+    baseURL,
+    apiKey: 'test-api-key',
+    headers: createHeaders(),
+    transport,
+    omitMaxOutputTokens: true,
+    model: 'gpt-5.5',
+    instructions: 'Smoke test instructions',
+    input: [{ role: 'user', content: 'Ping' }],
+    maxOutputTokens: 32,
+    token: createCancellationToken(),
+    onTextDelta() {}
+  };
 }
 
 function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
@@ -1572,6 +1709,20 @@ function writeSseResponse(response, deltas) {
   }
 
   response.write('data: {"type":"response.completed","response":{"id":"resp_mock","object":"response","status":"completed"}}\n\n');
+  response.write('data: [DONE]\n\n');
+  response.end();
+}
+
+function writeSseFailedResponse(response, code, message) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive'
+  });
+  response.write(`data: ${JSON.stringify({
+    type: 'response.failed',
+    response: { id: 'resp_failed', status: 'failed', error: { code, message } }
+  })}\n\n`);
   response.write('data: [DONE]\n\n');
   response.end();
 }

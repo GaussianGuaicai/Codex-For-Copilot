@@ -58,6 +58,7 @@ const CONTINUATION_MISS_MESSAGE = 'Responses API could not find previous_respons
 const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
 const MAX_ERROR_JSON_LENGTH = 16 * 1024;
+const STREAM_RATE_LIMIT_MAX_RETRIES = 1;
 const UNREADABLE_ERROR_PROPERTY = Symbol('unreadableErrorProperty');
 
 interface ReusableResponsesWebSocketSession {
@@ -245,42 +246,53 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
 export async function streamResponseText(options: StreamResponseTextOptions): Promise<void> {
   const abortController = new AbortController();
   const cancellation = options.token.onCancellationRequested(() => abortController.abort());
+  let visibleActivity = false;
+  const visibleCallbacks: Partial<StreamResponseTextOptions> = {
+    onTextDelta: (text) => {
+      visibleActivity = true;
+      options.onTextDelta(text);
+    },
+    onReasoningDelta: options.onReasoningDelta && ((delta) => {
+      visibleActivity = true;
+      options.onReasoningDelta!(delta);
+    }),
+    onToolCallArgumentsDone: options.onToolCallArgumentsDone && ((callId, name) => {
+      visibleActivity = true;
+      options.onToolCallArgumentsDone!(callId, name);
+    }),
+    onToolCall: options.onToolCall && ((call) => {
+      visibleActivity = true;
+      options.onToolCall!(call);
+    })
+  };
+  const trackedOptions = new Proxy(options, {
+    get(target, property, receiver) {
+      if (Object.prototype.hasOwnProperty.call(visibleCallbacks, property)) {
+        return Reflect.get(visibleCallbacks, property);
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
 
   try {
     if (!options.instructions.trim()) {
       throw new Error('Codex requires a non-empty top-level instructions setting.');
     }
 
-    const transport = options.transport ?? 'http';
-
-    if (transport === 'websocket') {
-      await streamResponseTextOverWebSocket(options, abortController);
-      return;
-    }
-
-    if (transport === 'auto') {
+    for (let attempt = 0; ; attempt += 1) {
       try {
-        await streamResponseTextOverWebSocket(options, abortController);
+        await streamResponseTextOnce(trackedOptions, abortController);
         return;
       } catch (error) {
-        if (!shouldFallbackToHttp(error, options.token, abortController.signal)) {
+        if (!(error instanceof ResponsesStreamRateLimitError)
+          || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
+          || visibleActivity) {
           throw error;
         }
-
-        const managedScope = getManagedConnectionScope(options);
-        if (managedScope) {
-          codexConnectionManager.markHttpFallback(managedScope);
-        }
-
-        options.onTransportFallback?.({
-          from: 'websocket',
-          to: 'http',
-          reason: error instanceof Error ? error.message : String(error)
-        });
+        options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
+        await waitForRetryDelay(error.retryDelayMs, abortController.signal);
       }
     }
-
-    await streamResponseTextOverHttp(options, abortController);
   } catch (error) {
     if (options.token.isCancellationRequested || abortController.signal.aborted) {
       return;
@@ -317,10 +329,49 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       }
     }
 
+    if (error instanceof ResponsesStreamRateLimitError) {
+      options.onResponseFailed?.(error.message);
+    }
     throw normalizeResponsesError(error, options.baseURL);
   } finally {
     cancellation.dispose();
   }
+}
+
+async function streamResponseTextOnce(
+  options: StreamResponseTextOptions,
+  abortController: AbortController
+): Promise<void> {
+  const transport = options.transport ?? 'http';
+
+  if (transport === 'websocket') {
+    await streamResponseTextOverWebSocket(options, abortController);
+    return;
+  }
+
+  if (transport === 'auto') {
+    try {
+      await streamResponseTextOverWebSocket(options, abortController);
+      return;
+    } catch (error) {
+      if (!shouldFallbackToHttp(error, options.token, abortController.signal)) {
+        throw error;
+      }
+
+      const managedScope = getManagedConnectionScope(options);
+      if (managedScope) {
+        codexConnectionManager.markHttpFallback(managedScope);
+      }
+
+      options.onTransportFallback?.({
+        from: 'websocket',
+        to: 'http',
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  await streamResponseTextOverHttp(options, abortController);
 }
 
 async function streamResponseTextOverHttp(
@@ -1227,6 +1278,13 @@ function handleResponsesServerEvent(
       );
     }
 
+    if (error?.code === 'rate_limit_exceeded') {
+      throw new ResponsesStreamRateLimitError(
+        error.message ?? 'Responses API rate limit exceeded.',
+        parseRetryDelayMs(error.message)
+      );
+    }
+
     options.onResponseFailed?.(error?.message ?? 'Responses API request failed.');
     throw new Error(error?.message ?? 'Responses API request failed.');
   }
@@ -1379,6 +1437,42 @@ class ResponsesContinuationMissError extends Error {
   }
 }
 
+class ResponsesStreamRateLimitError extends Error {
+  constructor(message: string, readonly retryDelayMs?: number) {
+    super(message);
+    this.name = 'ResponsesStreamRateLimitError';
+  }
+}
+
+function parseRetryDelayMs(message: string | null | undefined): number | undefined {
+  const match = message?.match(/\btry again in\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?)\b/i);
+  if (!match) {
+    return undefined;
+  }
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return /^(?:ms|millisecond)/i.test(match[2]) ? value : value * 1_000;
+}
+
+async function waitForRetryDelay(delayMs: number | undefined, signal: AbortSignal): Promise<void> {
+  if (!delayMs || signal.aborted) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(finish, delayMs);
+    timer.unref?.();
+    signal.addEventListener('abort', finish, { once: true });
+
+    function finish() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    }
+  });
+}
+
 export async function countInputTokens(options: CountInputTokensOptions): Promise<number> {
   const init = {
     method: 'POST',
@@ -1446,6 +1540,13 @@ function isFunctionCallContinuationIntegrityError(error: unknown): boolean {
 
 function normalizeResponsesError(error: unknown, baseURL: string): Error {
   const endpoint = `${normalizeBaseURL(baseURL)}/responses`;
+
+  if (error instanceof ResponsesStreamRateLimitError) {
+    return new Error(
+      `OpenAI rate limit exceeded while contacting ${endpoint}. ${error.message}`,
+      { cause: error }
+    );
+  }
 
   if (error instanceof APIConnectionTimeoutError) {
     return new Error(
