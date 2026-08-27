@@ -6087,8 +6087,11 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
 
 async function runLocalTokenEstimateDiagnosticSmokeTest() {
   const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
   const logs = [];
+  let credentialSnapshotCount = 0;
   configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
   const provider = new CodexModelProvider(
     {
       secrets: {
@@ -6102,7 +6105,17 @@ async function runLocalTokenEstimateDiagnosticSmokeTest() {
     undefined,
     undefined,
     undefined,
-    undefined
+    {
+      async getCredentialSnapshot() {
+        credentialSnapshotCount += 1;
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'local-estimate-token',
+          revision: 'local-estimate-revision',
+          refreshable: false
+        };
+      }
+    }
   );
   const model = {
     id: 'codex::gpt-5.6-luna',
@@ -6118,10 +6131,12 @@ async function runLocalTokenEstimateDiagnosticSmokeTest() {
     await provider.provideTokenCount(model, '12345678', token);
     const localEstimateLogs = logs.filter((entry) => entry.level === 'trace'
       && entry.message.includes('provideTokenCount using local estimate (first occurrence)'));
+    assertEqual(credentialSnapshotCount, 0, 'local token estimates bypass credential resolution');
     assertEqual(localEstimateLogs.length, 1, 'known local token-count estimate is logged only once');
     assertEqual(localEstimateLogs[0].message.includes('subsequentOccurrencesSuppressed'), true, 'local estimate log explains suppression');
   } finally {
     configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
   }
 }
 

@@ -123,7 +123,7 @@ try {
   });
   assertEqual(defaultEmitted[0].length, 64, 'default first report stays within the Chat playback budget');
   assertEqual(defaultPresenter.pendingCharacters, 36, 'default presenter queues text beyond the playback budget');
-  assertEqual(defaultScheduled?.dueAt, 5_250, 'default queued text advances at the bounded report cadence');
+  assertEqual(defaultScheduled?.dueAt, 5_080, 'default queued text advances at a smooth bounded cadence');
 
   let observedScheduled;
   const observedTimers = {
@@ -171,6 +171,16 @@ try {
     observedPresenter.pendingCharacters <= 64,
     true,
     'default pacing keeps up with the observed backend character rate'
+  );
+  assertEqual(
+    observedPresenter.metrics().progressReportCount >= 120,
+    true,
+    'default pacing presents a sustained stream at ten or more updates per second'
+  );
+  assertEqual(
+    observedPresenter.metrics().progressReportCount <= 160,
+    true,
+    'default pacing remains bounded below fourteen updates per second'
   );
 
   let boundedScheduled;
@@ -288,6 +298,74 @@ try {
   assertEqual(drainMetrics.largestReportCharacters, 512, 'completion drain has a strict chunk-size ceiling');
   assertEqual(drainMetrics.boundaryDrainReportCount, 4, 'completion drain reports its paced tail work');
   assertEqual(drainMetrics.boundaryDrainDurationMs, 1_000, 'completion waits for paced tail delivery');
+
+  let smoothingScheduled;
+  const smoothed = [];
+  const smoothingTimers = {
+    set(callback, delayMs) {
+      const timer = {
+        callback() {
+          if (smoothingScheduled === timer) {
+            smoothingScheduled = undefined;
+          }
+          callback();
+        },
+        dueAt: now + delayMs
+      };
+      smoothingScheduled = timer;
+      return timer;
+    },
+    clear(timer) {
+      if (smoothingScheduled === timer) {
+        smoothingScheduled = undefined;
+      }
+    }
+  };
+  const smoothingPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    minReportIntervalMs: 80,
+    maxReportIntervalMs: 100,
+    maxReportCharacters: 64,
+    targetReportCharacters: 20,
+    smoothingBufferCharacters: 100,
+    timerApi: smoothingTimers
+  });
+  now = 200_000;
+  smoothingPresenter.push({
+    kind: 'text',
+    identity: 'text',
+    text: 'x'.repeat(240),
+    emit: (presented) => smoothed.push({ at: now, text: presented })
+  });
+  while (smoothingScheduled?.dueAt <= 200_560) {
+    now = smoothingScheduled.dueAt;
+    smoothingScheduled.callback();
+  }
+  assertEqual(
+    JSON.stringify(smoothed.slice(-4).map((part) => part.at)),
+    JSON.stringify([200_260, 200_360, 200_460, 200_560]),
+    'a buffered burst keeps presenting through a backend delta gap'
+  );
+  assertEqual(smoothingPresenter.pendingCharacters, 12, 'normal playback retains a small smoothing reserve');
+  const smoothingDrainPromise = smoothingPresenter.drainBoundary();
+  while (smoothingPresenter.pendingCharacters > 0) {
+    while (!smoothingScheduled && smoothingPresenter.pendingCharacters > 0) {
+      await Promise.resolve();
+    }
+    if (smoothingPresenter.pendingCharacters === 0) {
+      break;
+    }
+    now = smoothingScheduled.dueAt;
+    smoothingScheduled.callback();
+  }
+  await smoothingDrainPromise;
+  assertEqual(smoothed.map((part) => part.text).join('').length, 240, 'buffered playback preserves every character');
+  const smoothingMetrics = smoothingPresenter.metrics();
+  assertEqual(smoothingMetrics.reportedCharacterCount, 240, 'buffered playback reports its aggregate character count');
+  assertEqual(smoothingMetrics.maxPendingCharacters, 220, 'buffered playback reports its peak reserve depth');
+  assertEqual(smoothingMetrics.catchUpReportCount, 3, 'buffered playback reports threshold and completion catch-up frames');
+  assertEqual(smoothingMetrics.reportGapMaxMs, 100, 'buffered playback reports its largest visible frame gap');
+  assertEqual(smoothingMetrics.boundaryDrainDurationMs, 0, 'completion immediately emits one small remaining frame');
 
   const unicode = [];
   const unicodePresenter = new StreamPresenter(undefined, undefined, {

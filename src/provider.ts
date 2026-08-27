@@ -104,6 +104,11 @@ const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
 const MAX_TOOL_OUTPUT_CONTINUATION_CAPABILITIES = 64;
 const MAX_LOCAL_TOKEN_ESTIMATE_DIAGNOSTICS = 64;
 const STATEFUL_MARKER_LOCAL_ERROR = 'Stateful continuation marker could not be resolved locally.';
+const TEXT_STREAM_MIN_REPORT_INTERVAL_MS = 80;
+const TEXT_STREAM_MAX_REPORT_INTERVAL_MS = 100;
+const TEXT_STREAM_TARGET_REPORT_CHARACTERS = 20;
+const TEXT_STREAM_MAX_REPORT_CHARACTERS = 64;
+const TEXT_STREAM_SMOOTHING_BUFFER_CHARACTERS = 1_024;
 // The WebSocket tool-output continuation path passed the real-backend release
 // gate: five consecutive store:false tool loops completed with a matching
 // previous_response_id and a single incremental function_call_output.
@@ -179,6 +184,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
   private readonly toolOutputContinuationCapabilities = new Map<string, ToolOutputContinuationCapability>();
   private readonly localTokenEstimateDiagnostics = new Set<string>();
+  private localTokenEstimateCount = 0;
+  private localTokenEstimateDurationMs = 0;
   private readonly modelCache = new CodexModelCache<ProviderModelCatalog>({
     freshTtlMs: MODEL_CACHE_FRESH_TTL_MS,
     staleTtlMs: MODEL_CACHE_STALE_TTL_MS
@@ -626,6 +633,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       toolCount: options.tools?.length ?? 0,
       toolMode: getToolModeName(options.toolMode),
       toolNames: summarizeToolNames(options.tools),
+      localTokenEstimatesSinceActivation: {
+        count: this.localTokenEstimateCount,
+        durationMs: this.localTokenEstimateDurationMs
+      },
       omitMaxOutputTokens: credentials.omitMaxOutputTokens,
       maxOutputTokens: config.maxOutputTokens
     });
@@ -763,7 +774,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       };
 
       const presenter = new StreamPresenter(
-        (_kind, receivedAt) => latency.recordBackendDelta(receivedAt)
+        (_kind, receivedAt) => latency.recordBackendDelta(receivedAt),
+        undefined,
+        {
+          minReportIntervalMs: TEXT_STREAM_MIN_REPORT_INTERVAL_MS,
+          maxReportIntervalMs: TEXT_STREAM_MAX_REPORT_INTERVAL_MS,
+          targetReportCharacters: TEXT_STREAM_TARGET_REPORT_CHARACTERS,
+          maxReportCharacters: TEXT_STREAM_MAX_REPORT_CHARACTERS,
+          smoothingBufferCharacters: TEXT_STREAM_SMOOTHING_BUFFER_CHARACTERS
+        }
       );
       let loggedMissingThinkingPart = false;
       const reasoningPresenter = new ReasoningStreamPresenter((update) => {
@@ -1427,16 +1446,27 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<number> {
     const config = getProviderConfig();
-    const credentials = await getApiCredentials(this.context, this.authManager);
-
-    if (!credentials || !supportsOfficialTokenCounting(config.baseURL)) {
-      const estimated = estimateTokenCount(text);
+    if (!supportsOfficialTokenCounting(config.baseURL)) {
+      const estimated = this.estimateTokenCountLocally(text);
       this.logLocalTokenEstimateDiagnosticOnce({
         baseURL: config.baseURL,
         modelId: model.id,
         requestModel: parseModelIdentifier(model.id || config.model).requestModel,
         count: estimated,
-        reason: credentials ? 'official-counting-unavailable-for-backend' : 'missing-credentials'
+        reason: 'official-counting-unavailable-for-backend'
+      });
+      return estimated;
+    }
+
+    const credentials = await getApiCredentials(this.context, this.authManager);
+    if (!credentials) {
+      const estimated = this.estimateTokenCountLocally(text);
+      this.logLocalTokenEstimateDiagnosticOnce({
+        baseURL: config.baseURL,
+        modelId: model.id,
+        requestModel: parseModelIdentifier(model.id || config.model).requestModel,
+        count: estimated,
+        reason: 'missing-credentials'
       });
       return estimated;
     }
@@ -1467,7 +1497,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       if (token.isCancellationRequested || isAbortError(error)) {
         throw error;
       }
-      const estimated = estimateTokenCount(text);
+      const estimated = this.estimateTokenCountLocally(text);
       const requestModel = parseModelIdentifier(model.id || config.model).requestModel;
       this.outputChannel.warn('provideTokenCount fell back to local estimate after counting request failure', {
         modelId: model.id,
@@ -1479,6 +1509,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       });
       return estimated;
     }
+  }
+
+  private estimateTokenCountLocally(text: string | vscode.LanguageModelChatRequestMessage): number {
+    const startedAt = performance.now();
+    const estimated = estimateTokenCount(text);
+    this.localTokenEstimateCount += 1;
+    this.localTokenEstimateDurationMs += Math.max(0, performance.now() - startedAt);
+    return estimated;
   }
 
   private logLocalTokenEstimateDiagnosticOnce(options: {
