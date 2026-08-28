@@ -1,10 +1,16 @@
 import { performance } from 'node:perf_hooks';
-import type { ResponseCreateParamsStreaming, ToolChoiceOptions } from 'openai/resources/responses/responses';
+import type {
+  ResponseCreateParamsStreaming,
+  ResponseIncludable,
+  Tool,
+  ToolChoiceOptions
+} from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
 import type { ResponsesInputMessage } from './convertMessages';
 import { resolveCodexToolSchemas } from './codexToolSchemaCache';
 import type { CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
+import { hasHostedWebSearch } from './hostedTools/hostedToolPlan';
 import {
   buildCodexClientMetadataProjection,
   buildCodexProtocolSnapshot,
@@ -30,6 +36,7 @@ export interface CodexRequestBuilderOptions {
   input: ResponsesInputMessage[];
   tools?: readonly vscode.LanguageModelChatTool[];
   toolPlan?: CodexToolPlan;
+  hostedTools?: readonly Tool[];
   toolMode?: vscode.LanguageModelChatToolMode;
   reasoning?: Reasoning;
   serviceTier?: 'default' | 'priority';
@@ -72,7 +79,9 @@ export function buildCodexResponsesRequestWithMetrics(
   const startedAt = performance.now();
   const legacyToolSchemas = options.toolPlan ? undefined : resolveCodexToolSchemas(options.tools);
   const toolPlan = options.toolPlan;
-  const tools = toolPlan?.responseTools ?? legacyToolSchemas?.responseTools ?? [];
+  const clientTools = toolPlan?.responseTools ?? legacyToolSchemas?.responseTools ?? [];
+  const hostedTools = options.hostedTools ?? [];
+  const tools: readonly Tool[] = [...clientTools, ...hostedTools];
   const protocolSnapshot = options.compatibilityEnabled && options.identity
     ? buildCodexProtocolSnapshot({
         identity: options.identity,
@@ -85,12 +94,18 @@ export function buildCodexResponsesRequestWithMetrics(
   const metadata = protocolSnapshot
     ? buildCodexClientMetadataProjection(protocolSnapshot, options.websocketRequestStartedAt)
     : undefined;
+  const include: ResponseIncludable[] = [
+    ...(options.compatibilityEnabled && options.includeEncryptedReasoning !== false
+      ? ['reasoning.encrypted_content' as const]
+      : []),
+    ...(hasHostedWebSearch(hostedTools) ? ['web_search_call.action.sources' as const] : [])
+  ];
   const compatibilityFields = options.compatibilityEnabled
     ? {
-        include: options.includeEncryptedReasoning === false ? [] : ['reasoning.encrypted_content'],
+        ...(include.length > 0 ? { include } : {}),
         ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {})
       }
-    : {};
+    : include.length > 0 ? { include } : {};
   const identityFields = options.compatibilityEnabled && options.identity
     ? {
         prompt_cache_key: options.identity.threadId,
@@ -123,7 +138,8 @@ export function buildCodexResponsesRequestWithMetrics(
     request,
     metrics: {
       requestBuildMs: Math.max(0, performance.now() - startedAt),
-      toolSchemaBytes: toolPlan?.toolSchemaBytes ?? legacyToolSchemas?.toolSchemaBytes ?? 0,
+      toolSchemaBytes: (toolPlan?.toolSchemaBytes ?? legacyToolSchemas?.toolSchemaBytes ?? 0)
+        + Buffer.byteLength(JSON.stringify(hostedTools)),
       legacyToolSchemaCacheHit: toolPlan?.legacyToolSchemaCacheHit ?? legacyToolSchemas?.cacheHit,
       nativeToolCatalogCacheHit: toolPlan?.nativeToolCatalogCacheHit
     }
@@ -215,7 +231,7 @@ function sanitizeResponseItemIdForOutbound(item: ResponsesInputMessage): Respons
 }
 
 function isAcceptedResponsesItemId(id: string): boolean {
-  return /^(msg|fc|fco|rs|item)_[A-Za-z0-9_-]+$/.test(id);
+  return /^(msg|fc|fco|rs|ws|item)_[A-Za-z0-9_-]+$/.test(id);
 }
 
 function mapToolChoice(toolMode: vscode.LanguageModelChatToolMode | undefined): ToolChoiceOptions {

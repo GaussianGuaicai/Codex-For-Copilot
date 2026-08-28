@@ -35,6 +35,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const {
+  createResponsesServerEventHandler,
   disposeReusableResponsesWebSockets,
   isResponsesContinuationMissError,
   isResponsesContinuationMissPayload,
@@ -44,6 +45,7 @@ const {
 
 try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
+  runHostedWebSearchEventSmokeTest(createResponsesServerEventHandler);
   await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
@@ -65,6 +67,56 @@ try {
   disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+function runHostedWebSearchEventSmokeTest(createEventHandler) {
+  const lifecycleEvents = [];
+  const sources = [];
+  const handler = createEventHandler({
+    model: 'gpt-5.5',
+    transport: 'http',
+    onTextDelta() {},
+    onHostedToolLifecycleEvent(event) {
+      lifecycleEvents.push(event);
+    },
+    onWebSearchSources(items) {
+      sources.push(...items);
+    }
+  });
+
+  handler({
+    type: 'response.web_search_call.searching',
+    item_id: 'ws_transport',
+    output_index: 0,
+    sequence_number: 2
+  });
+  handler({
+    type: 'response.output_item.done',
+    output_index: 1,
+    sequence_number: 3,
+    item: {
+      type: 'message',
+      id: 'msg_transport',
+      role: 'assistant',
+      status: 'completed',
+      content: [{
+        type: 'output_text',
+        text: 'Result',
+        annotations: [{
+          type: 'url_citation',
+          url: 'https://example.com/source',
+          title: 'Source',
+          start_index: 0,
+          end_index: 6
+        }]
+      }]
+    }
+  });
+
+  assertEqual(lifecycleEvents.length, 1, 'hosted lifecycle event is delivered once');
+  assertEqual(lifecycleEvents[0].phase, 'searching', 'hosted lifecycle phase is preserved');
+  assertEqual(sources.length, 1, 'web citation source is delivered once');
+  assertEqual(sources[0].title, 'Source', 'web citation source title is preserved');
 }
 
 async function runNestedConnectionCauseSmokeTest(streamResponseText) {

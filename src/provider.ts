@@ -63,6 +63,12 @@ import { getVirtualToolPlaceholderNames } from './nativeToolSearch/nativeToolPol
 import { buildCanonicalReplayInput, createCanonicalReplayRequest } from './nativeToolSearch/nativeToolReplay';
 import { summarizeNativeToolSearchItem } from './nativeToolSearch/nativeToolLogging';
 import { recordNativeToolSearchRuntimeStatus } from './nativeToolSearch/nativeToolSearchStatus';
+import { resolveHostedToolPlan } from './hostedTools/hostedToolPlan';
+import {
+  formatWebSearchSources,
+  projectWebSearchReplayItem,
+  type WebSearchSource
+} from './hostedTools/hostedToolEvents';
 import { StreamPresenter, mergeStreamPresentationMetrics } from './streamPresenter';
 import { ReasoningStreamPresenter } from './reasoningStreamPresenter';
 import {
@@ -359,11 +365,13 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const observedToolResults = this.consumeReportedToolResults(input);
     latency.mark('messagesConverted');
     const requestBuildStartedAt = performance.now();
+    const hostedToolPlan = resolveHostedToolPlan(options.tools);
+    const selectedClientTools = hostedToolPlan.clientTools;
     const nativeToolSearchKey = nativeToolSearchCapabilityKey(
       normalizeBaseURL(config.baseURL), authIdentity, selectedModel.requestModel
     );
     let toolPlan = resolveCodexToolPlan({
-      tools: options.tools,
+      tools: selectedClientTools,
       model: selectedModel.requestModel,
       compatibilityEnabled: compatibilityProfile.enabled,
       nativeToolSearch: config.nativeToolSearch,
@@ -371,7 +379,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       extensions: (vscode as typeof vscode & { extensions?: { all?: readonly vscode.Extension<any>[] } }).extensions?.all ?? [],
       nativeToolSearchSupported: canUseNativeToolSearch(selectedModel.requestModel, nativeToolSearchKey)
     });
-    const virtualToolPlaceholderNames = getVirtualToolPlaceholderNames(options.tools);
+    const virtualToolPlaceholderNames = getVirtualToolPlaceholderNames(selectedClientTools);
     if (virtualToolPlaceholderNames.length > 0) {
       this.outputChannel.warn('native Tool Search falling back to VS Code Virtual Tools', {
         virtualPlaceholderCount: virtualToolPlaceholderNames.length,
@@ -418,7 +426,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       compatibilityEnabled: compatibilityProfile.enabled,
       model: selectedModel.requestModel,
       instructions: combineRequestInstructions(config.instructions, convertedMessages.systemInstructions),
-      tools: options.tools,
+      tools: selectedClientTools,
+      hostedTools: hostedToolPlan.responseTools,
       toolPlan,
       toolMode: options.toolMode,
       reasoning: reasoningEffort ? toResponsesReasoning(reasoningEffort) : undefined,
@@ -433,7 +442,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const toolSchemas = toolPlan;
     latency.recordContext({
       fullInputCount: input.length,
-      toolCount: options.tools?.length ?? 0,
+      toolCount: selectedClientTools.length,
+      hostedToolCount: hostedToolPlan.responseTools.length,
+      hostedWebSearch: hostedToolPlan.webSearchEnabled,
       toolSchemaBytes: toolSchemas.toolSchemaBytes,
       legacyToolSchemaCacheHit: toolPlan.legacyToolSchemaCacheHit,
       nativeToolCatalogCacheHit: toolPlan.nativeToolCatalogCacheHit,
@@ -630,9 +641,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       messageCount: messages.length,
       inputItemCount: input.length,
       observedToolResults: observedToolResults.map(({ resultObservedAt: _resultObservedAt, ...toolResult }) => toolResult),
-      toolCount: options.tools?.length ?? 0,
+      toolCount: selectedClientTools.length,
+      hostedToolCount: hostedToolPlan.responseTools.length,
+      hostedWebSearch: hostedToolPlan.webSearchEnabled,
       toolMode: getToolModeName(options.toolMode),
-      toolNames: summarizeToolNames(options.tools),
+      toolNames: summarizeToolNames(selectedClientTools),
       localTokenEstimatesSinceActivation: {
         count: this.localTokenEstimateCount,
         durationMs: this.localTokenEstimateDurationMs
@@ -678,6 +691,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       allowToolOutputContinuation = false
     ) => {
       let pendingResponseText = '';
+      const webSearchSources = new Map<string, WebSearchSource>();
       const attemptInitialBranchState: CodexBranchState = {
         ...branchState,
         identity: { ...branchState.identity },
@@ -686,6 +700,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       const resetAttemptState = () => {
         replayResponseItems.length = 0;
         pendingResponseText = '';
+        webSearchSources.clear();
         completedResponseId = undefined;
         branchState = {
           ...attemptInitialBranchState,
@@ -850,6 +865,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         input: requestInput,
         tools: requestOptions.tools,
         toolPlan: requestOptions.toolPlan,
+        hostedTools: requestOptions.hostedTools,
         toolMode: requestOptions.toolMode,
         reasoning: requestOptions.reasoning,
         maxOutputTokens: requestOptions.maxOutputTokens,
@@ -955,6 +971,31 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
               });
             }
           });
+        },
+        onHostedToolLifecycleEvent: (event) => {
+          this.outputChannel.trace('response hosted tool lifecycle', {
+            requestModel: selectedModel.requestModel,
+            ...event
+          });
+          const status = event.phase === 'completed' ? 'Searched the web' : 'Searching the web…';
+          const thinkingPart = createThinkingPart(status, `hosted-tool:${event.tool}:${event.itemId}`, {
+            source: 'hosted-tool',
+            tool: event.tool,
+            phase: event.phase,
+            itemId: event.itemId,
+            outputIndex: event.outputIndex
+          });
+          if (thinkingPart) {
+            reportVisiblePart('reasoning', thinkingPart);
+          }
+        },
+        onWebSearchSources: (sources) => {
+          for (const source of sources) {
+            const existing = webSearchSources.get(source.url);
+            if (!existing || (!existing.title && source.title)) {
+              webSearchSources.set(source.url, source);
+            }
+          }
         },
         onRawResponseItem: (item) => {
           const toolSearchEvent = summarizeNativeToolSearchItem(item);
@@ -1118,6 +1159,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         } else {
           await presenter.drainBoundary(() => token.isCancellationRequested);
         }
+        const sourcesMarkdown = completedResponseId
+          ? formatWebSearchSources([...webSearchSources.values()])
+          : undefined;
+        if (sourcesMarkdown && !token.isCancellationRequested) {
+          reportVisiblePart('text', new vscode.LanguageModelTextPart(sourcesMarkdown));
+        }
         if (completedUsagePart) {
           progress.report(completedUsagePart);
         }
@@ -1161,7 +1208,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       if (toolPlan.mode === 'native-hosted' && !reportedVisibleOutput && isNativeToolSearchUnsupportedError(error)) {
         markNativeToolSearchUnsupported(nativeToolSearchKey);
         toolPlan = resolveCodexToolPlan({
-          tools: options.tools,
+          tools: selectedClientTools,
           model: selectedModel.requestModel,
           compatibilityEnabled: compatibilityProfile.enabled,
           nativeToolSearch: 'disabled',
@@ -1699,12 +1746,16 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         continue;
       }
 
-      const reportedCall = this.pendingReportedToolCalls.get(item.call_id);
+      const callId = typeof item.call_id === 'string' ? item.call_id.trim() : '';
+      if (!callId) {
+        continue;
+      }
+      const reportedCall = this.pendingReportedToolCalls.get(callId);
       if (!reportedCall) {
         continue;
       }
 
-      this.pendingReportedToolCalls.delete(item.call_id);
+      this.pendingReportedToolCalls.delete(callId);
       observed.push({
         callId: reportedCall.callId,
         name: reportedCall.name,
@@ -2306,7 +2357,7 @@ export function hasCanonicalReplayContinuationIntegrity(
     if (item.type !== 'function_call_output') {
       continue;
     }
-    const callId = item.call_id.trim();
+    const callId = typeof item.call_id === 'string' ? item.call_id.trim() : '';
     if (!callId || !functionCallIds.has(callId) || outputCounts.has(callId)) {
       return false;
     }
@@ -2321,6 +2372,10 @@ const INVALID_LOCAL_REPLAY_ITEM = Symbol('invalid-local-replay-item');
 function projectSafeRawReplayItem(item: unknown, toolPlan: CodexToolPlan): ResponsesInputMessage | undefined {
   if (!isReplayRecord(item)) {
     return undefined;
+  }
+  const webSearchItem = projectWebSearchReplayItem(item);
+  if (webSearchItem) {
+    return webSearchItem;
   }
   if (item.type === 'reasoning') {
     const summary = projectReasoningSummary(item.summary);
@@ -2538,6 +2593,7 @@ function normalizeLocalReplayItem(
   const record = item as Record<string, unknown>;
   if (record.type === 'tool_search_call'
     || record.type === 'tool_search_output'
+    || record.type === 'web_search_call'
     || record.type === 'reasoning') {
     return OMIT_LOCAL_REPLAY_ITEM;
   }

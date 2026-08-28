@@ -48,12 +48,19 @@ try {
     reasoning: undefined,
     tools: []
   });
+  const hostedWebSearchRequest = buildCodexResponsesRequest({
+    ...base,
+    compatibilityEnabled: false,
+    tools: [],
+    hostedTools: [{ type: 'web_search' }]
+  });
   const continuationInput = [
     { type: 'message', id: '', role: 'assistant', content: 'empty id' },
     { type: 'message', id: 'legacy-message-id', role: 'assistant', content: 'legacy id' },
     { type: 'message', id: 'msg_valid123', role: 'assistant', content: 'valid message id' },
     { type: 'function_call', id: 'fc_valid123', call_id: 'call_valid', name: 'read', arguments: '{}' },
-    { type: 'function_call_output', id: 'legacy-output-id', call_id: 'call_valid', output: 'result' }
+    { type: 'function_call_output', id: 'legacy-output-id', call_id: 'call_valid', output: 'result' },
+    { type: 'web_search_call', id: 'ws_valid123', status: 'completed', action: { type: 'search', query: 'test' } }
   ];
   const sanitizedHttpRequest = buildCodexResponsesRequest({
     ...base,
@@ -82,6 +89,14 @@ try {
   assertEqual(compatibilityDefaultReasoningRequest.include[0], 'reasoning.encrypted_content', 'compatibility default reasoning requests encrypted content');
   assertEqual('reasoning' in standardRequest, false, 'standard request does not add default reasoning');
   assertEqual('include' in standardRequest, false, 'standard request does not request encrypted reasoning');
+  assertEqual(hostedWebSearchRequest.tools[0].type, 'web_search', 'OpenAI hosted web search tool is preserved');
+  assertEqual(hostedWebSearchRequest.include[0], 'web_search_call.action.sources', 'web search sources are requested');
+  assertEqual(hostedWebSearchRequest.tools.some((tool) => tool.type === 'function'), false, 'hosted web search does not become a function tool');
+  assertEqual(
+    areCodexRequestsIncrementallyCompatible(standardRequest, hostedWebSearchRequest),
+    false,
+    'hosted tool selection invalidates continuation reuse'
+  );
   assertEqual('id' in sanitizedHttpRequest.input[0], false, 'HTTP continuation omits empty response item id');
   assertEqual('id' in sanitizedHttpRequest.input[1], false, 'HTTP continuation omits legacy response item id');
   assertEqual(sanitizedHttpRequest.input[2].id, 'msg_valid123', 'HTTP continuation preserves valid response item id');
@@ -92,6 +107,8 @@ try {
   assertEqual('id' in sanitizedWebSocketEvent.input[1], false, 'WebSocket continuation omits legacy response item id');
   assertEqual(sanitizedWebSocketEvent.input[2].id, 'msg_valid123', 'WebSocket continuation preserves valid response item id');
   assertEqual(sanitizedWebSocketEvent.input[4].call_id, 'call_valid', 'WebSocket continuation preserves tool output call id');
+  assertEqual(sanitizedHttpRequest.input[5].id, 'ws_valid123', 'HTTP continuation preserves web search item id');
+  assertEqual(sanitizedWebSocketEvent.input[5].id, 'ws_valid123', 'WebSocket continuation preserves web search item id');
   assertEqual(event.generate, false, 'prewarm generate flag');
   assertEqual('stream' in event, false, 'WebSocket stream omitted');
   assertEqual(areCodexRequestsIncrementallyCompatible(request, appended), true, 'input ignored by request fingerprint');

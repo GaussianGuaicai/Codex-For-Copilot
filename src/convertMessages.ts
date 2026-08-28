@@ -339,17 +339,18 @@ function normalizeDanglingFunctionCallsForReplay(input: ResponsesInputMessage[])
       continue;
     }
 
+    const callId = firstNonEmptyString(item.call_id);
     if (isReplayableFunctionCall(item)) {
-      replayableFunctionCallIds.add(item.call_id);
-    } else {
-      malformedFunctionCallIds.add(item.call_id);
+      replayableFunctionCallIds.add(callId);
+    } else if (callId) {
+      malformedFunctionCallIds.add(callId);
     }
   }
   const outputCallIds = new Set(
     input
       .filter((item) => item.type === 'function_call_output')
-      .filter((item) => replayableFunctionCallIds.has(item.call_id))
-      .map((item) => item.call_id)
+      .map((item) => firstNonEmptyString(item.call_id))
+      .filter((callId) => replayableFunctionCallIds.has(callId))
   );
   const normalized: ResponsesInputMessage[] = [];
 
@@ -359,7 +360,7 @@ function normalizeDanglingFunctionCallsForReplay(input: ResponsesInputMessage[])
         continue;
       }
 
-      if (outputCallIds.has(item.call_id)) {
+      if (outputCallIds.has(firstNonEmptyString(item.call_id))) {
         normalized.push(item);
         continue;
       }
@@ -373,7 +374,8 @@ function normalizeDanglingFunctionCallsForReplay(input: ResponsesInputMessage[])
     }
 
     if (item.type === 'function_call_output') {
-      if (firstNonEmptyString(item.call_id) && !malformedFunctionCallIds.has(item.call_id)) {
+      const callId = firstNonEmptyString(item.call_id);
+      if (callId && !malformedFunctionCallIds.has(callId)) {
         normalized.push(item);
       }
       continue;
@@ -850,19 +852,23 @@ function inferComparisonImageMediaType(imageURL: string | undefined): string | u
 }
 
 function canonicalizeHistoryCallId(
-  callId: string,
+  callId: unknown,
   state: {
     callIdAliases: Map<string, string>;
     nextCallOrdinal: number;
   }
 ): string {
-  const existingAlias = state.callIdAliases.get(callId);
+  const normalizedCallId = firstNonEmptyString(callId);
+  if (!normalizedCallId) {
+    return '';
+  }
+  const existingAlias = state.callIdAliases.get(normalizedCallId);
   if (existingAlias) {
     return existingAlias;
   }
 
   const alias = `call_${state.nextCallOrdinal++}`;
-  state.callIdAliases.set(callId, alias);
+  state.callIdAliases.set(normalizedCallId, alias);
   return alias;
 }
 

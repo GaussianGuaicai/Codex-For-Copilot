@@ -58,6 +58,8 @@ export interface CodexLatencyContext {
   fullInputCount?: number;
   requestBodyBytes?: number;
   toolCount?: number;
+  hostedToolCount?: number;
+  hostedWebSearch?: boolean;
   toolSchemaBytes?: number;
   legacyToolSchemaCacheHit?: boolean;
   nativeToolCatalogCacheHit?: boolean;
@@ -157,6 +159,12 @@ export class CodexLatencyRecorder {
     }
     if (context.toolCount !== undefined) {
       this.context.toolCount = context.toolCount;
+    }
+    if (context.hostedToolCount !== undefined) {
+      this.context.hostedToolCount = context.hostedToolCount;
+    }
+    if (context.hostedWebSearch !== undefined) {
+      this.context.hostedWebSearch = context.hostedWebSearch;
     }
     if (context.toolSchemaBytes !== undefined) {
       this.context.toolSchemaBytes = context.toolSchemaBytes;
