@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.8.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.7.2...v1.8.0) (2026-08-29)
+
+
+### Features
+
+* add hosted Codex web search tool ([#85](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/85)) ([bf4c690](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/bf4c690c2a8c667afc96cea8b9af6c5b1c3fbb7a))
+
 ## [1.7.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.7.1...v1.7.2) (2026-08-27)
 
 

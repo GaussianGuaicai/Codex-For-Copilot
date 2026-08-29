@@ -35,6 +35,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const {
+  createResponsesServerEventHandler,
   disposeReusableResponsesWebSockets,
   isResponsesContinuationMissError,
   isResponsesContinuationMissPayload,
@@ -44,6 +45,7 @@ const {
 
 try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
+  runHostedWebSearchEventSmokeTest(createResponsesServerEventHandler);
   await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpStreamRateLimitRetrySmokeTest(streamResponseText);
@@ -68,6 +70,79 @@ try {
   disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+function runHostedWebSearchEventSmokeTest(createEventHandler) {
+  const lifecycleEvents = [];
+  const rawItems = [];
+  const sources = [];
+  const handler = createEventHandler({
+    model: 'gpt-5.5',
+    transport: 'http',
+    onTextDelta() {},
+    onHostedToolLifecycleEvent(event) {
+      lifecycleEvents.push(event);
+    },
+    onRawResponseItem(item) {
+      rawItems.push(item);
+    },
+    onWebSearchSources(items) {
+      sources.push(...items);
+    }
+  });
+
+  handler({
+    type: 'response.web_search_call.searching',
+    item_id: 'ws_transport',
+    output_index: 0,
+    sequence_number: 2
+  });
+  handler({
+    type: 'response.web_search_call.completed',
+    item_id: 'ws_transport',
+    output_index: 0,
+    sequence_number: 3
+  });
+  handler({
+    type: 'response.output_item.done',
+    output_index: 1,
+    sequence_number: 4,
+    item: {
+      type: 'web_search_call',
+      id: 'ws_transport',
+      status: 'completed',
+      action: { type: 'search', query: 'OpenAI web search' }
+    }
+  });
+  handler({
+    type: 'response.output_item.done',
+    output_index: 2,
+    sequence_number: 5,
+    item: {
+      type: 'message',
+      id: 'msg_transport',
+      role: 'assistant',
+      status: 'completed',
+      content: [{
+        type: 'output_text',
+        text: 'Result',
+        annotations: [{
+          type: 'url_citation',
+          url: 'https://example.com/source',
+          title: 'Source',
+          start_index: 0,
+          end_index: 6
+        }]
+      }]
+    }
+  });
+
+  assertEqual(lifecycleEvents.length, 2, 'hosted lifecycle events are delivered once per phase');
+  assertEqual(lifecycleEvents[0].phase, 'searching', 'hosted searching lifecycle phase is preserved');
+  assertEqual(lifecycleEvents[1].phase, 'completed', 'hosted completed lifecycle phase is preserved');
+  assertEqual(rawItems[0].type, 'web_search_call', 'completed Web Search raw items are delivered for detailed status projection');
+  assertEqual(sources.length, 1, 'web citation source is delivered once');
+  assertEqual(sources[0].title, 'Source', 'web citation source title is preserved');
 }
 
 async function runNestedConnectionCauseSmokeTest(streamResponseText) {

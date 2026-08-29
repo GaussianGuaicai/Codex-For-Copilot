@@ -10,7 +10,8 @@ import { ResponsesWS, type ResponsesWSClientOptions } from 'openai/resources/res
 import type {
   ResponsesClientEvent,
   ResponsesServerEvent,
-  ResponseUsage
+  ResponseUsage,
+  Tool
 } from 'openai/resources/responses/responses';
 import type { Reasoning } from 'openai/resources/shared';
 import * as vscode from 'vscode';
@@ -42,6 +43,12 @@ import {
 } from './codexConnectionManager';
 import type { CodexWebSocketHandshake, CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
 import type { CodexFunctionCallEvent, CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
+import {
+  extractWebSearchSources,
+  projectHostedToolLifecycleEvent,
+  type HostedToolLifecycleEvent,
+  type WebSearchSource
+} from './hostedTools/hostedToolEvents';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 2;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -133,6 +140,7 @@ export interface StreamResponseTextOptions {
   input: ResponsesInputMessage[];
   tools?: readonly vscode.LanguageModelChatTool[];
   toolPlan?: CodexToolPlan;
+  hostedTools?: readonly Tool[];
   toolMode?: vscode.LanguageModelChatToolMode;
   reasoning?: Reasoning;
   maxOutputTokens: number;
@@ -144,6 +152,8 @@ export interface StreamResponseTextOptions {
   onToolCallArgumentsDelta?: (callId: string, name: string) => void;
   onToolCallArgumentsDone?: (callId: string, name: string) => void;
   onToolCall?: (call: CodexFunctionCallEvent) => void;
+  onHostedToolLifecycleEvent?: (event: HostedToolLifecycleEvent) => void;
+  onWebSearchSources?: (sources: readonly WebSearchSource[]) => void;
   onRawResponseItem?: (item: unknown) => void;
   onTurnState?: (turnState: string) => void;
   onWebSocketHandshake?: (handshake: CodexWebSocketHandshake) => void;
@@ -927,6 +937,7 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
     input: options.input,
     tools: options.tools,
     toolPlan: options.toolPlan,
+    hostedTools: options.hostedTools,
     toolMode: options.toolMode,
     reasoning: options.reasoning,
     serviceTier: options.serviceTier,
@@ -1039,6 +1050,12 @@ export function createResponsesServerEventHandler(
   };
 
   return (event) => {
+    const hostedToolEvent = projectHostedToolLifecycleEvent(event);
+    if (hostedToolEvent) {
+      options.onHostedToolLifecycleEvent?.(hostedToolEvent);
+      return;
+    }
+
     const reasoningEvent = event as unknown as Record<string, unknown>;
     if (reasoningEvent.type === 'response.reasoning_summary_part.added') {
       const itemId = typeof reasoningEvent.item_id === 'string' ? reasoningEvent.item_id : '';
@@ -1202,6 +1219,10 @@ function handleResponsesServerEvent(
 ): void {
   if (event.type === 'response.output_item.done') {
     options.onRawResponseItem?.(event.item);
+    const webSearchSources = extractWebSearchSources(event.item);
+    if (webSearchSources.length > 0) {
+      options.onWebSearchSources?.(webSearchSources);
+    }
   }
 
   if (event.type === 'response.output_text.delta') {
@@ -1302,7 +1323,7 @@ function shouldFallbackToHttp(
   return error instanceof WebSocketTransportUnavailableError && error.fallbackAllowed;
 }
 
-function getMismatchedModelNotFoundName(error: { error?: { message?: string | null } | undefined; message: string } | string | undefined, requestedModel: string): string | undefined {
+function getMismatchedModelNotFoundName(error: unknown, requestedModel: string): string | undefined {
   const missingModel = getModelNotFoundName(error);
   if (!missingModel || missingModel === requestedModel) {
     return undefined;

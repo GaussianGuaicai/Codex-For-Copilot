@@ -17,6 +17,7 @@ import {
 } from './nativeToolSearch/nativeToolGroupingBridge';
 import { getNativeToolSearchRuntimeStatus } from './nativeToolSearch/nativeToolSearchStatus';
 import { getLastEffectiveCodexProtocol } from './codexProtocol';
+import { registerWebSearchMarkerTool } from './hostedTools/webSearchTool';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
@@ -77,6 +78,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       authenticationProvider,
       { supportsMultipleAccounts: true }
     ),
+    registerWebSearchMarkerTool(),
     vscode.lm.registerLanguageModelChatProvider('codex-for-copilot', provider),
     vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
       logger.debug('command.open-logs');

@@ -432,7 +432,7 @@ function hasContinuationIntegrity(
   const outputCallIds = new Set(
     appendedInput
       .filter((item) => item.type === 'function_call_output')
-      .map((item) => item.call_id.trim())
+      .map((item) => typeof item.call_id === 'string' ? item.call_id.trim() : '')
       .filter(Boolean)
   );
   return [...functionCallIds].every((callId) => outputCallIds.has(callId));
