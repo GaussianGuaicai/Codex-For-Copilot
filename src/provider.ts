@@ -692,6 +692,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       allowToolOutputContinuation = false
     ) => {
       let pendingResponseText = '';
+      let reportedWebSearchStatusCount = 0;
       const webSearchStatusPresenter = new WebSearchStatusPresenter(config.webSearch);
       const webSearchFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
       const attemptInitialBranchState: CodexBranchState = {
@@ -702,6 +703,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       const resetAttemptState = () => {
         replayResponseItems.length = 0;
         pendingResponseText = '';
+        reportedWebSearchStatusCount = 0;
         for (const timer of webSearchFallbackTimers.values()) {
           clearTimeout(timer);
         }
@@ -798,8 +800,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         if (!webSearchStatus) {
           return;
         }
+        // VS Code groups consecutive ThinkingParts into one expandable section.
+        // Keep individual hosted searches visually distinct inside that group.
+        const value = `${reportedWebSearchStatusCount > 0 ? '\n\n' : ''}${webSearchStatus.value}`;
+        reportedWebSearchStatusCount += 1;
         const thinkingPart = createThinkingPart(
-          webSearchStatus.value,
+          value,
           `hosted-tool:web_search:${webSearchStatus.itemId}`,
           {
             source: 'hosted-tool',
