@@ -9,6 +9,14 @@ export interface ModelPricing {
   output?: number;
 }
 
+export interface WebSearchConfig {
+  externalWebAccess: boolean;
+  contextSize?: 'low' | 'medium' | 'high';
+  allowedDomains: string[];
+  statusDetail: 'compact' | 'actions' | 'actionsAndSources';
+  statusMaxSources: number;
+}
+
 export interface ProviderConfig {
   baseURL: string;
   clientVersion: string;
@@ -19,6 +27,7 @@ export interface ProviderConfig {
   protocol: CodexProtocolSettings;
   nativeToolSearch: 'auto' | 'enabled' | 'disabled';
   nativeToolSearchMaxToolsPerNamespace: number;
+  webSearch: WebSearchConfig;
   model: string;
   includeHiddenModels: boolean;
   disabledModels: string[];
@@ -52,6 +61,13 @@ export function getProviderConfig(): ProviderConfig {
     nativeToolSearchMaxToolsPerNamespace: normalizeNativeToolSearchMaxToolsPerNamespace(
       config.get('nativeToolSearchMaxToolsPerNamespace', MAX_NAMESPACE_FUNCTIONS)
     ),
+    webSearch: {
+      externalWebAccess: config.get('webSearchExternalAccess', true),
+      contextSize: normalizeWebSearchContextSize(config.get('webSearchContextSize', 'default')),
+      allowedDomains: normalizeWebSearchDomains(config.get('webSearchAllowedDomains', [])),
+      statusDetail: normalizeWebSearchStatusDetail(config.get('webSearchStatusDetail', 'actionsAndSources')),
+      statusMaxSources: normalizeWebSearchStatusMaxSources(config.get('webSearchStatusMaxSources', 3))
+    },
     model: config.get('model', 'gpt-5.5'),
     includeHiddenModels: config.get('includeHiddenModels', false),
     disabledModels: normalizeStringList(config.get('disabledModels', [])),
@@ -80,6 +96,39 @@ function normalizeNativeToolSearchMaxToolsPerNamespace(value: unknown): number {
     return MAX_NAMESPACE_FUNCTIONS;
   }
   return Math.min(MAX_NAMESPACE_FUNCTIONS, Math.max(1, Math.floor(value)));
+}
+
+function normalizeWebSearchContextSize(value: unknown): WebSearchConfig['contextSize'] {
+  return value === 'low' || value === 'medium' || value === 'high' ? value : undefined;
+}
+
+function normalizeWebSearchStatusDetail(value: unknown): WebSearchConfig['statusDetail'] {
+  return value === 'compact' || value === 'actions' ? value : 'actionsAndSources';
+}
+
+function normalizeWebSearchStatusMaxSources(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 3;
+  }
+  return Math.min(10, Math.max(0, Math.floor(value)));
+}
+
+function normalizeWebSearchDomains(value: unknown): string[] {
+  return [...new Set(normalizeStringList(value)
+    .map((domain) => domain.toLowerCase())
+    .filter(isDomainName))]
+    .slice(0, 100);
+}
+
+function isDomainName(value: string): boolean {
+  if (value.length === 0 || value.length > 253 || value.includes('://') || value.includes('/')) {
+    return false;
+  }
+  return value.split('.').every((label) => (
+    label.length > 0
+    && label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+  ));
 }
 
 function normalizeTransport(value: string): ProviderConfig['transport'] {

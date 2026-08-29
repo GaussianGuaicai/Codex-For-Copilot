@@ -33,14 +33,14 @@
     "test:real-backend": "node test/realBackendProbe.mjs",
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",
     "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",
-    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs && node test/smokeNativeToolPolicy.mjs && node test/smokeNativeToolCatalog.mjs && node test/smokeNativeToolNamespaces.mjs && node test/smokeNativeToolCallMapper.mjs && node test/smokeNativeToolSearchEvents.mjs && node test/smokeNativeToolSearchLogging.mjs && node test/smokeNativeToolContinuation.mjs && node test/smokeNativeToolFallback.mjs && node test/smokeNativeToolOptIn.mjs && node test/smokeNativeToolGroupingBridge.mjs && node test/smokeNativeToolSearchStatus.mjs",
+    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeHostedWebSearch.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs && node test/smokeNativeToolPolicy.mjs && node test/smokeNativeToolCatalog.mjs && node test/smokeNativeToolNamespaces.mjs && node test/smokeNativeToolCallMapper.mjs && node test/smokeNativeToolSearchEvents.mjs && node test/smokeNativeToolSearchLogging.mjs && node test/smokeNativeToolContinuation.mjs && node test/smokeNativeToolFallback.mjs && node test/smokeNativeToolOptIn.mjs && node test/smokeNativeToolGroupingBridge.mjs && node test/smokeNativeToolSearchStatus.mjs",
     "test:smoke": "npm run test:codex-parity && node test/smokeCodexLogger.mjs && node test/smokeReasoningEffort.mjs && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeReasoningStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {
     "https-proxy-agent": "^7.0.6",
-    "openai": "^6.44.0",
+    "openai": "^7.8.0",
     "undici": "^7.29.0",
     "ws": "^8.21.0"
   },
@@ -67,6 +67,26 @@
         "vendor": "codex-for-copilot",
         "displayName": "Codex",
         "managementCommand": "codexModelProvider.manage"
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "codexForCopilot_searchWeb",
+        "displayName": "Web Search",
+        "modelDescription": "Lets a Codex For Copilot model search the public web through OpenAI's hosted Responses web_search tool. Search is executed by the Codex backend, so this tool has no client-side arguments or function result.",
+        "userDescription": "Search the web using the Codex backend.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "webSearch",
+        "icon": "$(globe)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "tags": [
+          "web",
+          "search"
+        ]
       }
     ],
     "commands": [
@@ -217,6 +237,61 @@
             "disabled"
           ],
           "description": "Controls Zstandard compression for large ChatGPT Codex Responses requests."
+        },
+        "codexModelProvider.webSearchExternalAccess": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow hosted Web Search to fetch live internet content. Disable this to use only cached or indexed content."
+        },
+        "codexModelProvider.webSearchContextSize": {
+          "type": "string",
+          "default": "default",
+          "enum": [
+            "default",
+            "low",
+            "medium",
+            "high"
+          ],
+          "enumDescriptions": [
+            "Let the backend use its default search context size.",
+            "Use less search-result context for quick lookups.",
+            "Use a balanced amount of search-result context.",
+            "Use more search-result context for detailed answers."
+          ],
+          "description": "Amount of web search result context made available to the model. This does not guarantee a source count."
+        },
+        "codexModelProvider.webSearchAllowedDomains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$"
+          },
+          "maxItems": 100,
+          "uniqueItems": true,
+          "description": "Optional Web Search domain allowlist. Enter domain names without http://, https://, paths, or wildcards; matching subdomains are included."
+        },
+        "codexModelProvider.webSearchStatusDetail": {
+          "type": "string",
+          "default": "actionsAndSources",
+          "enum": [
+            "compact",
+            "actions",
+            "actionsAndSources"
+          ],
+          "enumDescriptions": [
+            "Show only a compact completed Web Search status.",
+            "Show search queries, opened pages, and find-in-page actions.",
+            "Show actions plus clickable source pages returned by search calls."
+          ],
+          "description": "Controls how much completed hosted Web Search activity is shown in Chat."
+        },
+        "codexModelProvider.webSearchStatusMaxSources": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum clickable source pages shown on each detailed Web Search status line. Set to 0 to hide sources while keeping action details."
         },
         "codexModelProvider.protocolProfile": {
           "type": "string",
