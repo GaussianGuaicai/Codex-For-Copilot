@@ -1,5 +1,6 @@
 import type { Tool, WebSearchTool } from 'openai/resources/responses/responses';
 import type * as vscode from 'vscode';
+import type { WebSearchConfig } from '../config';
 
 export const CODEX_WEB_SEARCH_TOOL_NAME = 'codexForCopilot_searchWeb';
 
@@ -9,17 +10,13 @@ export interface HostedToolPlan {
   webSearchEnabled: boolean;
 }
 
-const WEB_SEARCH_TOOL = Object.freeze({
-  type: 'web_search',
-  external_web_access: true
-} satisfies WebSearchTool);
-
 /**
  * Separates VS Code-executed tools from selection markers for OpenAI-hosted
  * tools. Hosted tools never enter the function schema or Native Tool Search.
  */
 export function resolveHostedToolPlan(
-  tools: readonly vscode.LanguageModelChatTool[] | undefined
+  tools: readonly vscode.LanguageModelChatTool[] | undefined,
+  settings?: Pick<WebSearchConfig, 'externalWebAccess' | 'contextSize' | 'allowedDomains'>
 ): HostedToolPlan {
   if (!tools || tools.length === 0) {
     return {
@@ -41,9 +38,22 @@ export function resolveHostedToolPlan(
 
   return {
     clientTools: Object.freeze(clientTools),
-    responseTools: webSearchEnabled ? Object.freeze([WEB_SEARCH_TOOL]) : Object.freeze([]),
+    responseTools: webSearchEnabled ? Object.freeze([buildWebSearchTool(settings)]) : Object.freeze([]),
     webSearchEnabled
   };
+}
+
+export function buildWebSearchTool(
+  settings?: Pick<WebSearchConfig, 'externalWebAccess' | 'contextSize' | 'allowedDomains'>
+): Readonly<WebSearchTool> {
+  return Object.freeze({
+    type: 'web_search',
+    external_web_access: settings?.externalWebAccess ?? true,
+    ...(settings?.contextSize ? { search_context_size: settings.contextSize } : {}),
+    ...(settings && settings.allowedDomains.length > 0
+      ? { filters: { allowed_domains: [...settings.allowedDomains] } }
+      : {})
+  } satisfies WebSearchTool);
 }
 
 export function hasHostedWebSearch(tools: readonly Tool[] | undefined): boolean {

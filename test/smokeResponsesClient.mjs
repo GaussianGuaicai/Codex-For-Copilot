@@ -71,6 +71,7 @@ try {
 
 function runHostedWebSearchEventSmokeTest(createEventHandler) {
   const lifecycleEvents = [];
+  const rawItems = [];
   const sources = [];
   const handler = createEventHandler({
     model: 'gpt-5.5',
@@ -78,6 +79,9 @@ function runHostedWebSearchEventSmokeTest(createEventHandler) {
     onTextDelta() {},
     onHostedToolLifecycleEvent(event) {
       lifecycleEvents.push(event);
+    },
+    onRawResponseItem(item) {
+      rawItems.push(item);
     },
     onWebSearchSources(items) {
       sources.push(...items);
@@ -91,9 +95,26 @@ function runHostedWebSearchEventSmokeTest(createEventHandler) {
     sequence_number: 2
   });
   handler({
+    type: 'response.web_search_call.completed',
+    item_id: 'ws_transport',
+    output_index: 0,
+    sequence_number: 3
+  });
+  handler({
     type: 'response.output_item.done',
     output_index: 1,
-    sequence_number: 3,
+    sequence_number: 4,
+    item: {
+      type: 'web_search_call',
+      id: 'ws_transport',
+      status: 'completed',
+      action: { type: 'search', query: 'OpenAI web search' }
+    }
+  });
+  handler({
+    type: 'response.output_item.done',
+    output_index: 2,
+    sequence_number: 5,
     item: {
       type: 'message',
       id: 'msg_transport',
@@ -113,8 +134,10 @@ function runHostedWebSearchEventSmokeTest(createEventHandler) {
     }
   });
 
-  assertEqual(lifecycleEvents.length, 1, 'hosted lifecycle event is delivered once');
-  assertEqual(lifecycleEvents[0].phase, 'searching', 'hosted lifecycle phase is preserved');
+  assertEqual(lifecycleEvents.length, 2, 'hosted lifecycle events are delivered once per phase');
+  assertEqual(lifecycleEvents[0].phase, 'searching', 'hosted searching lifecycle phase is preserved');
+  assertEqual(lifecycleEvents[1].phase, 'completed', 'hosted completed lifecycle phase is preserved');
+  assertEqual(rawItems[0].type, 'web_search_call', 'completed Web Search raw items are delivered for detailed status projection');
   assertEqual(sources.length, 1, 'web citation source is delivered once');
   assertEqual(sources[0].title, 'Source', 'web citation source title is preserved');
 }

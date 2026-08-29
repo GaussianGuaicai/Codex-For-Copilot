@@ -54,6 +54,12 @@ try {
     tools: [],
     hostedTools: [{ type: 'web_search' }]
   });
+  const configuredHostedWebSearchRequest = buildCodexResponsesRequest({
+    ...base,
+    compatibilityEnabled: false,
+    tools: [],
+    hostedTools: [{ type: 'web_search', external_web_access: false, search_context_size: 'high' }]
+  });
   const continuationInput = [
     { type: 'message', id: '', role: 'assistant', content: 'empty id' },
     { type: 'message', id: 'legacy-message-id', role: 'assistant', content: 'legacy id' },
@@ -96,6 +102,11 @@ try {
     areCodexRequestsIncrementallyCompatible(standardRequest, hostedWebSearchRequest),
     false,
     'hosted tool selection invalidates continuation reuse'
+  );
+  assertEqual(
+    areCodexRequestsIncrementallyCompatible(hostedWebSearchRequest, configuredHostedWebSearchRequest),
+    false,
+    'Web Search configuration changes invalidate continuation reuse'
   );
   assertEqual('id' in sanitizedHttpRequest.input[0], false, 'HTTP continuation omits empty response item id');
   assertEqual('id' in sanitizedHttpRequest.input[1], false, 'HTTP continuation omits legacy response item id');

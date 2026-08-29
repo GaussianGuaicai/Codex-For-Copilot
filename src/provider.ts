@@ -65,9 +65,9 @@ import { summarizeNativeToolSearchItem } from './nativeToolSearch/nativeToolLogg
 import { recordNativeToolSearchRuntimeStatus } from './nativeToolSearch/nativeToolSearchStatus';
 import { resolveHostedToolPlan } from './hostedTools/hostedToolPlan';
 import {
-  formatWebSearchSources,
   projectWebSearchReplayItem,
-  type WebSearchSource
+  WebSearchStatusPresenter,
+  type HostedToolLifecycleEvent
 } from './hostedTools/hostedToolEvents';
 import { StreamPresenter, mergeStreamPresentationMetrics } from './streamPresenter';
 import { ReasoningStreamPresenter } from './reasoningStreamPresenter';
@@ -115,6 +115,7 @@ const TEXT_STREAM_MAX_REPORT_INTERVAL_MS = 100;
 const TEXT_STREAM_TARGET_REPORT_CHARACTERS = 20;
 const TEXT_STREAM_MAX_REPORT_CHARACTERS = 64;
 const TEXT_STREAM_SMOOTHING_BUFFER_CHARACTERS = 1_024;
+const WEB_SEARCH_STATUS_DETAIL_GRACE_MS = 300;
 // The WebSocket tool-output continuation path passed the real-backend release
 // gate: five consecutive store:false tool loops completed with a matching
 // previous_response_id and a single incremental function_call_output.
@@ -365,7 +366,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const observedToolResults = this.consumeReportedToolResults(input);
     latency.mark('messagesConverted');
     const requestBuildStartedAt = performance.now();
-    const hostedToolPlan = resolveHostedToolPlan(options.tools);
+    const hostedToolPlan = resolveHostedToolPlan(options.tools, config.webSearch);
     const selectedClientTools = hostedToolPlan.clientTools;
     const nativeToolSearchKey = nativeToolSearchCapabilityKey(
       normalizeBaseURL(config.baseURL), authIdentity, selectedModel.requestModel
@@ -691,7 +692,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       allowToolOutputContinuation = false
     ) => {
       let pendingResponseText = '';
-      const webSearchSources = new Map<string, WebSearchSource>();
+      const webSearchStatusPresenter = new WebSearchStatusPresenter(config.webSearch);
+      const webSearchFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
       const attemptInitialBranchState: CodexBranchState = {
         ...branchState,
         identity: { ...branchState.identity },
@@ -700,7 +702,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       const resetAttemptState = () => {
         replayResponseItems.length = 0;
         pendingResponseText = '';
-        webSearchSources.clear();
+        for (const timer of webSearchFallbackTimers.values()) {
+          clearTimeout(timer);
+        }
+        webSearchFallbackTimers.clear();
+        webSearchStatusPresenter.reset();
         completedResponseId = undefined;
         branchState = {
           ...attemptInitialBranchState,
@@ -786,6 +792,39 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         } else if (kind === 'reasoning') {
           latency.mark('firstReasoning', reportedAt);
         }
+      };
+
+      const reportWebSearchStatus = (webSearchStatus: ReturnType<WebSearchStatusPresenter['present']>) => {
+        if (!webSearchStatus) {
+          return;
+        }
+        const thinkingPart = createThinkingPart(
+          webSearchStatus.value,
+          `hosted-tool:web_search:${webSearchStatus.itemId}`,
+          {
+            source: 'hosted-tool',
+            tool: 'web_search',
+            phase: 'completed',
+            itemId: webSearchStatus.itemId,
+            ...(webSearchStatus.actionType ? { actionType: webSearchStatus.actionType } : {})
+          }
+        );
+        if (thinkingPart) {
+          reportVisiblePart('reasoning', thinkingPart);
+        }
+      };
+
+      const scheduleWebSearchLifecycleFallback = (event: HostedToolLifecycleEvent) => {
+        if (!webSearchStatusPresenter.noteCompletedLifecycle(event)) {
+          return;
+        }
+        const timer = setTimeout(() => {
+          webSearchFallbackTimers.delete(event.itemId);
+          if (!token.isCancellationRequested) {
+            reportWebSearchStatus(webSearchStatusPresenter.presentLifecycleFallback(event.itemId));
+          }
+        }, WEB_SEARCH_STATUS_DETAIL_GRACE_MS);
+        webSearchFallbackTimers.set(event.itemId, timer);
       };
 
       const presenter = new StreamPresenter(
@@ -977,27 +1016,18 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             requestModel: selectedModel.requestModel,
             ...event
           });
-          const status = event.phase === 'completed' ? 'Searched the web' : 'Searching the web…';
-          const thinkingPart = createThinkingPart(status, `hosted-tool:${event.tool}:${event.itemId}`, {
-            source: 'hosted-tool',
-            tool: event.tool,
-            phase: event.phase,
-            itemId: event.itemId,
-            outputIndex: event.outputIndex
-          });
-          if (thinkingPart) {
-            reportVisiblePart('reasoning', thinkingPart);
-          }
-        },
-        onWebSearchSources: (sources) => {
-          for (const source of sources) {
-            const existing = webSearchSources.get(source.url);
-            if (!existing || (!existing.title && source.title)) {
-              webSearchSources.set(source.url, source);
-            }
-          }
+          scheduleWebSearchLifecycleFallback(event);
         },
         onRawResponseItem: (item) => {
+          const webSearchStatus = webSearchStatusPresenter.present(item);
+          if (webSearchStatus) {
+            const fallbackTimer = webSearchFallbackTimers.get(webSearchStatus.itemId);
+            if (fallbackTimer) {
+              clearTimeout(fallbackTimer);
+              webSearchFallbackTimers.delete(webSearchStatus.itemId);
+            }
+            reportWebSearchStatus(webSearchStatus);
+          }
           const toolSearchEvent = summarizeNativeToolSearchItem(item);
           if (toolSearchEvent) {
             this.outputChannel.debug('native Tool Search event', toolSearchEvent);
@@ -1154,16 +1184,14 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         }
       } finally {
         reasoningPresenter.close();
+        for (const timer of webSearchFallbackTimers.values()) {
+          clearTimeout(timer);
+        }
+        webSearchFallbackTimers.clear();
         if (token.isCancellationRequested) {
           presenter.flushBoundary();
         } else {
           await presenter.drainBoundary(() => token.isCancellationRequested);
-        }
-        const sourcesMarkdown = completedResponseId
-          ? formatWebSearchSources([...webSearchSources.values()])
-          : undefined;
-        if (sourcesMarkdown && !token.isCancellationRequested) {
-          reportVisiblePart('text', new vscode.LanguageModelTextPart(sourcesMarkdown));
         }
         if (completedUsagePart) {
           progress.report(completedUsagePart);

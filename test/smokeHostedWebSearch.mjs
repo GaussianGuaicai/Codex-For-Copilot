@@ -10,20 +10,28 @@ try {
   } = planModule.exports;
   const {
     extractWebSearchSources,
-    formatWebSearchSources,
+    formatWebSearchActivity,
     projectHostedToolLifecycleEvent,
-    projectWebSearchReplayItem
+    projectWebSearchActivity,
+    projectWebSearchReplayItem,
+    WebSearchStatusPresenter
   } = eventModule.exports;
 
   const clientTool = { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } };
   const markerTool = { name: CODEX_WEB_SEARCH_TOOL_NAME, description: 'Search the web', inputSchema: { type: 'object' } };
-  const plan = resolveHostedToolPlan([clientTool, markerTool]);
+  const plan = resolveHostedToolPlan([clientTool, markerTool], {
+    externalWebAccess: false,
+    contextSize: 'high',
+    allowedDomains: ['example.com']
+  });
 
   assertEqual(plan.clientTools.length, 1, 'marker is removed from client tools');
   assertEqual(plan.clientTools[0].name, 'read_file', 'ordinary VS Code tool is preserved');
   assertEqual(plan.responseTools.length, 1, 'one hosted tool is planned');
   assertEqual(plan.responseTools[0].type, 'web_search', 'hosted tool uses OpenAI SDK web search shape');
-  assertEqual(plan.responseTools[0].external_web_access, true, 'hosted tool explicitly enables live web access');
+  assertEqual(plan.responseTools[0].external_web_access, false, 'hosted tool respects live-access configuration');
+  assertEqual(plan.responseTools[0].search_context_size, 'high', 'hosted tool respects search context size');
+  assertEqual(plan.responseTools[0].filters.allowed_domains[0], 'example.com', 'hosted tool applies allowed domains');
   assertEqual(plan.webSearchEnabled, true, 'web search selection is recorded');
 
   const lifecycle = projectHostedToolLifecycleEvent({
@@ -34,6 +42,55 @@ try {
   });
   assertEqual(lifecycle.phase, 'searching', 'web search lifecycle is normalized');
   assertEqual(lifecycle.itemId, 'ws_test', 'web search lifecycle keeps item identity');
+  const completedItems = [
+    {
+      type: 'web_search_call', id: 'ws_first', status: 'completed',
+      action: { type: 'search', queries: ['OpenAI web search'], sources: [{ type: 'url', url: 'https://example.com/one' }] }
+    },
+    {
+      type: 'web_search_call', id: 'ws_second', status: 'completed',
+      action: { type: 'open_page', url: 'https://example.com/article' }
+    },
+    {
+      type: 'web_search_call', id: 'ws_third', status: 'completed',
+      action: { type: 'find_in_page', pattern: 'pricing', url: 'https://example.com/article' }
+    }
+  ];
+  const firstActivity = projectWebSearchActivity(completedItems[0]);
+  assertEqual(firstActivity.action.queries[0], 'OpenAI web search', 'completed activity retains search queries');
+  assertEqual(
+    formatWebSearchActivity(firstActivity, { statusDetail: 'actionsAndSources', statusMaxSources: 3 }),
+    '**Searched the web** · “OpenAI web search” · [example\\.com/one](<https://example.com/one>)',
+    'detailed status displays the query and clickable source page on one line'
+  );
+  const statusPresenter = new WebSearchStatusPresenter({ statusDetail: 'actions', statusMaxSources: 3 });
+  assertEqual(
+    JSON.stringify([...completedItems, completedItems[0]].flatMap((item) => statusPresenter.present(item)?.value ?? [])),
+    JSON.stringify([
+      '**Searched the web** · “OpenAI web search”',
+      '**Opened a web page** · [example\\.com/article](<https://example.com/article>)',
+      '**Searched within a web page** · “pricing” · [example\\.com/article](<https://example.com/article>)'
+    ]),
+    'search, open-page, and find-in-page calls each produce one informative deduplicated status'
+  );
+  const lifecycleFallbackPresenter = new WebSearchStatusPresenter({ statusDetail: 'actionsAndSources', statusMaxSources: 3 });
+  assertEqual(lifecycleFallbackPresenter.noteCompletedLifecycle({
+    tool: 'web_search', phase: 'completed', itemId: 'ws_lifecycle_only', outputIndex: 2, sequenceNumber: 70
+  }), true, 'a completed lifecycle event schedules one fallback status');
+  assertEqual(lifecycleFallbackPresenter.noteCompletedLifecycle({
+    tool: 'web_search', phase: 'completed', itemId: 'ws_first', outputIndex: 3, sequenceNumber: 71
+  }), true, 'a second completed lifecycle event has its own status identity');
+  lifecycleFallbackPresenter.present(completedItems[0]);
+  assertEqual(
+    lifecycleFallbackPresenter.presentLifecycleFallback('ws_lifecycle_only')?.value,
+    '**Searched the web**',
+    'a completed lifecycle event immediately falls back to one compact status when no detailed raw item arrives'
+  );
+  assertEqual(
+    lifecycleFallbackPresenter.presentLifecycleFallback('ws_first'),
+    undefined,
+    'a detailed raw item cancels only its matching lifecycle fallback'
+  );
 
   const callSources = extractWebSearchSources({
     type: 'web_search_call',
@@ -60,11 +117,6 @@ try {
   });
   assertEqual(callSources.length, 1, 'unsafe web search source URLs are discarded');
   assertEqual(citationSources[0].title, 'Example [One]', 'citation title is retained');
-  assertEqual(
-    formatWebSearchSources([...callSources, ...citationSources]),
-    '\n\nSources:\n- [Example \\[One\\]](<https://example.com/one>)',
-    'sources are deduplicated, titled, escaped, and clickable'
-  );
 
   const replay = projectWebSearchReplayItem({
     type: 'web_search_call',

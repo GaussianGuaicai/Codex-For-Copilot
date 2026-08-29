@@ -48,6 +48,8 @@ Open VS Code Chat, choose **Codex** from the model picker, and start chatting or
 
 To give a request live web access, enable **Web Search** in the Chat tools picker or reference `#webSearch` in the prompt. The Codex backend executes the search directly; the extension does not expose it as a VS Code function call.
 
+Web Search settings under **Settings → Extensions → Codex** let you choose live or cached access, search context size, and an optional domain allowlist. You can also choose whether Chat shows compact statuses, search/open/find actions, or actions with clickable source pages.
+
 ## Tool discovery
 
 The extension uses **VS Code Virtual Tool Groups by default**. VS Code organizes selected Agent tools into groups and reveals a group when the model needs it.
@@ -99,6 +101,7 @@ Most users can keep the defaults. Advanced settings are available under **Settin
 - fallback model and model visibility
 - reasoning effort and service tier
 - request compression and WebSocket prewarming
+- Web Search access, context, domains, and status detail
 
 For a proxy-required network, set VS Code's `http.proxy` setting or the Extension Host's `HTTPS_PROXY`/`HTTP_PROXY` environment variable. The provider applies that proxy consistently to model discovery, account usage, HTTP Responses requests, token counting, and WebSocket requests; `NO_PROXY` remains honored.
 
