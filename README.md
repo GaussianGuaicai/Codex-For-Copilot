@@ -25,6 +25,12 @@ Codex For Copilot is a lightweight VS Code Language Model Provider that connects
 - **Conversation continuity** — reuses compatible response branches for efficient follow-up turns.
 - **Usage visibility** — shows available account limits or Credits in the status bar when supplied by the backend.
 
+## See it in VS Code
+
+<p align="center">
+  <img src="assets/showcase.gif" alt="Codex For Copilot running in VS Code" width="540">
+</p>
+
 ## Get started
 
 ### 1. Install
