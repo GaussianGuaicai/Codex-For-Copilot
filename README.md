@@ -14,6 +14,10 @@
 
 Codex For Copilot is a lightweight VS Code Language Model Provider that connects VS Code Chat to the ChatGPT Codex Responses backend. Select **Codex** from the model picker and keep the native VS Code experience for chat, tools, confirmations, workspace trust, and extensions.
 
+<p align="center">
+  <img src="assets/showcase.gif" alt="Codex For Copilot running in VS Code" width="420">
+</p>
+
 ## Highlights
 
 - **Native VS Code integration** — works in Chat and Agent mode through the standard model picker.
