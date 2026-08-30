@@ -109,6 +109,7 @@ export interface CountInputTokensOptions {
   apiKey: string;
   headers?: Record<string, string>;
   authManager?: CodexAuthManager;
+  accountKey?: string;
   model: string;
   input: string | ResponsesInputMessage[];
   token: vscode.CancellationToken;
@@ -119,6 +120,7 @@ export interface StreamResponseTextOptions {
   apiKey: string;
   headers?: Record<string, string>;
   authManager?: CodexAuthManager;
+  accountKey?: string;
   transport?: 'auto' | 'http' | 'websocket';
   compatibilityProfile?: CodexCompatibilityProfile;
   identity?: CodexRequestIdentity;
@@ -168,6 +170,7 @@ export interface StreamResponseTextOptions {
     usage?: ResponseUsage | null;
   }) => void;
   onResponseFailed?: (message: string) => void;
+  hasProviderVisibleOutput?: () => boolean;
   onTransportFallback?: (event: {
     from: 'websocket';
     to: 'http';
@@ -296,11 +299,15 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       } catch (error) {
         if (!(error instanceof ResponsesStreamRateLimitError)
           || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
-          || visibleActivity) {
+          || visibleActivity
+          || options.hasProviderVisibleOutput?.() === true) {
           throw error;
         }
         options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
         await waitForRetryDelay(error.retryDelayMs, abortController.signal);
+        if (options.token.isCancellationRequested || abortController.signal.aborted) {
+          return;
+        }
       }
     }
   } catch (error) {
@@ -417,6 +424,7 @@ async function streamResponseTextOverHttp(
     modelsEtagPresent: Boolean(response.headers.get('x-models-etag'))
   });
   const handleEvent = createResponsesServerEventHandler(options);
+  let sawTerminalEvent = false;
 
   for await (const event of stream) {
     if (options.token.isCancellationRequested) {
@@ -424,7 +432,17 @@ async function streamResponseTextOverHttp(
       return;
     }
 
+    if (event.type === 'response.completed'
+      || event.type === 'response.failed'
+      || event.type === 'response.incomplete'
+      || event.type === 'error') {
+      sawTerminalEvent = true;
+    }
     handleEvent(event);
+  }
+
+  if (!sawTerminalEvent && !options.token.isCancellationRequested && !abortController.signal.aborted) {
+    throw new Error('Responses HTTP stream ended before a terminal event.');
   }
 }
 
@@ -671,9 +689,9 @@ async function streamCodexResponseTextOverManagedWebSocket(
       codexConnectionManager.closeThread(scope);
       const classified = classifyManagedWebSocketError(error, options);
       if (attempt === 0 && !visibleActivity && options.authManager && isUnauthorizedError(error)) {
-        const currentSnapshot = await options.authManager.getCredentialSnapshot();
+        const currentSnapshot = await options.authManager.getCredentialSnapshot(options.accountKey);
         const snapshot = await options.authManager.recoverFromUnauthorized({
-          accountKey: currentSnapshot.accountKey ?? '',
+          accountKey: options.accountKey ?? currentSnapshot.accountKey ?? '',
           snapshotRevision: currentSnapshot.revision,
           visibleActivity: false,
           reason: 'websocketUnauthorized'
@@ -887,7 +905,7 @@ function evictReusableWebSocketSessions(): void {
 }
 
 function createOpenAIClient(
-  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
+  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'accountKey' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
   defaultHeaders?: Record<string, string>
 ): OpenAI {
   const compressedFetch = createCodexFetchAdapter({
@@ -905,7 +923,7 @@ function createOpenAIClient(
     })
   });
   const customFetch: typeof fetch = options.authManager
-    ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch)
+    ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch, options.accountKey)
     : compressedFetch;
   return new OpenAI({
     apiKey: options.apiKey,
@@ -1282,6 +1300,22 @@ function handleResponsesServerEvent(
     return;
   }
 
+  if (event.type === 'response.incomplete') {
+    const reason = event.response.incomplete_details?.reason;
+    const message = reason
+      ? `Responses API response incomplete (${reason}).`
+      : 'Responses API response incomplete.';
+    options.onResponseFailed?.(message);
+    throw new Error(message);
+  }
+
+  if (event.type === 'error') {
+    const message = collectErrorMessages(event).find((value) => value.trim())
+      ?? 'Responses API stream error.';
+    options.onResponseFailed?.(message);
+    throw new Error(message);
+  }
+
   if (event.type === 'response.failed') {
     const error = event.response.error;
 
@@ -1508,7 +1542,7 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
     signal: toAbortSignal(options.token)
   };
   const response = options.authManager
-    ? await codexFetch(options.authManager, `${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, init, proxyAwareFetch)
+    ? await codexFetch(options.authManager, `${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, init, proxyAwareFetch, options.accountKey)
     : await proxyAwareFetch(`${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, {
         ...init,
         headers: {
