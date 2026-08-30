@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.8.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.8.0...v1.8.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **streaming:** retry streamed rate-limit failures ([#83](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/83)) ([1d1e569](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/1d1e56939f749086ffef1b66001227b2a5fa66a2))
+
 ## [1.8.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.7.2...v1.8.0) (2026-08-29)
 
 
