@@ -220,6 +220,8 @@ try {
   await runProviderLongContextSelectionSmokeTest();
   await runProviderFallbackSmokeTest();
   await runInterleavedResponsePresentationSmokeTest();
+  await runProviderStreamRateLimitIsolationSmokeTest();
+  await runProviderAccountKeyPinningSmokeTest();
   await runStatefulMarkerRoundTripSmokeTest();
   await runNonLeadingStatefulMarkerHistoryReuseSmokeTest();
   await runStatefulMarkerContinuationRecoverySmokeTest();
@@ -512,6 +514,7 @@ async function runNativeReplayValidationSmokeTest() {
     targetUrl.port = String(address.port);
     return originalFetch(targetUrl, init);
   };
+
   const tools = Array.from({ length: 13 }, (_, index) => ({
     name: `native_validation_tool_${String(index).padStart(2, '0')}`,
     description: `Native validation tool ${index}`,
@@ -3556,7 +3559,6 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
     targetUrl.port = String(address.port);
     return originalFetch(targetUrl, init);
   };
-
   const tools = Array.from({ length: 13 }, (_, index) => ({
     name: `native_replay_tool_${String(index).padStart(2, '0')}`,
     description: `Native replay tool ${index}`,
@@ -4935,6 +4937,327 @@ async function runProviderCatalogVersionNeutralSmokeTest() {
     assertEqual(models.map((model) => model.id).join(','), 'codex::gpt-5.6-sol,codex::gpt-5.6-luna', 'multi-agent version does not affect discovery visibility');
   } finally {
     globalThis.fetch = originalFetch;
+    await closeServer(server);
+  }
+}
+
+async function runProviderStreamRateLimitIsolationSmokeTest() {
+  const requestBodies = [];
+  let visibleRequestCount = 0;
+  let safeRequestCount = 0;
+  let followUpRequestCount = 0;
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    requestBodies.push(body);
+    const serializedInput = JSON.stringify(body.input);
+
+    if (serializedInput.includes('Visible hosted search')) {
+      visibleRequestCount += 1;
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      response.write(`data: ${JSON.stringify({
+        type: 'response.output_item.done',
+        output_index: 0,
+        item: {
+          type: 'web_search_call',
+          id: 'ws_provider_visible',
+          status: 'completed',
+          action: { type: 'search', query: 'provider visible search' }
+        }
+      })}\n\n`);
+      response.write(`data: ${JSON.stringify({
+        type: 'response.failed',
+        response: {
+          id: 'resp_provider_visible_limited',
+          status: 'failed',
+          error: { code: 'rate_limit_exceeded', message: 'Please try again in 1ms.' }
+        }
+      })}\n\n`);
+      response.end('data: [DONE]\n\n');
+      return;
+    }
+
+    if (body.previous_response_id) {
+      followUpRequestCount += 1;
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          code: 'previous_response_not_found',
+          param: 'previous_response_id',
+          message: 'Safe retry continuation expired.'
+        }
+      }));
+      return;
+    }
+
+    if (serializedInput.includes('Continue after safe retry')) {
+      followUpRequestCount += 1;
+      writeSseResponse(response, 'Safe retry continuation recovered.', 'resp_safe_retry_recovered');
+      return;
+    }
+
+    safeRequestCount += 1;
+    if (safeRequestCount === 1) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive'
+      });
+      response.write(`data: ${JSON.stringify({
+        type: 'response.web_search_call.completed',
+        item_id: 'ws_scheduled_only',
+        output_index: 0,
+        sequence_number: 1
+      })}\n\n`);
+      response.write(`data: ${JSON.stringify({
+        type: 'response.output_item.done',
+        output_index: 1,
+        item: {
+          id: 'msg_failed_safe_retry',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Failed-attempt hidden replay text.', annotations: [] }]
+        }
+      })}\n\n`);
+      response.write(`data: ${JSON.stringify({
+        type: 'response.failed',
+        response: {
+          id: 'resp_safe_limited',
+          status: 'failed',
+          error: { code: 'rate_limit_exceeded', message: 'Please try again in 350ms.' }
+        }
+      })}\n\n`);
+      response.end('data: [DONE]\n\n');
+      return;
+    }
+
+    writeSseResponseWithOutputItem(response, 'Safe retry succeeded.', 'resp_safe_retry_success', 'msg_safe_retry_success');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalTransport = configValues.transport;
+  const originalWebSearchStatusDetail = configValues.webSearchStatusDetail;
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.credentialsSource = 'secretStorage';
+  configValues.transport = 'http';
+  configValues.webSearchStatusDetail = 'actionsAndSources';
+  const context = {
+    secrets: { async get() { return 'test-api-key'; } },
+    subscriptions: []
+  };
+  const webSearchTool = {
+    name: 'codexForCopilot_searchWeb',
+    description: 'Hosted Web Search selection marker',
+    inputSchema: { type: 'object', properties: {} }
+  };
+  const model = buildFallbackModel({ ...configValues, model: 'gpt-5.6-sol' }, 'openaiApiKey').info;
+
+  try {
+    const token = createCancellationToken();
+    const visibleProvider = new CodexModelProvider(context, createOutputChannel());
+    const visibleParts = [];
+    let visibleError;
+    try {
+      await visibleProvider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Visible hosted search')] }],
+        { tools: [webSearchTool] },
+        { report(part) { visibleParts.push(part); } },
+        token
+      );
+    } catch (error) {
+      visibleError = error;
+    }
+    assertEqual(visibleRequestCount, 1, 'provider-visible hosted Web Search blocks HTTP rate-limit retry');
+    assertEqual(visibleParts.filter((part) => part instanceof LanguageModelThinkingPart && part.value.includes('provider visible search')).length, 1, 'detailed hosted Web Search action is emitted once');
+    assertEqual(getStatefulMarkers(visibleParts).length, 0, 'provider-visible failed response emits no marker');
+    assertEqual(visibleError instanceof Error, true, 'provider-visible rate limit surfaces');
+
+    const safeProvider = new CodexModelProvider(context, createOutputChannel());
+    const safeParts = [];
+    await safeProvider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Safe hosted search retry')] }],
+      { tools: [webSearchTool] },
+      { report(part) { safeParts.push(part); } },
+      token
+    );
+    assertEqual(safeRequestCount, 2, 'pre-visible streamed rate limit retries once');
+    assertEqual(safeParts.filter((part) => part instanceof LanguageModelThinkingPart).length, 0, 'safe retry clears scheduled failed-attempt Web Search status');
+    assertEqual(
+      safeParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Safe retry succeeded.',
+      'safe retry emits only successful text'
+    );
+    const marker = getSingleStatefulMarkerPart(safeParts, 'safe rate-limit retry');
+
+    await safeProvider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [marker] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after safe retry')] }
+      ],
+      { tools: [webSearchTool] },
+      { report() {} },
+      token
+    );
+    assertEqual(followUpRequestCount, 2, 'safe retry follow-up exercises continuation recovery');
+    const [continuationRequest, recoveryRequest] = requestBodies.slice(-2);
+    assertEqual(continuationRequest.previous_response_id, 'resp_safe_retry_success', 'safe retry records only the successful branch');
+    assertEqual('previous_response_id' in recoveryRequest, false, 'continuation recovery clears the rejected branch id');
+    const recoveryInput = JSON.stringify(recoveryRequest.input);
+    assertEqual(['msg_failed_safe_retry', 'Failed-attempt hidden replay text.'].some((value) => recoveryInput.includes(value)), false, 'safe retry recovery excludes failed-attempt raw replay state');
+    assertEqual(recoveryInput.includes('Safe retry succeeded.'), true, 'safe retry recovery retains successful response text');
+  } finally {
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.transport = originalTransport;
+    if (originalWebSearchStatusDetail === undefined) {
+      delete configValues.webSearchStatusDetail;
+    } else {
+      configValues.webSearchStatusDetail = originalWebSearchStatusDetail;
+    }
+    await closeServer(server);
+  }
+}
+
+async function runProviderAccountKeyPinningSmokeTest() {
+  const accountKey = 'account-a-key';
+  const accountId = 'account-a-id';
+  const snapshotKeys = [];
+  const recoveryContexts = [];
+  const networkCredentials = [];
+  const attempts = { models: 0, responses: 0, tokens: 0 };
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // Consume the request before returning the deterministic response.
+    }
+    const kind = request.method === 'GET'
+      ? 'models'
+      : request.url?.endsWith('/responses/input_tokens')
+        ? 'tokens'
+        : 'responses';
+    attempts[kind] += 1;
+    networkCredentials.push({
+      kind,
+      authorization: request.headers.authorization,
+      accountId: request.headers['chatgpt-account-id']
+    });
+    if (attempts[kind] === 1) {
+      response.writeHead(401);
+      response.end();
+      return;
+    }
+    if (kind === 'models') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+    if (kind === 'tokens') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ input_tokens: 13 }));
+      return;
+    }
+    writeSseResponse(response, 'Account A response.', 'resp_account_a');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalTransport = configValues.transport;
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.credentialsSource = 'codexAuth';
+  configValues.transport = 'http';
+  let activeAccountKey = accountKey;
+  const credential = (accessToken, selectedAccountId = accountId, selectedAccountKey = accountKey) => ({
+    source: 'extensionOAuth',
+    accessToken,
+    accountId: selectedAccountId,
+    accountKey: selectedAccountKey,
+    revision: accessToken,
+    refreshable: true
+  });
+  const authManager = {
+    async getCredentialSnapshot(key) {
+      snapshotKeys.push(key);
+      const selectedKey = key ?? activeAccountKey;
+      if (key === undefined) {
+        activeAccountKey = 'account-b-key';
+      }
+      return selectedKey === accountKey
+        ? credential('account-a-old-token')
+        : credential('account-b-token', 'account-b-id', 'account-b-key');
+    },
+    async recoverFromUnauthorized(context) {
+      recoveryContexts.push(context);
+      return credential('account-a-new-token');
+    }
+  };
+  const context = { subscriptions: [] };
+  const provider = new CodexModelProvider(
+    context,
+    createOutputChannel(),
+    undefined,
+    undefined,
+    undefined,
+    authManager
+  );
+
+  try {
+    const token = createCancellationToken();
+    activeAccountKey = accountKey;
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((candidate) => candidate.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected account-pinning model discovery result.');
+    }
+
+    activeAccountKey = accountKey;
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Use account A')] }],
+      {},
+      { report() {} },
+      token
+    );
+
+    activeAccountKey = accountKey;
+    const tokenCount = await provider.provideTokenCount(model, 'Count with account A', token);
+    assertEqual(
+      JSON.stringify(snapshotKeys),
+      JSON.stringify([undefined, accountKey, undefined, accountKey, undefined, accountKey]),
+      'model discovery, Responses, and token count pin network snapshots after resolving account A'
+    );
+    assertEqual(JSON.stringify(recoveryContexts.map((context) => context.accountKey)), JSON.stringify([accountKey, accountKey, accountKey]), 'all 401 recoveries stay on account A');
+    const expectedCredentials = ['models', 'responses', 'tokens'].flatMap((kind) => [
+      { kind, authorization: 'Bearer account-a-old-token', accountId },
+      { kind, authorization: 'Bearer account-a-new-token', accountId }
+    ]);
+    assertEqual(
+      JSON.stringify(networkCredentials),
+      JSON.stringify(expectedCredentials),
+      'model discovery, Responses, and token count retry with account A credentials'
+    );
+    assertEqual(tokenCount, 13, 'provider token count uses the official account-pinned response');
+  } finally {
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.transport = originalTransport;
     await closeServer(server);
   }
 }
