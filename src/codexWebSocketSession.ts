@@ -180,9 +180,13 @@ export class CodexWebSocketSession {
       onHandshake(this.handshake, this.handshakeConnectedAt);
     }
 
+    let releaseIterator: (() => Promise<void>) | undefined;
     try {
-      this.socket.sendRaw(serializedEvent);
       const iterator = this.socket.stream()[Symbol.asyncIterator]();
+      releaseIterator = async () => {
+        await iterator.return?.();
+      };
+      this.socket.sendRaw(serializedEvent);
       while (true) {
         const next = await nextWithTimeout(iterator, WEBSOCKET_IDLE_TIMEOUT_MS, options.signal);
         if (next.done) {
@@ -250,6 +254,7 @@ export class CodexWebSocketSession {
     } finally {
       this.activeHandshakeListener = undefined;
       options.signal.removeEventListener('abort', abort);
+      await releaseIterator?.();
     }
   }
 
