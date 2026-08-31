@@ -60,7 +60,10 @@ const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = 'previous_response_not_found';
 const PREVIOUS_RESPONSE_ID_PARAM = 'previous_response_id';
-const INVALID_PREVIOUS_RESPONSE_ID_MESSAGE = 'Invalid previous_response_id.';
+const INVALID_PREVIOUS_RESPONSE_ID_MESSAGES = new Set([
+  'Invalid previous_response_id.',
+  'Invalid `previous_response_id`.'
+]);
 const CONTINUATION_MISS_MESSAGE = 'Responses API could not find previous_response_id.';
 const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
@@ -109,6 +112,7 @@ export interface CountInputTokensOptions {
   apiKey: string;
   headers?: Record<string, string>;
   authManager?: CodexAuthManager;
+  accountKey?: string;
   model: string;
   input: string | ResponsesInputMessage[];
   token: vscode.CancellationToken;
@@ -119,6 +123,7 @@ export interface StreamResponseTextOptions {
   apiKey: string;
   headers?: Record<string, string>;
   authManager?: CodexAuthManager;
+  accountKey?: string;
   transport?: 'auto' | 'http' | 'websocket';
   compatibilityProfile?: CodexCompatibilityProfile;
   identity?: CodexRequestIdentity;
@@ -168,6 +173,7 @@ export interface StreamResponseTextOptions {
     usage?: ResponseUsage | null;
   }) => void;
   onResponseFailed?: (message: string) => void;
+  hasProviderVisibleOutput?: () => boolean;
   onTransportFallback?: (event: {
     from: 'websocket';
     to: 'http';
@@ -200,7 +206,7 @@ export function isResponsesContinuationMissPayload(error: unknown): boolean {
   let matched = false;
   walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
-      matched = value.trim() === INVALID_PREVIOUS_RESPONSE_ID_MESSAGE;
+      matched = INVALID_PREVIOUS_RESPONSE_ID_MESSAGES.has(value.trim());
       return !matched;
     }
     if (typeof value !== 'object' || value === null) {
@@ -296,11 +302,15 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       } catch (error) {
         if (!(error instanceof ResponsesStreamRateLimitError)
           || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
-          || visibleActivity) {
+          || visibleActivity
+          || options.hasProviderVisibleOutput?.() === true) {
           throw error;
         }
         options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
         await waitForRetryDelay(error.retryDelayMs, abortController.signal);
+        if (options.token.isCancellationRequested || abortController.signal.aborted) {
+          return;
+        }
       }
     }
   } catch (error) {
@@ -417,6 +427,7 @@ async function streamResponseTextOverHttp(
     modelsEtagPresent: Boolean(response.headers.get('x-models-etag'))
   });
   const handleEvent = createResponsesServerEventHandler(options);
+  let sawTerminalEvent = false;
 
   for await (const event of stream) {
     if (options.token.isCancellationRequested) {
@@ -424,7 +435,17 @@ async function streamResponseTextOverHttp(
       return;
     }
 
+    if (event.type === 'response.completed'
+      || event.type === 'response.failed'
+      || event.type === 'response.incomplete'
+      || event.type === 'error') {
+      sawTerminalEvent = true;
+    }
     handleEvent(event);
+  }
+
+  if (!sawTerminalEvent && !options.token.isCancellationRequested && !abortController.signal.aborted) {
+    throw new Error('Responses HTTP stream ended before a terminal event.');
   }
 }
 
@@ -574,7 +595,6 @@ async function streamCodexResponseTextOverManagedWebSocket(
   const { request, metrics } = buildResponsesCreateRequest(options);
   options.onTransportMetrics?.({ ...metrics });
   const builderOptions = createRequestBuilderOptions(options);
-  const handleEvent = createResponsesServerEventHandler(options);
 
   const prewarmMode = options.websocketPrewarm ?? 'auto';
   if (!managed.reused && prewarmMode === 'auto') {
@@ -636,6 +656,8 @@ async function streamCodexResponseTextOverManagedWebSocket(
 
   let visibleActivity = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    let previousResponseIdUsed: string | undefined;
+    const handleEvent = createResponsesServerEventHandler(options);
     try {
       const result = await managed.session.stream({
         request,
@@ -643,7 +665,10 @@ async function streamCodexResponseTextOverManagedWebSocket(
         identity,
         allowToolOutputContinuation: options.allowToolOutputContinuation === true,
         signal: abortController.signal,
-        onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
+        onRequestPrepared: (prepared) => {
+          previousResponseIdUsed = prepared.previousResponseIdUsed;
+          reportManagedWebSocketRequestMetrics(options, prepared);
+        },
         onHandshake: (handshake, connectedAt) => {
           options.onWebSocketHandshake?.(handshake);
           options.onTransportMetrics?.({ websocketConnectedAt: connectedAt });
@@ -669,11 +694,25 @@ async function streamCodexResponseTextOverManagedWebSocket(
       return;
     } catch (error) {
       codexConnectionManager.closeThread(scope);
-      const classified = classifyManagedWebSocketError(error, options);
+      const classified = classifyManagedWebSocketError(error, options, previousResponseIdUsed);
+      const internalPrewarmContinuationMiss = !options.previousResponseId
+        && Boolean(previousResponseIdUsed)
+        && classified instanceof ResponsesContinuationMissError;
+      if (internalPrewarmContinuationMiss) {
+        codexConnectionManager.disablePrewarm(scope);
+      }
+      if (attempt === 0
+        && !visibleActivity
+        && options.hasProviderVisibleOutput?.() !== true
+        && internalPrewarmContinuationMiss) {
+        managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+        options.onTransportMetrics?.({ retryReason: 'websocket_prewarm_continuation_miss' });
+        continue;
+      }
       if (attempt === 0 && !visibleActivity && options.authManager && isUnauthorizedError(error)) {
-        const currentSnapshot = await options.authManager.getCredentialSnapshot();
+        const currentSnapshot = await options.authManager.getCredentialSnapshot(options.accountKey);
         const snapshot = await options.authManager.recoverFromUnauthorized({
-          accountKey: currentSnapshot.accountKey ?? '',
+          accountKey: options.accountKey ?? currentSnapshot.accountKey ?? '',
           snapshotRevision: currentSnapshot.revision,
           visibleActivity: false,
           reason: 'websocketUnauthorized'
@@ -750,9 +789,14 @@ function reportManagedWebSocketResult(
   });
 }
 
-function classifyManagedWebSocketError(error: unknown, options: StreamResponseTextOptions): Error {
-  if (options.previousResponseId && isResponsesContinuationMissPayload(error)) {
-    return new ResponsesContinuationMissError(CONTINUATION_MISS_MESSAGE, options.previousResponseId, {
+function classifyManagedWebSocketError(
+  error: unknown,
+  options: StreamResponseTextOptions,
+  previousResponseIdUsed?: string
+): Error {
+  const continuationResponseId = options.previousResponseId ?? previousResponseIdUsed;
+  if (continuationResponseId && isResponsesContinuationMissPayload(error)) {
+    return new ResponsesContinuationMissError(CONTINUATION_MISS_MESSAGE, continuationResponseId, {
       cause: error instanceof Error ? error : undefined
     });
   }
@@ -887,7 +931,7 @@ function evictReusableWebSocketSessions(): void {
 }
 
 function createOpenAIClient(
-  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
+  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'accountKey' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
   defaultHeaders?: Record<string, string>
 ): OpenAI {
   const compressedFetch = createCodexFetchAdapter({
@@ -905,7 +949,7 @@ function createOpenAIClient(
     })
   });
   const customFetch: typeof fetch = options.authManager
-    ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch)
+    ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch, options.accountKey)
     : compressedFetch;
   return new OpenAI({
     apiKey: options.apiKey,
@@ -1282,6 +1326,22 @@ function handleResponsesServerEvent(
     return;
   }
 
+  if (event.type === 'response.incomplete') {
+    const reason = event.response.incomplete_details?.reason;
+    const message = reason
+      ? `Responses API response incomplete (${reason}).`
+      : 'Responses API response incomplete.';
+    options.onResponseFailed?.(message);
+    throw new Error(message);
+  }
+
+  if (event.type === 'error') {
+    const message = collectErrorMessages(event).find((value) => value.trim())
+      ?? 'Responses API stream error.';
+    options.onResponseFailed?.(message);
+    throw new Error(message);
+  }
+
   if (event.type === 'response.failed') {
     const error = event.response.error;
 
@@ -1508,7 +1568,7 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
     signal: toAbortSignal(options.token)
   };
   const response = options.authManager
-    ? await codexFetch(options.authManager, `${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, init, proxyAwareFetch)
+    ? await codexFetch(options.authManager, `${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, init, proxyAwareFetch, options.accountKey)
     : await proxyAwareFetch(`${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, {
         ...init,
         headers: {

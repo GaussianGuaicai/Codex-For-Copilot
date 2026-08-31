@@ -889,6 +889,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         apiKey: credentials.apiKey,
         headers: credentials.headers,
         authManager: credentials.authManager,
+        accountKey: credentials.accountKey,
         transport: config.transport,
         compatibilityProfile,
         identity: requestIdentity,
@@ -915,6 +916,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         reasoning: requestOptions.reasoning,
         maxOutputTokens: requestOptions.maxOutputTokens,
         token,
+        hasProviderVisibleOutput: () => reportedVisibleOutput,
         onTextDelta: (text) => {
           pendingResponseText += text;
           if (text) {
@@ -1061,7 +1063,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         },
         onTransportMetrics: (metrics) => {
           if (metrics.retryReason === 'websocket_unauthorized_recovered'
-            || metrics.retryReason === 'websocket_connection_limit_reached') {
+            || metrics.retryReason === 'websocket_connection_limit_reached'
+            || metrics.retryReason === 'websocket_prewarm_continuation_miss'
+            || metrics.retryReason === 'stream_rate_limit_exceeded') {
             resetAttemptState();
           }
           previousResponseIdUsed ||= metrics.previousResponseIdUsed === true;
@@ -1563,6 +1567,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         apiKey: credentials.apiKey,
         headers: credentials.headers,
         authManager: credentials.authManager,
+        accountKey: credentials.accountKey,
         model: selectedModel.requestModel,
         input,
         token

@@ -244,6 +244,34 @@ try {
   const response = await auth.codexFetch(manager, 'http://example.test', {});
   assertEqual(response.status, 200, '401 retry succeeds');
   assertEqual(JSON.stringify(seenAuth), JSON.stringify(['Bearer old-token', 'Bearer new-token']), 'retry uses refreshed token');
+
+  const legacyAccountCalls = [];
+  let legacyAccessCall = 0;
+  const legacyCompatibilityManager = {
+    async getAccessToken(accountKey) {
+      legacyAccountCalls.push(['token', accountKey]);
+      legacyAccessCall += 1;
+      return legacyAccessCall === 1 ? 'legacy-old-token' : 'legacy-new-token';
+    },
+    async refreshAfter401(accountKey) {
+      legacyAccountCalls.push(['refresh', accountKey]);
+    }
+  };
+  seenAuth.length = 0;
+  const legacyResponse = await auth.codexFetch(
+    legacyCompatibilityManager,
+    'http://legacy.example.test',
+    {},
+    globalThis.fetch,
+    'legacy-account-a'
+  );
+  assertEqual(legacyResponse.status, 200, 'legacy 401 retry succeeds');
+  assertEqual(JSON.stringify(legacyAccountCalls), JSON.stringify([
+    ['token', 'legacy-account-a'],
+    ['refresh', 'legacy-account-a'],
+    ['token', 'legacy-account-a']
+  ]), 'legacy token reads and 401 refresh use the pinned account key');
+  assertEqual(JSON.stringify(seenAuth), JSON.stringify(['Bearer legacy-old-token', 'Bearer legacy-new-token']), 'legacy retry uses the refreshed pinned token');
   globalThis.fetch = nativeFetch;
 
   const pkce = auth.generateCodexPkce();

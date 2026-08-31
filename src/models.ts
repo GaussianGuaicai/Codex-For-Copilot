@@ -129,7 +129,7 @@ export async function fetchAvailableModels(
     signal: toAbortSignal(token)
   };
   const response = credentials.authManager
-    ? await codexFetch(credentials.authManager, modelsURL, init, proxyAwareFetch)
+    ? await codexFetch(credentials.authManager, modelsURL, init, proxyAwareFetch, credentials.accountKey)
     : await proxyAwareFetch(modelsURL, {
         ...init,
         headers: {
