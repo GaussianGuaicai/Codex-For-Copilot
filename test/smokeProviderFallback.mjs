@@ -4352,6 +4352,22 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
         webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_recovered', status: 'completed' } }));
         return;
       }
+      if (frames.length === 5) {
+        webSocket.send(JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: 'Invalid `previous_response_id`.'
+          },
+          status: 400
+        }));
+        return;
+      }
+      if (frames.length === 6) {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'Quoted WebSocket continuation recovered.' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_native_ws_quoted_recovered', status: 'completed' } }));
+        return;
+      }
       webSocket.send(JSON.stringify({
         type: 'response.failed',
         response: { id: 'resp_native_ws_extra', status: 'failed', error: { message: 'Unexpected extra provider frame.' } }
@@ -4605,6 +4621,60 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
       recoveredParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
       'Native WebSocket continuation recovered.',
       'tool-output continuation recovery reports only retry output'
+    );
+
+    const quotedRecoveryParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Run a deferred native WebSocket tool.')] },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [
+              new vscodeMock.LanguageModelTextPart('I will inspect the native tool output.'),
+              new vscodeMock.LanguageModelToolCallPart('call_native_ws_replay', selectedTool, {
+                alpha: 'first',
+                middle: 'middle',
+                zebra: 'last'
+              })
+            ]
+          },
+          {
+            role: vscodeMock.LanguageModelChatMessageRole.Assistant,
+            content: [new vscodeMock.LanguageModelToolResultPart('call_native_ws_replay', [new vscodeMock.LanguageModelTextPart('native websocket output')])]
+          },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Native WebSocket tool result received.')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the tool result.')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('Native WebSocket continuation recovered.')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after the quoted stale response ID.')] }
+        ],
+        { tools, modelConfiguration: { contextSize: 950000 } },
+        { report(part) { quotedRecoveryParts.push(part); } },
+        token
+      ),
+      token,
+      'quoted native WebSocket continuation recovery'
+    );
+
+    assertEqual(frames.length, 6, 'quoted WebSocket miss adds one continuation attempt and one canonical retry');
+    assertEqual(frames[4].previous_response_id, 'resp_native_ws_recovered', 'quoted WebSocket miss first uses the completed response id');
+    assertEqual(
+      JSON.stringify(frames[4].input),
+      JSON.stringify([{ role: 'user', content: 'Continue after the quoted stale response ID.', type: 'message' }]),
+      'quoted WebSocket miss first sends only appended input'
+    );
+    assertEqual('previous_response_id' in frames[5], false, 'quoted WebSocket recovery omits the stale response id');
+    assertEqual(
+      warnings.filter((entry) => entry.message === 'response continuation reset').length,
+      2,
+      'code-param and quoted-message misses each execute one generic continuation recovery'
+    );
+    assertEqual(httpResponseRequestCount, 0, 'quoted WebSocket continuation miss never falls back to HTTP');
+    assertEqual(
+      quotedRecoveryParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Quoted WebSocket continuation recovered.',
+      'quoted WebSocket continuation recovery reports only retry output'
     );
   } finally {
     for (const subscription of context.subscriptions.splice(0)) {

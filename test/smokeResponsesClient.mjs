@@ -67,6 +67,8 @@ try {
   await runWebSocketContinuationSmokeTest(streamResponseText);
   await runWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runManagedWebSocketContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
+  await runManagedWebSocketPrewarmContinuationMissSmokeTest(streamResponseText);
+  await runManagedWebSocketPrewarmContinuationMissAfterVisibleOutputSmokeTest(streamResponseText);
   await runWebSocketFunctionCallContinuationIntegrityMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runWebSocketSequentialReuseSmokeTest(streamResponseText);
   await runWebSocketConcurrentReuseIsolationSmokeTest(streamResponseText);
@@ -699,9 +701,19 @@ function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
     'managed response failure message classifies'
   );
   assertEqual(
+    isContinuationMissPayload(new Error('Invalid `previous_response_id`.')),
+    true,
+    'quoted managed response failure message classifies'
+  );
+  assertEqual(
     isContinuationMissPayload(new Error('Backend prose mentioned Invalid previous_response_id. during diagnostics.')),
     false,
     'surrounding invalid previous response prose does not classify'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error('Backend prose mentioned Invalid `previous_response_id`. during diagnostics.')),
+    false,
+    'surrounding quoted invalid previous response prose does not classify'
   );
   assertEqual(
     isContinuationMissPayload(new Error(JSON.stringify({ error: exactPayload }))),
@@ -1592,7 +1604,7 @@ async function runWebSocketContinuationMissSmokeTest(streamResponseText, isRespo
         type: 'error',
         error: {
           type: 'invalid_request_error',
-          message: 'Invalid previous_response_id.'
+          message: 'Invalid `previous_response_id`.'
         },
         status: 400
       }));
@@ -1662,7 +1674,7 @@ async function runManagedWebSocketContinuationMissSmokeTest(streamResponseText, 
           type: 'error',
           error: {
             type: 'invalid_request_error',
-            message: 'Invalid previous_response_id.'
+            message: 'Invalid `previous_response_id`.'
           },
           status: 400
         }));
@@ -1736,6 +1748,272 @@ async function runManagedWebSocketContinuationMissSmokeTest(streamResponseText, 
     assertEqual(managedFailedEvent.previousResponseId, 'resp_managed_failed_previous', 'managed response.failed response id');
     assertEqual(httpRequestCount, 0, 'managed structured API misses never fall back to HTTP');
     assertEqual(fallbackEvents.length, 0, 'managed structured API misses report no fallback');
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runManagedWebSocketPrewarmContinuationMissSmokeTest(streamResponseText) {
+  let httpRequestCount = 0;
+  let connectionCount = 0;
+  const frames = [];
+  const fallbackEvents = [];
+  const transportMetrics = [];
+  const server = createServer(async (request, response) => {
+    httpRequestCount += 1;
+    for await (const _chunk of request) {
+      // Consume any unexpected HTTP fallback request before failing the test path.
+    }
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Prewarm continuation recovery must not fall back to HTTP.' } }));
+  });
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    connectionCount += 1;
+    webSocket.on('message', (data) => {
+      const frame = JSON.parse(data.toString('utf8'));
+      frames.push(frame);
+      if (frames.length === 1) {
+        webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_stale_prewarm', status: 'in_progress' } }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_stale_prewarm', status: 'completed' } }));
+        return;
+      }
+      if (frames.length === 2) {
+        webSocket.send(JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: 'Invalid `previous_response_id`.'
+          },
+          status: 400
+        }));
+        return;
+      }
+      if (frames.length === 3) {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'prewarm recovery succeeded' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_after_stale_prewarm', status: 'completed' } }));
+        return;
+      }
+      webSocket.send(JSON.stringify({
+        type: 'response.failed',
+        response: { id: 'resp_prewarm_extra', status: 'failed', error: { message: 'Unexpected extra prewarm recovery request.' } }
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+    const deltas = [];
+    await streamResponseText({
+      baseURL,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'auto',
+      compatibilityProfile: { enabled: true, endpointKey: baseURL },
+      authIdentity: 'codexAuth:acct-test',
+      identity: {
+        installationId: '11111111-1111-4111-8111-111111111111',
+        sessionId: 'managed-prewarm-miss',
+        threadId: 'managed-prewarm-miss-thread',
+        turnId: 'managed-prewarm-miss-turn',
+        windowId: '55555555-5555-4555-8555-555555555555'
+      },
+      websocketPrewarm: 'enabled',
+      requestCompression: 'disabled',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input: [{ role: 'user', content: 'Recover the stale prewarm continuation.' }],
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      onTextDelta: (delta) => deltas.push(delta),
+      onTransportFallback: (event) => fallbackEvents.push(event),
+      onTransportMetrics: (metrics) => transportMetrics.push(metrics)
+    });
+
+    assertEqual(frames.length, 3, 'prewarm continuation miss sends one canonical retry');
+    assertEqual(frames[0].generate, false, 'prewarm continuation miss starts with speculative request');
+    assertEqual(frames[1].previous_response_id, 'resp_stale_prewarm', 'formal request uses prewarm response id');
+    assertEqual(frames[1].input.length, 0, 'formal prewarm continuation sends incremental input');
+    assertEqual('previous_response_id' in frames[2], false, 'prewarm recovery omits stale response id');
+    assertEqual(
+      JSON.stringify(frames[2].input),
+      JSON.stringify([{ role: 'user', content: 'Recover the stale prewarm continuation.' }]),
+      'prewarm recovery replays full input'
+    );
+    assertEqual(deltas.join(''), 'prewarm recovery succeeded', 'prewarm recovery emits successful output once');
+    assertEqual(connectionCount, 2, 'prewarm recovery recreates the managed socket');
+    assertEqual(httpRequestCount, 0, 'prewarm continuation miss never falls back to HTTP');
+    assertEqual(fallbackEvents.length, 0, 'prewarm continuation miss reports no HTTP fallback');
+    assertEqual(
+      transportMetrics.some((metrics) => metrics.retryReason === 'websocket_prewarm_continuation_miss'),
+      true,
+      'prewarm continuation miss reports its retry reason'
+    );
+  } finally {
+    webSocketServer.close();
+    server.close();
+  }
+}
+
+async function runManagedWebSocketPrewarmContinuationMissAfterVisibleOutputSmokeTest(streamResponseText) {
+  let httpRequestCount = 0;
+  let connectionCount = 0;
+  const frames = [];
+  const fallbackEvents = [];
+  const transportMetrics = [];
+  const server = createServer(async (request, response) => {
+    httpRequestCount += 1;
+    for await (const _chunk of request) {
+      // Consume any unexpected HTTP fallback request before failing the test path.
+    }
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'Visible prewarm continuation miss must not fall back to HTTP.' } }));
+  });
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    connectionCount += 1;
+    webSocket.on('message', (data) => {
+      const frame = JSON.parse(data.toString('utf8'));
+      frames.push(frame);
+      if (frames.length === 1) {
+        webSocket.send(JSON.stringify({ type: 'response.created', response: { id: 'resp_visible_prewarm', status: 'in_progress' } }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_visible_prewarm', status: 'completed' } }));
+        return;
+      }
+      if (frames.length === 2) {
+        webSocket.send(JSON.stringify({
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            id: 'ws_visible_prewarm',
+            type: 'web_search_call',
+            status: 'completed',
+            action: { type: 'search', query: 'visible prewarm status' }
+          }
+        }));
+        webSocket.send(JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: 'Invalid `previous_response_id`.'
+          },
+          status: 400
+        }));
+        return;
+      }
+      if (frames.length === 3) {
+        webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: 'next request succeeded' }));
+        webSocket.send(JSON.stringify({ type: 'response.completed', response: { id: 'resp_after_visible_prewarm', status: 'completed' } }));
+        return;
+      }
+      webSocket.send(JSON.stringify({
+        type: 'response.failed',
+        response: { id: 'resp_visible_prewarm_extra', status: 'failed', error: { message: 'Unexpected visible prewarm replay.' } }
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+    let providerVisibleOutput = false;
+    let rawItemCount = 0;
+    let capturedError;
+    const createOptions = (turnId, input, onTextDelta) => ({
+      baseURL,
+      apiKey: 'test-api-key',
+      headers: createHeaders(),
+      transport: 'auto',
+      compatibilityProfile: { enabled: true, endpointKey: baseURL },
+      authIdentity: 'codexAuth:acct-test',
+      identity: {
+        installationId: '11111111-1111-4111-8111-111111111111',
+        sessionId: 'managed-visible-prewarm-miss',
+        threadId: 'managed-visible-prewarm-miss-thread',
+        turnId,
+        windowId: '55555555-5555-4555-8555-555555555555'
+      },
+      websocketPrewarm: 'enabled',
+      requestCompression: 'disabled',
+      omitMaxOutputTokens: true,
+      model: 'gpt-5.5',
+      instructions: 'Smoke test instructions',
+      input,
+      maxOutputTokens: 32,
+      token: createCancellationToken(),
+      hasProviderVisibleOutput: () => providerVisibleOutput,
+      onRawResponseItem: () => {
+        rawItemCount += 1;
+        providerVisibleOutput = true;
+      },
+      onTextDelta,
+      onTransportFallback: (event) => fallbackEvents.push(event),
+      onTransportMetrics: (metrics) => transportMetrics.push(metrics)
+    });
+
+    try {
+      await streamResponseText(createOptions(
+        'managed-visible-prewarm-miss-turn',
+        [{ role: 'user', content: 'Do not replay after visible output.' }],
+        () => undefined
+      ));
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(capturedError instanceof Error, true, 'visible prewarm continuation miss surfaces');
+    assertEqual(capturedError.message, 'Responses API could not find previous_response_id.', 'visible prewarm miss uses canonical error');
+    assertEqual(capturedError.cause?.message, 'Invalid `previous_response_id`.', 'visible prewarm miss retains backend cause');
+    assertEqual(frames.length, 2, 'visible prewarm miss sends no immediate replay');
+    assertEqual(connectionCount, 1, 'visible prewarm miss opens no recovery socket');
+    assertEqual(rawItemCount, 1, 'visible prewarm output is reported once');
+    assertEqual(
+      transportMetrics.some((metrics) => metrics.retryReason === 'websocket_prewarm_continuation_miss'),
+      false,
+      'visible prewarm miss reports no retry'
+    );
+
+    providerVisibleOutput = false;
+    const nextDeltas = [];
+    await streamResponseText(createOptions(
+      'managed-visible-prewarm-next-turn',
+      [{ role: 'user', content: 'Start clean after the visible miss.' }],
+      (delta) => nextDeltas.push(delta)
+    ));
+
+    assertEqual(frames.length, 3, 'next request sends one fresh full request');
+    assertEqual(frames[2].generate, undefined, 'next request skips disabled prewarm');
+    assertEqual('previous_response_id' in frames[2], false, 'next request sends no stale prewarm response id');
+    assertEqual(
+      JSON.stringify(frames[2].input),
+      JSON.stringify([{ role: 'user', content: 'Start clean after the visible miss.' }]),
+      'next request sends full input after visible prewarm miss'
+    );
+    assertEqual(nextDeltas.join(''), 'next request succeeded', 'next clean request reports successful output');
+    assertEqual(connectionCount, 2, 'next request creates one fresh socket');
+    assertEqual(httpRequestCount, 0, 'visible prewarm miss and next request never use HTTP');
+    assertEqual(fallbackEvents.length, 0, 'visible prewarm miss reports no HTTP fallback');
   } finally {
     webSocketServer.close();
     server.close();
