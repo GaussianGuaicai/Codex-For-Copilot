@@ -17,6 +17,7 @@ import {
   type CodexProtocolSettings,
   type CodexRequestIdentity
 } from './codexProtocol';
+import type { ResolvedRequestIdentity } from './codexRequestIdentity';
 
 export type CodexResponsesRequest = ResponseCreateParamsStreaming & {
   client_metadata?: Record<string, string>;
@@ -50,6 +51,7 @@ export interface CodexRequestBuilderOptions {
   websocketRequestStartedAt?: number;
   turnStartedAtUnixMs?: number;
   protocolSettings?: CodexProtocolSettings;
+  clientIdentity?: ResolvedRequestIdentity;
 }
 
 export type CodexRequestEnvelopeOptions = Omit<
@@ -88,7 +90,8 @@ export function buildCodexResponsesRequestWithMetrics(
         requestKind: options.requestKind ?? 'turn',
         turnStartedAtUnixMs: options.turnStartedAtUnixMs,
         toolPlan: options.toolPlan,
-        settings: options.protocolSettings
+        settings: options.protocolSettings,
+        clientIdentity: options.clientIdentity
       })
     : undefined;
   const metadata = protocolSnapshot
@@ -190,7 +193,13 @@ export function fingerprintCodexRequestEnvelope(options: CodexRequestEnvelopeOpt
     ...options,
     input: []
   }));
-  return stableSerialize({ requestFingerprint, protocolSettings: options.protocolSettings ?? null });
+  return stableSerialize({
+    requestFingerprint,
+    protocolSettings: options.protocolSettings ?? null,
+    // Preserve the legacy/default extension envelope while still invalidating
+    // continuation reuse when callers switch to a non-default declaration.
+    clientIdentity: options.clientIdentity?.profile === 'extension' ? null : options.clientIdentity ?? null
+  });
 }
 
 export function areCodexRequestsIncrementallyCompatible(

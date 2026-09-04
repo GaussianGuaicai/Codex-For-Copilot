@@ -37,6 +37,7 @@ import { getApiCredentials } from './secrets';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexIdentityManager, inputStartsNewTurn } from './codexIdentity';
 import { getCodexCompatibilityProfile, type CodexRequestIdentity } from './codexProtocol';
+import { resolveRequestIdentity } from './codexRequestIdentity';
 import { resetCodexFetchCapabilities } from './codexFetchAdapter';
 import {
   buildCodexResponsesRequest,
@@ -423,6 +424,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         })
       });
     }
+    const clientIdentity = resolveRequestIdentity({
+      ...config.requestIdentity,
+      extensionVersion: getExtensionVersion(this.context),
+      extensionUserAgent: buildCodexUserAgent(getExtensionVersion(this.context))
+    });
     let requestOptions: CodexRequestEnvelopeOptions = {
       compatibilityEnabled: compatibilityProfile.enabled,
       model: selectedModel.requestModel,
@@ -438,7 +444,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       maxOutputTokens: config.maxOutputTokens,
       textVerbosity: 'medium',
       includeEncryptedReasoning: true,
-      protocolSettings: config.protocol
+      protocolSettings: config.protocol,
+      clientIdentity
     };
     const toolSchemas = toolPlan;
     latency.recordContext({
@@ -897,6 +904,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         extensionVersion: getExtensionVersion(this.context),
         userAgent: buildCodexUserAgent(getExtensionVersion(this.context)),
         protocolSettings: config.protocol,
+        clientIdentity,
         turnStartedAtUnixMs: branchState.turn.startedAt,
         websocketPrewarm: config.websocketPrewarm,
         requestCompression: config.requestCompression,
@@ -1503,6 +1511,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
     this.handleConnectionConfiguration(config, authIdentity);
     const compatibilityProfile = getCodexCompatibilityProfile(config.baseURL, credentials, config.protocol.profile);
+    const clientIdentity = resolveRequestIdentity({
+      ...config.requestIdentity,
+      extensionVersion: getExtensionVersion(this.context),
+      extensionUserAgent: buildCodexUserAgent(getExtensionVersion(this.context))
+    });
     const started = compatibilityProfile.enabled && preconnectCodexResponsesWebSocket({
       baseURL: config.baseURL,
       apiKey: credentials.apiKey,
@@ -1511,7 +1524,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       authIdentity,
       extensionVersion: getExtensionVersion(this.context),
       userAgent: buildCodexUserAgent(getExtensionVersion(this.context)),
-      protocolSettings: config.protocol
+      protocolSettings: config.protocol,
+      clientIdentity
     });
     if (started) {
       this.outputChannel.debug('response WebSocket preconnection started', {

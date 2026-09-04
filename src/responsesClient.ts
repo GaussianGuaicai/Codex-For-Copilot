@@ -42,6 +42,7 @@ import {
   type CodexConnectionScopeBase
 } from './codexConnectionManager';
 import type { CodexWebSocketHandshake, CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
+import { resolveRequestIdentity, type ResolvedRequestIdentity } from './codexRequestIdentity';
 import type { CodexFunctionCallEvent, CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
 import {
   extractWebSearchSources,
@@ -127,6 +128,7 @@ export interface StreamResponseTextOptions {
   extensionVersion?: string;
   userAgent?: string;
   protocolSettings?: CodexProtocolSettings;
+  clientIdentity?: ResolvedRequestIdentity;
   turnStartedAtUnixMs?: number;
   websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
   requestCompression?: RequestCompressionPolicy;
@@ -188,6 +190,7 @@ export interface PreconnectCodexResponsesWebSocketOptions {
   extensionVersion?: string;
   userAgent?: string;
   protocolSettings?: CodexProtocolSettings;
+  clientIdentity?: ResolvedRequestIdentity;
   onConnected?: CodexWebSocketPreconnectionObserver['onConnected'];
   onError?: CodexWebSocketPreconnectionObserver['onError'];
 }
@@ -237,8 +240,11 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
 
   const headers = buildCodexWebSocketPreconnectHeaders({
     credentialsHeaders: options.headers,
-    extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
+    clientIdentity: options.clientIdentity ?? {
+      profile: 'extension', originator: 'codex-for-copilot',
+      userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
+      version: options.extensionVersion ?? '0.0.0', agentName: 'codex-for-copilot', source: 'vscode-language-model-provider'
+    },
     settings: options.protocolSettings
   });
 
@@ -948,6 +954,7 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
     textVerbosity: 'medium',
     includeEncryptedReasoning: true,
     protocolSettings: options.protocolSettings,
+    clientIdentity: options.clientIdentity,
     turnStartedAtUnixMs: options.turnStartedAtUnixMs
   };
 }
@@ -960,7 +967,8 @@ function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'htt
     identity: options.identity,
     turnStartedAtUnixMs: options.turnStartedAtUnixMs,
     toolPlan: options.toolPlan,
-    settings: options.protocolSettings
+    settings: options.protocolSettings,
+    clientIdentity: options.clientIdentity
   });
   const metadata = snapshot.compatibilityTurnMetadata;
   return buildCodexRequestHeaders({
@@ -969,8 +977,11 @@ function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'htt
     turnMetadata: metadata,
     snapshot,
     turnState: options.turnState,
-    extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+    clientIdentity: options.clientIdentity ?? {
+      profile: 'extension', originator: 'codex-for-copilot',
+      userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
+      version: options.extensionVersion ?? '0.0.0', agentName: 'codex-for-copilot', source: 'vscode-language-model-provider'
+    }
   }, transport);
 }
 
@@ -988,6 +999,7 @@ function createResponsesWsOptions(headers?: Record<string, string>, baseURL?: st
 }
 
 export { shouldBypassProxy } from './proxy';
+export { resolveRequestIdentity };
 
 function getManagedConnectionScope(options: StreamResponseTextOptions): CodexConnectionScope | undefined {
   if (!options.compatibilityProfile?.enabled || !options.identity || !options.authIdentity) {

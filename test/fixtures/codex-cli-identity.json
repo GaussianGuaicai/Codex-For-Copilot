@@ -1,0 +1,15 @@
+{
+  "upstreamCommit": "3c837e568c24e4281bba4abdf3bc3c398f3fff13",
+  "codexVersion": "0.153.2",
+  "platform": {
+    "osType": "Linux",
+    "osVersion": "6.8.0-test",
+    "architecture": "x86_64",
+    "terminalUserAgent": "vscode/1.104.0"
+  },
+  "identity": {
+    "profile": "codexCliCompatible",
+    "originator": "codex_cli_rs",
+    "userAgent": "codex_cli_rs/0.153.2 (Linux 6.8.0-test; x86_64) vscode/1.104.0"
+  }
+}

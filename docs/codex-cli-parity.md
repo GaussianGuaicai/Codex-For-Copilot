@@ -3,7 +3,8 @@
 Protocol baseline:
 
 - Codex For Copilot: `2987db25dc15b79cd22dc2ccc08f4c44b7db1351`
-- `openai/codex`: `711a5f8b3a6eb40134146ae9ec22fdcdda5e3170`
+- `openai/codex`: `3c837e568c24e4281bba4abdf3bc3c398f3fff13`
+- Codex CLI compatibility identity package version: `0.153.2`
 - WebSocket beta: `responses_websockets=2026-02-06`
 
 ## Baseline checklist
@@ -52,12 +53,42 @@ projections. The direct turn-metadata header deliberately excludes
   remain protected. `Codex: Show Effective Protocol` writes a redacted view of
   the most recent effective projection to the extension log.
 
-## Protocol profiles and overrides
+## Protocol profiles, client identity, and overrides
+
+Protocol compatibility, client identity, and authentication identity are three
+separate concerns. `protocolProfile` controls whether Codex session, thread,
+turn, Turn State, cache-routing, metadata, and transport semantics are emitted.
+`requestIdentityProfile` controls only what the client declares about itself.
+Neither setting creates credentials or official Codex attestation.
 
 `codexModelProvider.protocolProfile` defaults to `auto`. `auto` and
 `codexCompatible` enable the Codex projection only for the official ChatGPT Codex
 endpoint with Codex credentials; `minimal` disables it. `custom` is an explicit
 opt-in for HTTPS-compatible gateways.
+
+`codexModelProvider.requestIdentityProfile` defaults to `extension`, preserving
+the existing `codex-for-copilot` originator, extension User-Agent/version,
+`agent_name`, and source. `neutral` removes those branding fields without
+removing protocol identity or Turn State. `codexCliCompatible` projects the
+pinned upstream declaration (`originator=codex_cli_rs` and an upstream-shaped
+User-Agent containing Codex `0.153.2`, OS, architecture, and detected terminal),
+but sends no invented `version`, `source`, or `agent_name`. `custom` uses only
+validated configured identity fields. Its values are printable ASCII and are
+bounded to 128 bytes, except User-Agent, which is bounded to 512 bytes.
+
+Useful orthogonal combinations include:
+
+| Protocol + identity | Meaning |
+| --- | --- |
+| `auto + extension` | Current default behavior |
+| `auto + neutral` | Codex protocol without extension branding |
+| `auto + codexCliCompatible` | Codex protocol with the pinned CLI-compatible declaration |
+| `custom + custom` | Explicit HTTPS gateway with a custom declaration |
+| `minimal + neutral` | Minimal Responses protocol without branding |
+
+Contradictory-looking combinations are allowed. For example,
+`minimal + codexCliCompatible` does not turn Codex protocol fields back on; the
+identity selection has no authority over protocol semantics.
 
 Overrides are applied to the canonical snapshot before the body/header
 projections are created. Safe mode accepts extra metadata and non-protected
@@ -66,6 +97,13 @@ fields to be replaced for protocol testing, but it never permits settings to
 replace authentication, account identity, `x-codex-turn-state`, HTTP transport
 invariants, or `Sec-WebSocket-*` fields. Extra client metadata follows upstream's
 16-entry, 64-byte key, and 128-byte string-value limits.
+
+The fixed precedence is: generated protocol semantics, resolved request
+identity, safe protocol overrides, opted-in unsafe protocol overrides, then
+restoration of credentials, Turn State, WebSocket security, and transport
+invariants. Attestation and internal agent-authentication headers are always
+rejected. Thus CLI compatibility is a client declaration only; it does not
+provide Codex attestation or represent an authenticated official Codex CLI.
 
 ## Latency and continuation behavior
 
@@ -110,7 +148,7 @@ Model discovery uses a bounded stale-while-revalidate cache:
 
 For compatible ChatGPT Codex WebSocket sessions, model discovery may schedule one
 45-second idle preconnection per endpoint/account/auth scope. The empty handshake
-contains authentication, account, extension origin, and the WebSocket beta header,
+contains authentication, account, the resolved client identity, and the WebSocket beta header,
 but deliberately omits synthetic installation, session, thread, and turn identity.
 The next formal request claims that socket and supplies its actual identity. A
 `generate:false` prewarm remains an explicit experimental option with a 400ms

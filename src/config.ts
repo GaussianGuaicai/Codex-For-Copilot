@@ -2,6 +2,11 @@ import * as vscode from 'vscode';
 import { normalizeKnownReasoningEffort, type KnownReasoningEffort } from './reasoningEffort';
 import { MAX_NAMESPACE_FUNCTIONS } from './nativeToolSearch/nativeToolPolicy';
 import type { CodexProtocolProfileName, CodexProtocolSettings } from './codexProtocol';
+import {
+  normalizeCustomRequestIdentity,
+  type CodexRequestIdentityProfile,
+  type RequestIdentitySettings
+} from './codexRequestIdentity';
 
 export interface ModelPricing {
   input?: number;
@@ -25,6 +30,7 @@ export interface ProviderConfig {
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
   protocol: CodexProtocolSettings;
+  requestIdentity: RequestIdentitySettings;
   nativeToolSearch: 'auto' | 'enabled' | 'disabled';
   nativeToolSearchMaxToolsPerNamespace: number;
   webSearch: WebSearchConfig;
@@ -57,6 +63,10 @@ export function getProviderConfig(): ProviderConfig {
       omitGeneratedHeaders: normalizeStringList(config.get('omitGeneratedHeaders', [])),
       allowUnsafeProtocolOverrides: config.get('allowUnsafeProtocolOverrides', false)
     },
+    requestIdentity: {
+      profile: normalizeRequestIdentityProfile(config.get('requestIdentityProfile', 'extension')),
+      custom: normalizeCustomRequestIdentity(config.get('customRequestIdentity', {}))
+    },
     nativeToolSearch: normalizeTriState(config.get('nativeToolSearch', 'disabled'), 'disabled'),
     nativeToolSearchMaxToolsPerNamespace: normalizeNativeToolSearchMaxToolsPerNamespace(
       config.get('nativeToolSearchMaxToolsPerNamespace', MAX_NAMESPACE_FUNCTIONS)
@@ -78,6 +88,10 @@ export function getProviderConfig(): ProviderConfig {
     maxOutputTokens: config.get('maxOutputTokens', 8192),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };
+}
+
+function normalizeRequestIdentityProfile(value: unknown): CodexRequestIdentityProfile {
+  return value === 'codexCliCompatible' || value === 'neutral' || value === 'custom' ? value : 'extension';
 }
 
 function normalizeProtocolProfile(value: unknown): CodexProtocolProfileName {

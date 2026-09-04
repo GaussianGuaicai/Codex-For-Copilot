@@ -1,8 +1,13 @@
 import type { ApiCredentials } from './secrets';
 import type { CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
+import {
+  CODEX_CLI_COMPATIBLE_VERSION,
+  CODEX_IDENTITY_UPSTREAM_COMMIT,
+  type ResolvedRequestIdentity
+} from './codexRequestIdentity';
 
 // Protocol baseline: openai/codex@711a5f8b3a6eb40134146ae9ec22fdcdda5e3170.
-export const CODEX_PROTOCOL_UPSTREAM_COMMIT = '711a5f8b3a6eb40134146ae9ec22fdcdda5e3170';
+export const CODEX_PROTOCOL_UPSTREAM_COMMIT = '3c837e568c24e4281bba4abdf3bc3c398f3fff13';
 export const CODEX_RESPONSES_WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
 
 export const CodexHeader = {
@@ -65,11 +70,11 @@ export interface CodexTurnMetadata extends Record<string, unknown> {
   parent_thread_id: string | null;
   parent_turn_id?: string;
   root_turn_id?: string;
-  agent_name: string;
+  agent_name?: string;
   turn_started_at_unix_ms: number;
   tool_namespaces_info?: Record<string, CodexToolNamespaceMetadata>;
   request_kind: 'turn' | 'prewarm';
-  source: 'vscode-language-model-provider';
+  source?: string;
 }
 
 export type CodexProtocolProfileName = 'auto' | 'codexCompatible' | 'minimal' | 'custom';
@@ -90,10 +95,16 @@ export interface CodexProtocolSnapshot {
   clientMetadata: Record<string, string>;
   compatibilityTurnMetadata: string;
   settings: CodexProtocolSettings;
+  clientIdentity: ResolvedRequestIdentity;
 }
 
 export interface CodexEffectiveProtocolDiagnostic {
   profile: CodexProtocolProfileName;
+  requestIdentityProfile: ResolvedRequestIdentity['profile'];
+  identityBaseline: { upstreamCommit: string; compatibleCodexVersion: string };
+  clientIdentity: ResolvedRequestIdentity;
+  compatibilityIdentityOnly: boolean;
+  compatibilityNotice?: string;
   headers?: Record<string, string>;
   clientMetadata: Record<string, string>;
   turnMetadata: Record<string, unknown>;
@@ -108,14 +119,12 @@ export interface CodexDynamicHeaderContext {
   turnMetadata: string;
   snapshot?: CodexProtocolSnapshot;
   turnState?: string;
-  extensionVersion: string;
-  userAgent: string;
+  clientIdentity: ResolvedRequestIdentity;
 }
 
 export interface CodexWebSocketPreconnectHeaderContext {
   credentialsHeaders?: Record<string, string>;
-  extensionVersion: string;
-  userAgent: string;
+  clientIdentity: ResolvedRequestIdentity;
   settings?: CodexProtocolSettings;
 }
 
@@ -156,9 +165,6 @@ export function buildCodexRequestHeaders(
   const snapshot = context.snapshot;
   const headers: Record<string, string> = {
     ...context.credentialsHeaders,
-    'User-Agent': context.userAgent,
-    originator: 'codex-for-copilot',
-    version: context.extensionVersion,
     [CodexHeader.requestId]: context.identity.threadId,
     [CodexHeader.sessionId]: context.identity.sessionId,
     [CodexHeader.threadId]: context.identity.threadId,
@@ -166,6 +172,7 @@ export function buildCodexRequestHeaders(
     [CodexHeader.windowId]: context.identity.windowId,
     [CodexHeader.turnMetadata]: snapshot?.compatibilityTurnMetadata ?? context.turnMetadata
   };
+  applyClientIdentityHeaders(headers, context.clientIdentity);
 
   if (context.identity.parentThreadId) {
     headers[CodexHeader.parentThreadId] = context.identity.parentThreadId;
@@ -205,11 +212,9 @@ export function buildCodexWebSocketPreconnectHeaders(
 ): Record<string, string> {
   const headers = {
     ...context.credentialsHeaders,
-    'User-Agent': context.userAgent,
-    originator: 'codex-for-copilot',
-    version: context.extensionVersion,
     [CodexHeader.beta]: CODEX_RESPONSES_WEBSOCKET_BETA
   };
+  applyClientIdentityHeaders(headers, context.clientIdentity);
   if (context.settings) {
     applyGeneratedHeaderOmissions(headers, context.settings);
     applyHeaderOverrides(headers, context.settings);
@@ -223,7 +228,8 @@ export function createCodexTurnMetadata(
   identity: CodexRequestIdentity,
   requestKind: CodexTurnMetadata['request_kind'] = 'turn',
   turnStartedAtUnixMs = Date.now(),
-  toolPlan?: CodexToolPlan
+  toolPlan?: CodexToolPlan,
+  clientIdentity: ResolvedRequestIdentity = { profile: 'extension', agentName: 'codex-for-copilot', source: 'vscode-language-model-provider' }
 ): CodexTurnMetadata {
   return {
     installation_id: identity.installationId,
@@ -234,11 +240,11 @@ export function createCodexTurnMetadata(
     parent_thread_id: identity.parentThreadId ?? null,
     ...(identity.parentTurnId ? { parent_turn_id: identity.parentTurnId } : {}),
     ...(identity.rootTurnId ? { root_turn_id: identity.rootTurnId } : {}),
-    agent_name: 'codex-for-copilot',
+    ...(clientIdentity.agentName ? { agent_name: clientIdentity.agentName } : {}),
     turn_started_at_unix_ms: turnStartedAtUnixMs,
     ...buildToolNamespacesMetadata(toolPlan),
     request_kind: requestKind,
-    source: 'vscode-language-model-provider'
+    ...(clientIdentity.source ? { source: clientIdentity.source } : {})
   };
 }
 
@@ -248,14 +254,21 @@ export function buildCodexProtocolSnapshot(options: {
   turnStartedAtUnixMs?: number;
   toolPlan?: CodexToolPlan;
   settings?: Partial<CodexProtocolSettings>;
+  clientIdentity?: ResolvedRequestIdentity;
 }): CodexProtocolSnapshot {
   const requestKind = options.requestKind ?? 'turn';
   const settings = normalizeCodexProtocolSettings(options.settings);
+  const clientIdentity = options.clientIdentity ?? {
+    profile: 'extension' as const,
+    agentName: 'codex-for-copilot',
+    source: 'vscode-language-model-provider'
+  };
   const generated = createCodexTurnMetadata(
     options.identity,
     requestKind,
     options.turnStartedAtUnixMs,
-    options.toolPlan
+    options.toolPlan,
+    clientIdentity
   );
   const turnMetadata = mergeMetadataOverrides(generated, settings.turnMetadataOverrides, settings.allowUnsafeProtocolOverrides);
   const fullTurnMetadata = stableSerializeCodexMetadata(turnMetadata);
@@ -281,7 +294,7 @@ export function buildCodexProtocolSnapshot(options: {
     settings.clientMetadataOverrides,
     settings.allowUnsafeProtocolOverrides
   );
-  const snapshot = { identity: options.identity, requestKind, turnMetadata, clientMetadata, compatibilityTurnMetadata, settings };
+  const snapshot = { identity: options.identity, requestKind, turnMetadata, clientMetadata, compatibilityTurnMetadata, settings, clientIdentity };
   const previousHeaders = lastEffectiveProtocolIdentityKey === getSnapshotIdentityKey(snapshot)
     ? lastEffectiveProtocol?.headers
     : undefined;
@@ -331,7 +344,8 @@ const RESERVED_METADATA_KEYS = new Set([
 
 const ALWAYS_PROTECTED_HEADERS = new Set([
   'authorization', 'chatgpt-account-id', 'host', 'content-length', 'connection', 'upgrade',
-  'openai-beta', 'accept', 'content-type', CodexHeader.turnState
+  'openai-beta', 'accept', 'content-type', CodexHeader.turnState, 'x-oai-attestation',
+  'x-openai-subagent', 'x-openai-agent-identity'
 ].map((value) => value.toLowerCase()));
 
 const SAFE_PROTECTED_HEADERS = new Set([
@@ -422,6 +436,12 @@ function applyGeneratedHeaderOmissions(headers: Record<string, string>, settings
   }
 }
 
+function applyClientIdentityHeaders(headers: Record<string, string>, identity: ResolvedRequestIdentity): void {
+  if (identity.userAgent) headers['User-Agent'] = identity.userAgent;
+  if (identity.originator) headers.originator = identity.originator;
+  if (identity.version) headers.version = identity.version;
+}
+
 function applyHeaderOverrides(headers: Record<string, string>, settings: CodexProtocolSettings): void {
   for (const [name, value] of Object.entries(settings.headerOverrides).slice(0, 32)) {
     const normalized = name.toLowerCase();
@@ -466,6 +486,16 @@ function isValidHeaderValue(value: string): boolean {
 function createProtocolDiagnostic(snapshot: CodexProtocolSnapshot): CodexEffectiveProtocolDiagnostic {
   return {
     profile: snapshot.settings.profile,
+    requestIdentityProfile: snapshot.clientIdentity.profile,
+    identityBaseline: {
+      upstreamCommit: CODEX_IDENTITY_UPSTREAM_COMMIT,
+      compatibleCodexVersion: CODEX_CLI_COMPATIBLE_VERSION
+    },
+    clientIdentity: { ...snapshot.clientIdentity },
+    compatibilityIdentityOnly: snapshot.clientIdentity.profile === 'codexCliCompatible',
+    ...(snapshot.clientIdentity.profile === 'codexCliCompatible'
+      ? { compatibilityNotice: 'Compatibility identity only; does not provide Codex attestation.' }
+      : {}),
     clientMetadata: redactMetadataRecord(snapshot.clientMetadata),
     turnMetadata: redactObject(snapshot.turnMetadata) as Record<string, unknown>
   };
