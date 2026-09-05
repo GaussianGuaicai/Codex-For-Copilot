@@ -193,13 +193,16 @@ export function fingerprintCodexRequestEnvelope(options: CodexRequestEnvelopeOpt
     ...options,
     input: []
   }));
-  return stableSerialize({
+  const envelope = {
     requestFingerprint,
     protocolSettings: options.protocolSettings ?? null,
-    // Preserve the legacy/default extension envelope while still invalidating
-    // continuation reuse when callers switch to a non-default declaration.
-    clientIdentity: options.clientIdentity?.profile === 'extension' ? null : options.clientIdentity ?? null
-  });
+    // Omit (rather than serialize as null) to preserve the byte-for-byte legacy
+    // envelope used by already-recorded default-extension continuation markers.
+    ...(options.clientIdentity && options.clientIdentity.profile !== 'extension'
+      ? { clientIdentity: options.clientIdentity }
+      : {})
+  };
+  return stableSerialize(envelope);
 }
 
 export function areCodexRequestsIncrementallyCompatible(

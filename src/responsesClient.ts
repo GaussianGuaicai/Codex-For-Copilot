@@ -25,6 +25,7 @@ import {
   buildCodexWebSocketPreconnectHeaders,
   buildCodexRequestHeaders,
   buildCodexProtocolSnapshot,
+  applyClientIdentityHeaders,
   type CodexCompatibilityProfile,
   type CodexProtocolSettings,
   type CodexRequestIdentity
@@ -240,11 +241,7 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
 
   const headers = buildCodexWebSocketPreconnectHeaders({
     credentialsHeaders: options.headers,
-    clientIdentity: options.clientIdentity ?? {
-      profile: 'extension', originator: 'codex-for-copilot',
-      userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
-      version: options.extensionVersion ?? '0.0.0', agentName: 'codex-for-copilot', source: 'vscode-language-model-provider'
-    },
+    clientIdentity: resolveClientIdentity(options),
     settings: options.protocolSettings
   });
 
@@ -961,7 +958,9 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
 
 function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'http' | 'websocket'): Record<string, string> {
   if (!options.compatibilityProfile?.enabled || !options.identity) {
-    return { ...options.headers };
+    const headers = { ...options.headers };
+    applyClientIdentityHeaders(headers, resolveClientIdentity(options));
+    return headers;
   }
   const snapshot = buildCodexProtocolSnapshot({
     identity: options.identity,
@@ -977,12 +976,17 @@ function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'htt
     turnMetadata: metadata,
     snapshot,
     turnState: options.turnState,
-    clientIdentity: options.clientIdentity ?? {
-      profile: 'extension', originator: 'codex-for-copilot',
-      userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
-      version: options.extensionVersion ?? '0.0.0', agentName: 'codex-for-copilot', source: 'vscode-language-model-provider'
-    }
+    clientIdentity: resolveClientIdentity(options)
   }, transport);
+}
+
+function resolveClientIdentity(options: Pick<StreamResponseTextOptions, 'clientIdentity' | 'extensionVersion' | 'userAgent' | 'headers'>): ResolvedRequestIdentity {
+  return options.clientIdentity ?? resolveRequestIdentity({
+    extensionVersion: options.extensionVersion ?? '0.0.0',
+    extensionUserAgent: options.userAgent
+      ?? getHeader(options.headers, 'User-Agent')
+      ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+  });
 }
 
 function getHeader(headers: Record<string, string> | undefined, name: string): string | undefined {

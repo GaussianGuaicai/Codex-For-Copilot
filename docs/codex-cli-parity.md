@@ -3,8 +3,8 @@
 Protocol baseline:
 
 - Codex For Copilot: `2987db25dc15b79cd22dc2ccc08f4c44b7db1351`
-- `openai/codex`: `3c837e568c24e4281bba4abdf3bc3c398f3fff13`
-- Codex CLI compatibility identity package version: `0.153.2`
+- Protocol `openai/codex`: `711a5f8b3a6eb40134146ae9ec22fdcdda5e3170`
+- Identity `openai/codex` release commit: `657a993cbee87acf52d14b758ce49dbd46d1b8eb` (`rust-v0.153.2`)
 - WebSocket beta: `responses_websockets=2026-02-06`
 
 ## Baseline checklist
@@ -72,7 +72,8 @@ the existing `codex-for-copilot` originator, extension User-Agent/version,
 removing protocol identity or Turn State. `codexCliCompatible` projects the
 pinned upstream declaration (`originator=codex_cli_rs` and an upstream-shaped
 User-Agent containing Codex `0.153.2`, OS, architecture, and detected terminal),
-but sends no invented `version`, `source`, or `agent_name`. `custom` uses only
+and the root CLI agent path (`agent_name=/root`), but sends no invented `version`
+or `source`. `custom` uses only
 validated configured identity fields. Its values are printable ASCII and are
 bounded to 128 bytes, except User-Agent, which is bounded to 512 bytes.
 

@@ -9,6 +9,7 @@ try {
     buildCodexResponsesRequest,
     buildCodexResponsesRequestWithMetrics,
     buildCodexResponsesWebSocketEvent,
+    fingerprintCodexRequestEnvelope,
     resetCodexToolSchemaCache
   } = loaded.exports;
   const identity = {
@@ -31,6 +32,13 @@ try {
     textVerbosity: 'medium',
     turnStartedAtUnixMs: 1_787_000_000_000
   };
+  const legacyEnvelope = fingerprintCodexRequestEnvelope(base);
+  const defaultIdentityEnvelope = fingerprintCodexRequestEnvelope({
+    ...base,
+    clientIdentity: { profile: 'extension', originator: 'codex-for-copilot', userAgent: 'codex-for-copilot/1.8.1' }
+  });
+  assertEqual(defaultIdentityEnvelope, legacyEnvelope, 'default extension identity preserves legacy envelope fingerprint');
+  assertEqual(fingerprintCodexRequestEnvelope({ ...base, clientIdentity: { profile: 'neutral' } }) === legacyEnvelope, false, 'effective identity change invalidates envelope fingerprint');
   const request = buildCodexResponsesRequest(base);
   const compatibilityDefaultReasoningRequest = buildCodexResponsesRequest({
     ...base,

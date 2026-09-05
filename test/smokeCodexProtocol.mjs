@@ -9,11 +9,12 @@ try {
     buildCodexProtocolSnapshot,
     buildCodexRequestHeaders,
     buildCodexWebSocketPreconnectHeaders,
+    applyClientIdentityHeaders,
     createCodexTurnMetadata,
     getCodexCompatibilityProfile,
     stableSerializeCodexMetadata
   } = loaded.exports;
-  const { resolveRequestIdentity, normalizeCustomRequestIdentity, CODEX_IDENTITY_UPSTREAM_COMMIT, CODEX_CLI_COMPATIBLE_VERSION } = loadedIdentity.exports;
+  const { resolveRequestIdentity, normalizeCustomRequestIdentity, detectTerminalUserAgent, CODEX_IDENTITY_UPSTREAM_COMMIT, CODEX_CLI_COMPATIBLE_VERSION } = loadedIdentity.exports;
   const fixture = JSON.parse(await readFile(new URL('./fixtures/codex-cli-identity.json', import.meta.url), 'utf8'));
   const identity = {
     installationId: '11111111-1111-4111-8111-111111111111',
@@ -68,6 +69,13 @@ try {
   assertEqual(JSON.stringify(cliIdentity), JSON.stringify(fixture.identity), 'pinned CLI identity fixture');
   assertEqual(CODEX_IDENTITY_UPSTREAM_COMMIT, fixture.upstreamCommit, 'identity upstream commit');
   assertEqual(CODEX_CLI_COMPATIBLE_VERSION, fixture.codexVersion, 'compatible Codex version');
+  assertEqual(cliIdentity.agentName, '/root', 'CLI root turn agent path');
+  assertEqual(cliIdentity.source, undefined, 'CLI root turn does not invent a source');
+  assertEqual(detectTerminalUserAgent({ WT_SESSION: '1' }), 'WindowsTerminal', 'Windows Terminal probe');
+  assertEqual(detectTerminalUserAgent({ ITERM_SESSION_ID: '1' }), 'iTerm.app', 'macOS iTerm probe');
+  assertEqual(detectTerminalUserAgent({ WEZTERM_VERSION: '20240203' }), 'WezTerm/20240203', 'Linux WezTerm probe');
+  assertEqual(detectTerminalUserAgent({ KITTY_WINDOW_ID: '1' }), 'kitty', 'kitty probe');
+  assertEqual(detectTerminalUserAgent({ TERM_PROGRAM: 'tmux', TERM_PROGRAM_VERSION: '3.4', TERM: 'screen' }), 'tmux/3.4', 'tmux declaration is normalized');
   for (const profile of ['extension', 'codexCliCompatible', 'neutral', 'custom']) {
     const clientIdentity = resolveRequestIdentity({ profile, extensionVersion: '1.2.3', extensionUserAgent: 'codex-for-copilot/1.2.3 (test)', custom: { originator: 'third-party', userAgent: 'third-party/4', version: '4', agentName: 'third-party', source: 'gateway' }, platform: fixture.platform });
     const snapshot = buildCodexProtocolSnapshot({ identity, turnStartedAtUnixMs, clientIdentity });
@@ -82,6 +90,14 @@ try {
       assertEqual(JSON.stringify({ http, metadata: snapshot.turnMetadata }).includes('codex-for-copilot'), false, 'neutral has no extension branding');
       assertEqual(http['session-id'], identity.sessionId, 'neutral retains protocol identity');
     }
+  }
+  for (const profile of ['extension', 'codexCliCompatible', 'neutral', 'custom']) {
+    const clientIdentity = resolveRequestIdentity({ profile, extensionVersion: '1.2.3', extensionUserAgent: 'codex-for-copilot/1.2.3', custom: { originator: 'custom-origin', userAgent: 'custom/1' }, platform: fixture.platform });
+    const minimalHeaders = { Authorization: 'Bearer real' };
+    applyClientIdentityHeaders(minimalHeaders, clientIdentity);
+    assertEqual(minimalHeaders.originator, clientIdentity.originator, `minimal + ${profile} originator`);
+    assertEqual(minimalHeaders['User-Agent'], clientIdentity.userAgent, `minimal + ${profile} User-Agent`);
+    assertEqual(minimalHeaders['session-id'], undefined, `minimal + ${profile} omits protocol session`);
   }
   const malformed = normalizeCustomRequestIdentity({ originator: 'bad\r\nvalue', userAgent: '\u0000bad', source: 'ok', version: 'x'.repeat(129) });
   assertEqual(JSON.stringify(malformed), JSON.stringify({ source: 'ok' }), 'malformed custom identity is removed');

@@ -1,6 +1,7 @@
 import os from 'node:os';
+import { readFileSync } from 'node:fs';
 
-export const CODEX_IDENTITY_UPSTREAM_COMMIT = '3c837e568c24e4281bba4abdf3bc3c398f3fff13';
+export const CODEX_IDENTITY_UPSTREAM_COMMIT = '657a993cbee87acf52d14b758ce49dbd46d1b8eb';
 export const CODEX_CLI_COMPATIBLE_VERSION = '0.153.2';
 
 export type CodexRequestIdentityProfile = 'extension' | 'codexCliCompatible' | 'neutral' | 'custom';
@@ -49,7 +50,8 @@ export function resolveRequestIdentity(options: ResolveRequestIdentityOptions): 
     return {
       profile,
       originator: 'codex_cli_rs',
-      userAgent: `codex_cli_rs/${CODEX_CLI_COMPATIBLE_VERSION} (${platform.osType} ${platform.osVersion}; ${platform.architecture}) ${platform.terminalUserAgent}`
+      userAgent: `codex_cli_rs/${CODEX_CLI_COMPATIBLE_VERSION} (${platform.osType} ${platform.osVersion}; ${platform.architecture}) ${platform.terminalUserAgent}`,
+      agentName: '/root'
     };
   }
   return {
@@ -84,15 +86,57 @@ function normalizeIdentityValue(value: unknown, maxBytes: number): string | unde
 }
 
 function currentPlatformIdentity(): ResolveRequestIdentityOptions['platform'] & {} {
-  const terminal = process.env.TERM_PROGRAM?.trim();
-  const terminalVersion = process.env.TERM_PROGRAM_VERSION?.trim();
-  const terminalUserAgent = terminal
-    ? `${terminal}${terminalVersion ? `/${terminalVersion}` : ''}`
-    : process.env.TERM?.trim() || 'unknown';
+  const platform = upstreamPlatform();
   return {
-    osType: os.type(),
-    osVersion: os.release(),
-    architecture: os.arch(),
-    terminalUserAgent: terminalUserAgent.replace(/[^\x21-\x7e]/g, '_')
+    ...platform,
+    architecture: normalizeArchitecture(os.arch()),
+    terminalUserAgent: detectTerminalUserAgent(process.env)
   };
+}
+
+/** Pinned subset of codex-terminal-detection's ordered probes and token normalization. */
+export function detectTerminalUserAgent(environment: NodeJS.ProcessEnv): string {
+  const value = (name: string) => environment[name]?.trim() || undefined;
+  const termProgram = value('TERM_PROGRAM');
+  if (termProgram) {
+    return sanitizeToken(`${termProgram}${value('TERM_PROGRAM_VERSION') ? `/${value('TERM_PROGRAM_VERSION')}` : ''}`);
+  }
+  const detected: [boolean, string, string?][] = [
+    [Boolean(value('WEZTERM_VERSION')), 'WezTerm', value('WEZTERM_VERSION')],
+    [Boolean(value('ITERM_SESSION_ID') || value('ITERM_PROFILE') || value('ITERM_PROFILE_NAME')), 'iTerm.app'],
+    [Boolean(value('TERM_SESSION_ID')), 'Apple_Terminal'],
+    [Boolean(value('KITTY_WINDOW_ID') || value('TERM')?.includes('kitty')), 'kitty'],
+    [Boolean(value('ALACRITTY_SOCKET') || value('TERM') === 'alacritty'), 'Alacritty'],
+    [Boolean(value('KONSOLE_VERSION')), 'Konsole', value('KONSOLE_VERSION')],
+    [Boolean(value('GNOME_TERMINAL_SCREEN')), 'gnome-terminal'],
+    [Boolean(value('VTE_VERSION')), 'VTE', value('VTE_VERSION')],
+    [Boolean(value('WT_SESSION')), 'WindowsTerminal']
+  ];
+  const match = detected.find(([present]) => present);
+  if (match) return sanitizeToken(`${match[1]}${match[2] ? `/${match[2]}` : ''}`);
+  return sanitizeToken(value('TERM') ?? 'unknown');
+}
+
+function sanitizeToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9._/-]/g, '_');
+}
+
+function normalizeArchitecture(value: string): string {
+  return value === 'x64' ? 'x86_64' : value === 'arm64' ? 'aarch64' : value;
+}
+
+function upstreamPlatform(): Pick<NonNullable<ResolveRequestIdentityOptions['platform']>, 'osType' | 'osVersion'> {
+  if (process.platform === 'win32') return { osType: 'Windows', osVersion: os.release() };
+  if (process.platform === 'darwin') return { osType: 'Mac OS', osVersion: os.release() };
+  if (process.platform !== 'linux') return { osType: os.type(), osVersion: os.release() };
+  try {
+    const fields = Object.fromEntries(readFileSync('/etc/os-release', 'utf8').split('\n').flatMap((line) => {
+      const separator = line.indexOf('=');
+      if (separator < 1) return [];
+      return [[line.slice(0, separator), line.slice(separator + 1).replace(/^"|"$/g, '')]];
+    }));
+    return { osType: fields.NAME || 'Linux', osVersion: fields.VERSION_ID || os.release() };
+  } catch {
+    return { osType: 'Linux', osVersion: os.release() };
+  }
 }

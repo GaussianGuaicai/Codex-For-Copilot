@@ -7,7 +7,7 @@ import {
 } from './codexRequestIdentity';
 
 // Protocol baseline: openai/codex@711a5f8b3a6eb40134146ae9ec22fdcdda5e3170.
-export const CODEX_PROTOCOL_UPSTREAM_COMMIT = '3c837e568c24e4281bba4abdf3bc3c398f3fff13';
+export const CODEX_PROTOCOL_UPSTREAM_COMMIT = '711a5f8b3a6eb40134146ae9ec22fdcdda5e3170';
 export const CODEX_RESPONSES_WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
 
 export const CodexHeader = {
@@ -436,7 +436,7 @@ function applyGeneratedHeaderOmissions(headers: Record<string, string>, settings
   }
 }
 
-function applyClientIdentityHeaders(headers: Record<string, string>, identity: ResolvedRequestIdentity): void {
+export function applyClientIdentityHeaders(headers: Record<string, string>, identity: ResolvedRequestIdentity): void {
   if (identity.userAgent) headers['User-Agent'] = identity.userAgent;
   if (identity.originator) headers.originator = identity.originator;
   if (identity.version) headers.version = identity.version;
