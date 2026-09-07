@@ -33,6 +33,8 @@ try {
     turnStartedAtUnixMs: 1_787_000_000_000
   };
   const legacyEnvelope = fingerprintCodexRequestEnvelope(base);
+  const expectedLegacyEnvelope = '{"protocolSettings":null,"requestFingerprint":"{\\"include\\":[\\"reasoning.encrypted_content\\"],\\"instructions\\":\\"instructions\\",\\"model\\":\\"gpt-test\\",\\"parallel_tool_calls\\":true,\\"reasoning\\":{\\"effort\\":\\"high\\",\\"summary\\":\\"auto\\"},\\"store\\":false,\\"stream\\":true,\\"text\\":{\\"verbosity\\":\\"medium\\"},\\"tool_choice\\":\\"auto\\",\\"tools\\":[{\\"description\\":\\"Read\\",\\"name\\":\\"read\\",\\"parameters\\":{\\"type\\":\\"object\\"},\\"strict\\":false,\\"type\\":\\"function\\"}]}"}';
+  assertEqual(legacyEnvelope, expectedLegacyEnvelope, 'legacy envelope fingerprint remains byte-for-byte stable');
   const defaultIdentityEnvelope = fingerprintCodexRequestEnvelope({
     ...base,
     clientIdentity: { profile: 'extension', originator: 'codex-for-copilot', userAgent: 'codex-for-copilot/1.8.1' }
