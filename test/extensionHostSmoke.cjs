@@ -60,7 +60,7 @@ async function run() {
 
     if (request.method === 'GET' && request.url === '/backend-api/wham/usage') {
       assert.strictEqual(request.headers.authorization, 'Bearer extension-host-smoke-token');
-      assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot Codex for Copilot');
+      assert.strictEqual(request.headers['user-agent'], expectedExtensionUserAgent());
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end('{}');
       return;
@@ -85,7 +85,9 @@ async function run() {
     assert.strictEqual(request.method, 'POST');
     assert.strictEqual(request.url, '/backend-api/codex/responses');
     assert(request.headers.authorization?.startsWith('Bearer '), 'Missing bearer authorization header.');
-    assert.strictEqual(request.headers['user-agent'], 'local.codex-for-copilot Codex for Copilot');
+    assert.strictEqual(request.headers['user-agent'], expectedExtensionUserAgent());
+    assert.strictEqual(request.headers.originator, 'codex-for-copilot');
+    assert.strictEqual(request.headers.version, manifest.version);
     assert.strictEqual(body.instructions, 'Extension host smoke instructions');
     assert.strictEqual(body.stream, true);
     assert.strictEqual(body.store, false);
@@ -171,6 +173,7 @@ async function run() {
   let originalInstructions;
   let originalTransport;
   let originalIncludeHiddenModels;
+  let originalRequestIdentityProfile;
   let configCleanupFailure;
   let serverCleanupFailure;
   try {
@@ -181,10 +184,12 @@ async function run() {
     originalInstructions = config.inspect('instructions')?.globalValue;
     originalTransport = config.inspect('transport')?.globalValue;
     originalIncludeHiddenModels = config.inspect('includeHiddenModels')?.globalValue;
+    originalRequestIdentityProfile = config.inspect('requestIdentityProfile')?.globalValue;
     await config.update('baseURL', `http://127.0.0.1:${address.port}/backend-api/codex/responses`, vscode.ConfigurationTarget.Global);
     await config.update('instructions', 'Extension host smoke instructions', vscode.ConfigurationTarget.Global);
     await config.update('transport', 'http', vscode.ConfigurationTarget.Global);
     await config.update('includeHiddenModels', true, vscode.ConfigurationTarget.Global);
+    await config.update('requestIdentityProfile', 'extension', vscode.ConfigurationTarget.Global);
     assert.strictEqual(config.get('includeHiddenModels'), true, 'Hidden-model opt-in was not effective before activation.');
 
     await extension.activate();
@@ -263,6 +268,7 @@ async function run() {
         await config.update('instructions', originalInstructions, vscode.ConfigurationTarget.Global);
         await config.update('transport', originalTransport, vscode.ConfigurationTarget.Global);
         await config.update('includeHiddenModels', originalIncludeHiddenModels, vscode.ConfigurationTarget.Global);
+        await config.update('requestIdentityProfile', originalRequestIdentityProfile, vscode.ConfigurationTarget.Global);
       }
     } catch (error) {
       configCleanupFailure = error;
@@ -301,6 +307,10 @@ function writeTextResponse(response, text, responseId) {
   response.write(`data: ${JSON.stringify({ type: 'response.completed', response: { id: responseId, object: 'response', status: 'completed' } })}\n\n`);
   response.write('data: [DONE]\n\n');
   response.end();
+}
+
+function expectedExtensionUserAgent() {
+  return `codex-for-copilot/${manifest.version} (${process.platform}; ${process.arch}; vscode/${vscode.version})`;
 }
 
 function listen(server) {
