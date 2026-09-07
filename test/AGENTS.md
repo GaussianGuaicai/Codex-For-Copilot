@@ -39,6 +39,7 @@
 - Reasoning-option tests must prove recognized `modelOptions.thinking` shapes override the model's default effort, and request diagnostics must identify tool-output full replay separately from ordinary prior-response reuse.
 - A model-generated tool-loop test must verify the first tool call is emitted once and the following tool result is replayed with its matching call.
 - The Extension Development Host smoke must exercise `vscode.lm.selectChatModels()` and a complete tool-call/result loop, so the provider-facing VS Code API boundary is covered separately from direct provider tests.
+- The Extension Development Host smoke pins the `extension` request-identity profile and asserts its generated `User-Agent`, `originator`, and `version` headers; restore that setting after each run.
 - Repeated reasoning deltas for one Responses item must retain one thinking-part ID, and reasoning that arrives after visible text must not interrupt the text sequence.
 - Complete function calls must be reported from `response.function_call_arguments.done` before later text, using the non-empty `output_item.added` name when the early event omits it; `response.output_item.done` must not duplicate the tool call.
 - Malformed historical function calls and their matched outputs must be excluded, while valid standalone tool outputs remain available for continuation.

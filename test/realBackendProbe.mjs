@@ -15,6 +15,9 @@ const requestedTransport = process.env.CODEX_TEST_TRANSPORT === 'websocket'
   : process.env.CODEX_TEST_TRANSPORT === 'auto'
     ? 'auto'
     : 'http';
+const requestedIdentityProfile = ['extension', 'codexCliCompatible', 'neutral', 'custom'].includes(process.env.CODEX_TEST_REQUEST_IDENTITY)
+  ? process.env.CODEX_TEST_REQUEST_IDENTITY
+  : 'extension';
 const runContinuationProbe = process.env.CODEX_TEST_CONTINUATION === '1';
 const runPreconnectionProbe = process.env.CODEX_TEST_PRECONNECT === '1';
 const shouldRunToolContinuationProbe = process.env.CODEX_TEST_TOOL_CONTINUATION === '1';
@@ -100,6 +103,7 @@ try {
     disposeReusableResponsesWebSockets,
     isResponsesContinuationMissError,
     preconnectCodexResponsesWebSocket,
+    resolveRequestIdentity,
     streamResponseText
   } = require(responsesBundlePath);
   const auth = JSON.parse(await readFile(process.env.CODEX_AUTH_FILE ?? join(homedir(), '.codex', 'auth.json'), 'utf8'));
@@ -163,6 +167,12 @@ try {
     turnId: randomUUID(),
     windowId: randomUUID()
   };
+  const clientIdentity = resolveRequestIdentity({
+    profile: requestedIdentityProfile,
+    custom: requestedIdentityProfile === 'custom' ? { originator: 'codex-real-backend-probe', userAgent: 'codex-real-backend-probe/1', agentName: 'codex-real-backend-probe', source: 'real-backend-probe' } : undefined,
+    extensionVersion: 'real-backend-probe',
+    extensionUserAgent: 'codex-for-copilot/real-backend-probe'
+  });
   let preconnection = null;
   if (runPreconnectionProbe) {
     if (requestedTransport === 'http') {
@@ -186,6 +196,7 @@ try {
       authIdentity: `real-probe:${auth.tokens.account_id ?? 'default'}`,
       extensionVersion: 'real-backend-probe',
       userAgent: 'codex-for-copilot/real-backend-probe',
+      clientIdentity,
       onConnected: resolveHandshake,
       onError: rejectHandshake
     });
@@ -206,6 +217,7 @@ try {
     authIdentity: `real-probe:${auth.tokens.account_id ?? 'default'}`,
     extensionVersion: 'real-backend-probe',
     userAgent: 'codex-for-copilot/real-backend-probe',
+    clientIdentity,
     websocketPrewarm: requestedPrewarm,
     requestCompression: process.env.CODEX_TEST_COMPRESSION === '1' ? 'enabled' : 'auto',
     store: requestStore,
@@ -270,6 +282,7 @@ try {
       authIdentity: `real-probe:${auth.tokens.account_id ?? 'default'}`,
       extensionVersion: 'real-backend-probe',
       userAgent: 'codex-for-copilot/real-backend-probe',
+      clientIdentity,
       websocketPrewarm: requestedPrewarm,
       requestCompression: process.env.CODEX_TEST_COMPRESSION === '1' ? 'enabled' : 'auto',
       store: requestStore,

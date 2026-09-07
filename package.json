@@ -313,6 +313,36 @@
             "advanced"
           ]
         },
+        "codexModelProvider.requestIdentityProfile": {
+          "type": "string",
+          "default": "extension",
+          "enum": [
+            "extension",
+            "codexCliCompatible",
+            "neutral",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Identify requests as Codex For Copilot.",
+            "Use a client identity compatible with the pinned Codex CLI protocol baseline.",
+            "Do not add Codex For Copilot branding while preserving required Codex protocol fields.",
+            "Use the configured custom client identity."
+          ],
+          "description": "Controls the client-declared identity independently of Codex protocol compatibility."
+        },
+        "codexModelProvider.customRequestIdentity": {
+          "type": "object",
+          "default": {},
+          "properties": {
+            "originator": { "type": "string", "maxLength": 128 },
+            "userAgent": { "type": "string", "maxLength": 512 },
+            "version": { "type": "string", "maxLength": 128 },
+            "agentName": { "type": "string", "maxLength": 128 },
+            "source": { "type": "string", "maxLength": 128 }
+          },
+          "additionalProperties": false,
+          "description": "Validated client identity fields used only by the custom request identity profile."
+        },
         "codexModelProvider.headerOverrides": {
           "type": "object",
           "default": {},

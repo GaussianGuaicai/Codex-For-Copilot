@@ -25,6 +25,7 @@ import {
   buildCodexWebSocketPreconnectHeaders,
   buildCodexRequestHeaders,
   buildCodexProtocolSnapshot,
+  applyClientIdentityHeaders,
   type CodexCompatibilityProfile,
   type CodexProtocolSettings,
   type CodexRequestIdentity
@@ -42,6 +43,7 @@ import {
   type CodexConnectionScopeBase
 } from './codexConnectionManager';
 import type { CodexWebSocketHandshake, CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
+import { resolveRequestIdentity, type ResolvedRequestIdentity } from './codexRequestIdentity';
 import type { CodexFunctionCallEvent, CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
 import {
   extractWebSearchSources,
@@ -127,6 +129,7 @@ export interface StreamResponseTextOptions {
   extensionVersion?: string;
   userAgent?: string;
   protocolSettings?: CodexProtocolSettings;
+  clientIdentity?: ResolvedRequestIdentity;
   turnStartedAtUnixMs?: number;
   websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
   requestCompression?: RequestCompressionPolicy;
@@ -188,6 +191,7 @@ export interface PreconnectCodexResponsesWebSocketOptions {
   extensionVersion?: string;
   userAgent?: string;
   protocolSettings?: CodexProtocolSettings;
+  clientIdentity?: ResolvedRequestIdentity;
   onConnected?: CodexWebSocketPreconnectionObserver['onConnected'];
   onError?: CodexWebSocketPreconnectionObserver['onError'];
 }
@@ -237,8 +241,7 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
 
   const headers = buildCodexWebSocketPreconnectHeaders({
     credentialsHeaders: options.headers,
-    extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
+    clientIdentity: resolveClientIdentity(options),
     settings: options.protocolSettings
   });
 
@@ -948,19 +951,23 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
     textVerbosity: 'medium',
     includeEncryptedReasoning: true,
     protocolSettings: options.protocolSettings,
+    clientIdentity: options.clientIdentity,
     turnStartedAtUnixMs: options.turnStartedAtUnixMs
   };
 }
 
 function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'http' | 'websocket'): Record<string, string> {
   if (!options.compatibilityProfile?.enabled || !options.identity) {
-    return { ...options.headers };
+    const headers = { ...options.headers };
+    applyClientIdentityHeaders(headers, resolveClientIdentity(options));
+    return headers;
   }
   const snapshot = buildCodexProtocolSnapshot({
     identity: options.identity,
     turnStartedAtUnixMs: options.turnStartedAtUnixMs,
     toolPlan: options.toolPlan,
-    settings: options.protocolSettings
+    settings: options.protocolSettings,
+    clientIdentity: options.clientIdentity
   });
   const metadata = snapshot.compatibilityTurnMetadata;
   return buildCodexRequestHeaders({
@@ -969,9 +976,17 @@ function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'htt
     turnMetadata: metadata,
     snapshot,
     turnState: options.turnState,
-    extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+    clientIdentity: resolveClientIdentity(options)
   }, transport);
+}
+
+function resolveClientIdentity(options: Pick<StreamResponseTextOptions, 'clientIdentity' | 'extensionVersion' | 'userAgent' | 'headers'>): ResolvedRequestIdentity {
+  return options.clientIdentity ?? resolveRequestIdentity({
+    extensionVersion: options.extensionVersion ?? '0.0.0',
+    extensionUserAgent: options.userAgent
+      ?? getHeader(options.headers, 'User-Agent')
+      ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+  });
 }
 
 function getHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
@@ -988,6 +1003,7 @@ function createResponsesWsOptions(headers?: Record<string, string>, baseURL?: st
 }
 
 export { shouldBypassProxy } from './proxy';
+export { resolveRequestIdentity };
 
 function getManagedConnectionScope(options: StreamResponseTextOptions): CodexConnectionScope | undefined {
   if (!options.compatibilityProfile?.enabled || !options.identity || !options.authIdentity) {
