@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -334,11 +334,26 @@
           "type": "object",
           "default": {},
           "properties": {
-            "originator": { "type": "string", "maxLength": 128 },
-            "userAgent": { "type": "string", "maxLength": 512 },
-            "version": { "type": "string", "maxLength": 128 },
-            "agentName": { "type": "string", "maxLength": 128 },
-            "source": { "type": "string", "maxLength": 128 }
+            "originator": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "userAgent": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "version": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "agentName": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "source": {
+              "type": "string",
+              "maxLength": 128
+            }
           },
           "additionalProperties": false,
           "description": "Validated client identity fields used only by the custom request identity profile."

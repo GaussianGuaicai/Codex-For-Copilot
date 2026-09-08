@@ -2,6 +2,18 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.8.1...v1.9.0) (2026-09-08)
+
+
+### Features
+
+* **protocol:** add configurable Codex request identity profiles ([#90](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/90)) ([f08feaf](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/f08feaf5ab238d3e031e1fbf7e1dbc82f9f68562))
+
+
+### Bug Fixes
+
+* harden Responses retries and WebSocket continuations ([#89](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/89)) ([a35090f](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/a35090ff27aba39ab4cdb9720635cbad70c90ca8))
+
 ## [1.8.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.8.0...v1.8.1) (2026-08-30)
 
 
