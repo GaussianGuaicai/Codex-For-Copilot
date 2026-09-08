@@ -51,4 +51,5 @@
 - Fork diagnostics must use redacted item summaries only. Provider-validated ordinary appends and eligible WebSocket tool-result appends may retain their explicit `previous_response_id`; all other tool-result requests must omit it.
 - Request diagnostics must distinguish ordinary `previous_response_id` reuse, WebSocket tool-result incremental continuation, and tool-result full replay. Thinking Effort may arrive through `modelOptions`; support recognized reasoning and thinking shapes while logging only the resolved enum and its source.
 - Account usage must normalize server-provided Credit budgets from root `spend_control.individual_limit` and rate-limit buckets, plus balances and rate-limit windows, before display selection. Do not infer account usage from plan names or label a Credit budget with an unsupported billing period.
+- Account-usage fetches must apply the configured request identity headers after credential headers, matching model discovery and Responses requests.
 - A complete workspace Credit budget is the compact account-usage display; all remaining rate limits and Credit budgets must remain visible in the details tooltip.

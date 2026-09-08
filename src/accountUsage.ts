@@ -1,6 +1,8 @@
 import { normalizeBaseURL } from './responsesClient';
 import type { ApiCredentials } from './secrets';
 import { codexFetch } from './auth/codexAuthRequest';
+import { applyClientIdentityHeaders } from './codexProtocol';
+import type { ResolvedRequestIdentity } from './codexRequestIdentity';
 import { proxyAwareFetch } from './proxyFetch';
 
 const FIVE_HOUR_WINDOW_MINUTES = 300;
@@ -54,6 +56,7 @@ export async function fetchCodexAccountUsage(options: {
   credentials: ApiCredentials;
   selectedModel: string;
   signal?: AbortSignal;
+  clientIdentity?: ResolvedRequestIdentity;
 }): Promise<CodexAccountUsageSnapshot> {
   if (options.credentials.kind !== 'codexAccessToken') {
     throw new Error('Codex account usage can only be queried with ~/.codex/auth.json access token credentials.');
@@ -61,12 +64,16 @@ export async function fetchCodexAccountUsage(options: {
 
   const errors: string[] = [];
   for (const usageURL of getCodexAccountUsageURLs(options.baseURL)) {
+    const headers = {
+      Accept: 'application/json',
+      ...options.credentials.headers
+    };
+    if (options.clientIdentity) {
+      applyClientIdentityHeaders(headers, options.clientIdentity);
+    }
     const requestInit = {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        ...options.credentials.headers
-      },
+      headers,
       signal: options.signal
     };
     const response = options.credentials.authManager
