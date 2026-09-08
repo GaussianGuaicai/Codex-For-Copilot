@@ -41,6 +41,7 @@
 - Preserve each Responses reasoning item's identity when creating VS Code thinking parts. Once visible text starts, do not insert later reasoning parts into that text stream.
 - Latency traces may include timestamps, counts, transport state, and request byte sizes, but never prompt text, tool arguments or results, credentials, Turn State, or reasoning content.
 - Model discovery may block only for a cold or expired cache entry. Fresh entries are returned directly; stale entries remain usable while one background refresh is in flight, and failed background refreshes must retain the stale entry.
+- Model discovery must project the resolved request identity onto credential headers, matching Responses request identity semantics.
 - A valid selected `codex::` model ID resolves directly for chat requests; only untrusted, disabled, or temporarily unavailable IDs require a model-directory lookup.
 - `generate:false` prewarm is strictly opt-in and best effort: `auto` skips speculative work, while an enabled prewarm has a short independent budget, must not cancel the formal request, and a timed-out prewarm socket must be discarded before the formal request starts.
 - An idle WebSocket preconnection is keyed only by endpoint/account/auth compatibility, carries no synthetic request identity, and must be short-lived, bounded, and claimed by at most one formal thread request.
@@ -50,4 +51,5 @@
 - Fork diagnostics must use redacted item summaries only. Provider-validated ordinary appends and eligible WebSocket tool-result appends may retain their explicit `previous_response_id`; all other tool-result requests must omit it.
 - Request diagnostics must distinguish ordinary `previous_response_id` reuse, WebSocket tool-result incremental continuation, and tool-result full replay. Thinking Effort may arrive through `modelOptions`; support recognized reasoning and thinking shapes while logging only the resolved enum and its source.
 - Account usage must normalize server-provided Credit budgets from root `spend_control.individual_limit` and rate-limit buckets, plus balances and rate-limit windows, before display selection. Do not infer account usage from plan names or label a Credit budget with an unsupported billing period.
+- Account-usage fetches must apply the configured request identity headers after credential headers, matching model discovery and Responses requests.
 - A complete workspace Credit budget is the compact account-usage display; all remaining rate limits and Credit budgets must remain visible in the details tooltip.

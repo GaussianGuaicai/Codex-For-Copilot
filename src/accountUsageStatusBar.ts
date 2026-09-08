@@ -4,6 +4,7 @@ import type { CodexAuthManager } from './auth/codexAuthManager';
 import { getProviderConfig } from './config';
 import { getApiCredentials, getCodexCredentialsForAccount, type ApiCredentials } from './secrets';
 import { type CodexLogSink, CodexLogger, createCodexLogger } from './codexLogger';
+import { resolveRequestIdentity } from './codexRequestIdentity';
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -182,7 +183,12 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
         const snapshot = await fetchCodexAccountUsage({
           baseURL: config.baseURL,
           credentials,
-          selectedModel: this.selectedModel
+          selectedModel: this.selectedModel,
+          clientIdentity: resolveRequestIdentity({
+            ...config.requestIdentity,
+            extensionVersion: getExtensionVersion(this.context),
+            extensionUserAgent: buildCodexUserAgent(getExtensionVersion(this.context))
+          })
         });
         return { accountKey: account.accountKey, label, isActive: account.isActive, snapshot } as AccountUsageEntry;
       } catch (error) {
@@ -224,4 +230,15 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
       : display.tooltip;
     this.statusBarItem.show();
   }
+}
+
+function buildCodexUserAgent(extensionVersion: string): string {
+  return `codex-for-copilot/${extensionVersion} (${process.platform}; ${process.arch}; vscode/${vscode.version})`;
+}
+
+function getExtensionVersion(context: vscode.ExtensionContext): string {
+  const extension = (context as vscode.ExtensionContext & {
+    extension?: { packageJSON?: { version?: unknown } };
+  }).extension;
+  return typeof extension?.packageJSON?.version === 'string' ? extension.packageJSON.version : '0.0.0';
 }

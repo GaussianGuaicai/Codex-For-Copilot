@@ -43,6 +43,8 @@ const server = createServer(async (request, response) => {
     url: request.url,
     authorization: request.headers.authorization,
     userAgent: request.headers['user-agent'],
+    originator: request.headers.originator,
+    version: request.headers.version,
     accountId: request.headers['chatgpt-account-id']
   };
 
@@ -111,6 +113,12 @@ try {
       source: 'codexAuth',
       kind: 'codexAccessToken',
       omitMaxOutputTokens: true
+    },
+    clientIdentity: {
+      profile: 'extension',
+      userAgent: 'codex-for-copilot/test (test; x64; vscode/test)',
+      originator: 'codex-for-copilot',
+      version: 'test'
     }
   });
 
@@ -118,7 +126,9 @@ try {
   assertEqual(capturedRequest.method, 'GET', 'method');
   assertEqual(capturedRequest.url, '/backend-api/wham/usage', 'request path');
   assertEqual(capturedRequest.authorization, 'Bearer test-access-token', 'authorization header');
-  assertEqual(capturedRequest.userAgent, 'local.codex-for-copilot Codex for Copilot', 'user agent');
+  assertEqual(capturedRequest.userAgent, 'codex-for-copilot/test (test; x64; vscode/test)', 'user agent');
+  assertEqual(capturedRequest.originator, 'codex-for-copilot', 'originator header');
+  assertEqual(capturedRequest.version, 'test', 'version header');
   assertEqual(capturedRequest.accountId, 'acct-test', 'ChatGPT account id header');
   assertEqual(display.compactText, 'Codex: 5h 64% · Weekly 82%', 'rate windows compact display');
   assertIncludes(display.tooltip, 'Plan: Pro', 'plan tooltip');

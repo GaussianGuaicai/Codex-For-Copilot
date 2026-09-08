@@ -52,7 +52,9 @@
 - Provider coverage must prove a valid selected `codex::` model ID reaches `/responses` without waiting for a cold `/models` lookup and still applies a configured alias.
 - Tool-schema tests must cover first-build miss, repeat-build hit, order-sensitive invalidation, immutable cached definitions, and same-object semantic mutation invalidation.
 - Prewarm timeout tests must prove that an explicitly enabled prewarm uses a new formal-request socket and streams once; `auto` must skip speculative prewarm without a test sleep.
+- Prewarm continuation-miss tests must prove a safe canonical replay emits no failed-response callback from its discarded attempt.
 - Preconnection tests must prove a single upgrade, no synthetic identity in the handshake, and identity only on the formal `response.create` request.
 - The `provider-websocket-preconnected` benchmark must wait for the idle handshake and assert a `preconnected` formal connection origin before recording the timed request.
 - Continuation state tests must prove snapshot mutation cannot leak back into the stored branch state.
 - Account-usage smoke tests must cover root `spend_control.individual_limit` precedence over additional model windows, rate-limit-bucket Credit budgets, dynamic server-provided rate-window labels, legacy balance fallback, and malformed Credit-budget fallback without a real account request.
+- Account-usage request smoke coverage must verify configured identity headers override the credential-default user agent.
