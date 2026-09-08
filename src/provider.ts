@@ -1717,7 +1717,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     authIdentity: string
   ): Promise<ProviderModelCatalog> {
     const logger = this.logger.operation('model-discovery.fetch');
-    const upstreamModels = await fetchAvailableModels(config, credentials, token);
+    const clientIdentity = resolveRequestIdentity({
+      ...config.requestIdentity,
+      extensionVersion: getExtensionVersion(this.context),
+      extensionUserAgent: buildCodexUserAgent(getExtensionVersion(this.context))
+    });
+    const upstreamModels = await fetchAvailableModels(config, credentials, token, clientIdentity);
     const models = this.applyModelDiscoveryPolicy(buildProviderModels(config, upstreamModels, credentials.kind), config, authIdentity);
     logger.debug('getAvailableModels discovery success', {
       discoveredCount: upstreamModels.length,

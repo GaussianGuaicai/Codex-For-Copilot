@@ -1760,6 +1760,7 @@ async function runManagedWebSocketPrewarmContinuationMissSmokeTest(streamRespons
   const frames = [];
   const fallbackEvents = [];
   const transportMetrics = [];
+  const failures = [];
   const server = createServer(async (request, response) => {
     httpRequestCount += 1;
     for await (const _chunk of request) {
@@ -1838,6 +1839,7 @@ async function runManagedWebSocketPrewarmContinuationMissSmokeTest(streamRespons
       maxOutputTokens: 32,
       token: createCancellationToken(),
       onTextDelta: (delta) => deltas.push(delta),
+      onResponseFailed: (message) => failures.push(message),
       onTransportFallback: (event) => fallbackEvents.push(event),
       onTransportMetrics: (metrics) => transportMetrics.push(metrics)
     });
@@ -1853,6 +1855,7 @@ async function runManagedWebSocketPrewarmContinuationMissSmokeTest(streamRespons
       'prewarm recovery replays full input'
     );
     assertEqual(deltas.join(''), 'prewarm recovery succeeded', 'prewarm recovery emits successful output once');
+    assertEqual(failures.length, 0, 'prewarm continuation retry suppresses failed-attempt callbacks');
     assertEqual(connectionCount, 2, 'prewarm recovery recreates the managed socket');
     assertEqual(httpRequestCount, 0, 'prewarm continuation miss never falls back to HTTP');
     assertEqual(fallbackEvents.length, 0, 'prewarm continuation miss reports no HTTP fallback');

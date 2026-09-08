@@ -684,6 +684,13 @@ async function streamCodexResponseTextOverManagedWebSocket(
             || (event.type === 'response.output_item.done' && event.item.type === 'function_call')) {
             visibleActivity = true;
           }
+          if (isSafePrewarmContinuationMiss(event, options, previousResponseIdUsed, visibleActivity)) {
+            throw new ResponsesContinuationMissError(
+              CONTINUATION_MISS_MESSAGE,
+              previousResponseIdUsed!,
+              { cause: new Error(collectErrorMessages(event)[0] ?? CONTINUATION_MISS_MESSAGE) }
+            );
+          }
           handleEvent(event);
         }
       });
@@ -820,6 +827,19 @@ function classifyManagedWebSocketError(
     return error;
   }
   return new Error(String(error));
+}
+
+function isSafePrewarmContinuationMiss(
+  event: ResponsesServerEvent,
+  options: StreamResponseTextOptions,
+  previousResponseIdUsed: string | undefined,
+  visibleActivity: boolean
+): boolean {
+  return !options.previousResponseId
+    && Boolean(previousResponseIdUsed)
+    && !visibleActivity
+    && options.hasProviderVisibleOutput?.() !== true
+    && isResponsesContinuationMissPayload(event);
 }
 
 function createReusableWebSocketSession(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): ReusableResponsesWebSocketSession {

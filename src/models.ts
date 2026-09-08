@@ -3,6 +3,8 @@ import type { ProviderConfig } from './config';
 import type { ApiCredentials } from './secrets';
 import { normalizeBaseURL } from './responsesClient';
 import { codexFetch } from './auth/codexAuthRequest';
+import { applyClientIdentityHeaders } from './codexProtocol';
+import type { ResolvedRequestIdentity } from './codexRequestIdentity';
 import { proxyAwareFetch } from './proxyFetch';
 import {
   getReasoningEffortDescription,
@@ -118,14 +120,19 @@ export interface ParsedModelIdentifier {
 export async function fetchAvailableModels(
   config: ProviderConfig,
   credentials: ApiCredentials,
-  token: vscode.CancellationToken
+  token: vscode.CancellationToken,
+  clientIdentity?: ResolvedRequestIdentity
 ): Promise<UpstreamModel[]> {
   const modelsURL = new URL(`${normalizeBaseURL(config.baseURL)}/models`);
   modelsURL.searchParams.set('client_version', config.clientVersion);
 
+  const headers = { ...credentials.headers };
+  if (clientIdentity) {
+    applyClientIdentityHeaders(headers, clientIdentity);
+  }
   const init = {
     method: 'GET',
-    headers: credentials.headers,
+    headers,
     signal: toAbortSignal(token)
   };
   const response = credentials.authManager
