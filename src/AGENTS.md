@@ -28,6 +28,7 @@
 - The loopback OAuth URL uses `localhost` but follows the upstream registered flow by binding `127.0.0.1`; callback responses must close browser connections, and server cleanup must never block credential persistence.
 - Keep the authorization endpoint and scopes synchronized with `openai/codex` `codex-rs/login/src/server.rs`; the current endpoint is `/oauth/authorize`, not the legacy `/authorize` path.
 - Keep Responses tool conversion and request-field shaping in `codexRequestBuilder.ts`; transport code consumes its shared request output rather than maintaining a second conversion path.
+- Keep one user-visible `#webSearch` tool. Codex models intercept it into the hosted `web_search` tool, so its `{ query }` schema must never enter Codex function tools or Native Tool Search. Other models execute it through `hostedTools/webSearchExecutor.ts`, which runs one isolated Responses request and must not join conversation continuation, branch reuse, or Native Tool Search.
 - WebSocket requests must send `response.create` payloads without the HTTP-only `stream` field.
 - When `transport` is `auto`, only fall back to HTTP for transport availability failures, not for successful in-band model responses.
 - A `Model not found` response for the requested model is an in-band model error, not a transport failure; surface it without an HTTP retry.
