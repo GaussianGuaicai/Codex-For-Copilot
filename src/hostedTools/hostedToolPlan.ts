@@ -2,7 +2,7 @@ import type { Tool, WebSearchTool } from 'openai/resources/responses/responses';
 import type * as vscode from 'vscode';
 import type { WebSearchConfig } from '../config';
 
-export const CODEX_WEB_SEARCH_TOOL_NAME = 'codexForCopilot_searchWeb';
+export const CODEX_WEB_SEARCH_TOOL_NAME = 'codexForCopilot_webSearch';
 
 export interface HostedToolPlan {
   clientTools: readonly vscode.LanguageModelChatTool[];

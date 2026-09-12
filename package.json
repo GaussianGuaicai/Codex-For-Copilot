@@ -71,7 +71,7 @@
     ],
     "languageModelTools": [
       {
-        "name": "codexForCopilot_searchWeb",
+        "name": "codexForCopilot_webSearch",
         "displayName": "Web Search",
         "modelDescription": "Search the web for up-to-date information.",
         "userDescription": "Search the web for up-to-date information.",
