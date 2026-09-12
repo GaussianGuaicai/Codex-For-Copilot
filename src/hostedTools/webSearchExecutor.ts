@@ -1,21 +1,17 @@
 import * as vscode from 'vscode';
-import type { ResponseInputItem } from 'openai/resources/responses/responses';
+import type { ResponsesInputMessage } from '../convertMessages';
 import { getProviderConfig, type ProviderConfig } from '../config';
 import { getApiCredentials, type ApiCredentials } from '../secrets';
 import type { CodexAuthManager } from '../auth/codexAuthManager';
 import { getCodexCompatibilityProfile, type CodexRequestIdentity } from '../codexProtocol';
 import { resolveRequestIdentity } from '../codexRequestIdentity';
 import { buildProviderModels, fetchAvailableModels } from '../models';
-import {
-  buildDynamicHeaders,
-  createResponsesClient,
-  normalizeResponsesError
-} from '../responsesClient';
-import { extractWebSearchSources, type WebSearchSource } from './hostedToolEvents';
+import { streamResponseText } from '../responsesClient';
+import { type WebSearchSource } from './hostedToolEvents';
 import { buildWebSearchTool } from './hostedToolPlan';
 
-const WEB_SEARCH_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
 const WEB_SEARCH_MAX_SOURCES = 10;
+const WEB_SEARCH_INSTRUCTIONS = 'Search the web to answer the user query, then answer using the search results.';
 
 export interface WebSearchResult {
   answer: string;
@@ -38,8 +34,11 @@ export interface WebSearchExecutorDependencies {
  * tool, then returns the synthesized answer plus deduplicated sources.
  *
  * This is deliberately a thin adapter: it reuses the shared credential,
- * request-identity, and Responses client plumbing, and never participates in
- * conversation continuation or Native Tool Search.
+ * request-identity, and streaming transport plumbing, and never participates in
+ * conversation continuation, branch reuse, or Native Tool Search. The Codex
+ * backend requires a streamed request, so this goes through
+ * {@link streamResponseText} over HTTP rather than a one-shot non-streaming
+ * call.
  */
 export async function executeWebSearch(
   query: string,
@@ -57,64 +56,72 @@ export async function executeWebSearch(
   }
 
   const compatibilityProfile = getCodexCompatibilityProfile(config.baseURL, credentials, config.protocol.profile);
+  const extensionVersion = getExtensionVersion(dependencies.context);
+  const userAgent = buildCodexUserAgent(extensionVersion);
   const clientIdentity = resolveRequestIdentity({
     ...config.requestIdentity,
-    extensionVersion: getExtensionVersion(dependencies.context),
-    extensionUserAgent: buildCodexUserAgent(getExtensionVersion(dependencies.context))
+    extensionVersion,
+    extensionUserAgent: userAgent
   });
   const model = await resolveWebSearchModel(config, credentials, token, clientIdentity);
   const identity = compatibilityProfile.enabled
     ? await dependencies.createIdentity?.()
     : undefined;
 
-  const abortController = new AbortController();
-  const cancellation = token.onCancellationRequested(() => abortController.abort());
-  try {
-    const client = createResponsesClient({
-      apiKey: credentials.apiKey,
-      baseURL: config.baseURL,
-      headers: credentials.headers,
-      authManager: credentials.authManager,
-      accountKey: credentials.accountKey,
-      compatibilityProfile,
-      requestCompression: config.requestCompression
-    });
-    const headers = buildDynamicHeaders({
-      compatibilityProfile,
-      identity,
-      headers: credentials.headers,
-      protocolSettings: config.protocol,
-      clientIdentity
-    }, 'http');
+  let answer = '';
+  const sources: WebSearchSource[] = [];
+  const seenSourceUrls = new Set<string>();
 
-    const response = await client.responses.create({
-      model,
-      input: [{ role: 'user', content: query }] satisfies ResponseInputItem[],
-      tools: [buildWebSearchTool(config.webSearch)],
-      // The hosted web_search tool is the only tool in this request, so
-      // `required` forces the model to search instead of answering from memory.
-      tool_choice: 'required',
-      include: ['web_search_call.action.sources'],
-      store: false
-    }, {
-      headers,
-      signal: abortController.signal,
-      maxRetries: 0,
-      timeout: WEB_SEARCH_REQUEST_TIMEOUT_MS
-    });
-
-    return {
-      answer: typeof response.output_text === 'string' ? response.output_text : '',
-      sources: dedupeWebSearchSources(response.output)
-    };
-  } catch (error) {
-    if (token.isCancellationRequested || abortController.signal.aborted) {
-      throw new vscode.CancellationError();
+  await streamResponseText({
+    baseURL: config.baseURL,
+    apiKey: credentials.apiKey,
+    headers: credentials.headers,
+    authManager: credentials.authManager,
+    accountKey: credentials.accountKey,
+    // A plain HTTP stream keeps this helper request independent from the
+    // conversation's managed WebSocket sessions and continuation state.
+    transport: 'http',
+    compatibilityProfile,
+    identity,
+    extensionVersion,
+    userAgent,
+    protocolSettings: config.protocol,
+    clientIdentity,
+    requestCompression: config.requestCompression,
+    store: false,
+    omitMaxOutputTokens: credentials.omitMaxOutputTokens,
+    model,
+    instructions: WEB_SEARCH_INSTRUCTIONS,
+    input: [{ role: 'user', content: query }] satisfies ResponsesInputMessage[],
+    hostedTools: [buildWebSearchTool(config.webSearch)],
+    // The hosted web_search tool is the only tool in this request, so
+    // "required" forces the model to search instead of answering from memory.
+    toolMode: vscode.LanguageModelChatToolMode.Required,
+    serviceTier: toRequestServiceTier(config.defaultServiceTier),
+    maxOutputTokens: config.maxOutputTokens,
+    token,
+    onTextDelta: (text) => {
+      answer += text;
+    },
+    onWebSearchSources: (incoming) => {
+      for (const source of incoming) {
+        if (seenSourceUrls.size >= WEB_SEARCH_MAX_SOURCES) {
+          return;
+        }
+        if (seenSourceUrls.has(source.url)) {
+          continue;
+        }
+        seenSourceUrls.add(source.url);
+        sources.push(source);
+      }
     }
-    throw normalizeResponsesError(error, config.baseURL);
-  } finally {
-    cancellation.dispose();
+  });
+
+  if (token.isCancellationRequested) {
+    throw new vscode.CancellationError();
   }
+
+  return { answer, sources };
 }
 
 /**
@@ -143,22 +150,17 @@ async function resolveWebSearchModel(
   }
 }
 
-function dedupeWebSearchSources(output: readonly unknown[] | undefined): WebSearchSource[] {
-  const seen = new Set<string>();
-  const sources: WebSearchSource[] = [];
-  for (const item of output ?? []) {
-    for (const source of extractWebSearchSources(item)) {
-      if (seen.has(source.url)) {
-        continue;
-      }
-      seen.add(source.url);
-      sources.push(source);
-      if (sources.length >= WEB_SEARCH_MAX_SOURCES) {
-        return sources;
-      }
-    }
+function toRequestServiceTier(
+  serviceTier: ProviderConfig['defaultServiceTier']
+): 'default' | 'priority' | undefined {
+  switch (serviceTier) {
+    case 'default':
+      return 'default';
+    case 'fast':
+      return 'priority';
+    default:
+      return undefined;
   }
-  return sources;
 }
 
 function buildCodexUserAgent(extensionVersion: string): string {

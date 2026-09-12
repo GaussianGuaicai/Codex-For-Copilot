@@ -84,7 +84,7 @@ try {
   await runFallbackRequestShapeSmokeTest();
   await runCancellationSmokeTest();
   await runBackendErrorSmokeTest();
-  console.log('Smoke test passed: Web Search fallback uses one isolated hosted web_search request.');
+  console.log('Smoke test passed: Web Search fallback uses one isolated streamed hosted web_search request.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
@@ -133,48 +133,59 @@ function writeJsonResponse(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-function createWebSearchResponse() {
-  return {
-    id: 'resp_web_search',
-    object: 'response',
-    created_at: 1,
-    status: 'completed',
-    model: 'gpt-5.5',
-    output_text: 'Synthesized answer.',
-    output: [
-      {
-        type: 'web_search_call',
-        id: 'ws_1',
-        status: 'completed',
-        action: {
-          type: 'search',
-          queries: ['latest news'],
-          sources: [
-            { type: 'url', url: 'https://example.com/a' },
-            { type: 'url', url: 'https://example.com/a' },
-            { type: 'url', url: 'file:///not-allowed' }
-          ]
-        }
-      },
-      {
-        type: 'message',
-        id: 'msg_1',
-        role: 'assistant',
-        status: 'completed',
-        content: [{
-          type: 'output_text',
-          text: 'Synthesized answer.',
-          annotations: [{
-            type: 'url_citation',
-            url: 'https://example.com/b',
-            title: 'Example B',
-            start_index: 0,
-            end_index: 1
-          }]
-        }]
+function writeWebSearchSseResponse(response) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive'
+  });
+  const send = (event) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+  send({ type: 'response.output_text.delta', delta: 'Synthesized answer.' });
+  send({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      type: 'web_search_call',
+      id: 'ws_1',
+      status: 'completed',
+      action: {
+        type: 'search',
+        queries: ['latest news'],
+        sources: [
+          { type: 'url', url: 'https://example.com/a' },
+          { type: 'url', url: 'https://example.com/a' },
+          { type: 'url', url: 'file:///not-allowed' }
+        ]
       }
-    ]
-  };
+    }
+  });
+  send({
+    type: 'response.output_item.done',
+    output_index: 1,
+    item: {
+      type: 'message',
+      id: 'msg_1',
+      role: 'assistant',
+      status: 'completed',
+      content: [{
+        type: 'output_text',
+        text: 'Synthesized answer.',
+        annotations: [{
+          type: 'url_citation',
+          url: 'https://example.com/b',
+          title: 'Example B',
+          start_index: 0,
+          end_index: 1
+        }]
+      }]
+    }
+  });
+  send({
+    type: 'response.completed',
+    response: { id: 'resp_web_search', object: 'response', status: 'completed' }
+  });
+  response.write('data: [DONE]\n\n');
+  response.end();
 }
 
 async function runFallbackRequestShapeSmokeTest() {
@@ -189,7 +200,7 @@ async function runFallbackRequestShapeSmokeTest() {
       chunks.push(chunk);
     }
     responseRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-    writeJsonResponse(response, 200, createWebSearchResponse());
+    writeWebSearchSseResponse(response);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -201,6 +212,7 @@ async function runFallbackRequestShapeSmokeTest() {
     assertEqual(responseRequests.length, 1, 'fallback issues exactly one Responses request');
     const body = responseRequests[0];
     assertEqual(body.model, 'gpt-5.5', 'fallback uses the configured model');
+    assertEqual(body.stream, true, 'fallback streams because the Codex backend rejects non-streaming requests');
     assertEqual(body.tools.length, 1, 'fallback sends exactly one tool');
     assertEqual(body.tools[0].type, 'web_search', 'fallback uses the hosted web_search tool');
     assertEqual(body.tool_choice, 'required', 'fallback forces the hosted web_search tool');
@@ -211,7 +223,6 @@ async function runFallbackRequestShapeSmokeTest() {
     );
     assertEqual(body.input[0].content, 'latest news', 'fallback sends the query as user input');
     assertEqual(body.previous_response_id, undefined, 'fallback never uses conversation continuation');
-    assertEqual(body.stream, undefined, 'fallback uses a non-streaming request');
 
     assertEqual(result.answer, 'Synthesized answer.', 'fallback returns the synthesized answer');
     assertEqual(result.sources.length, 2, 'fallback deduplicates and sanitizes sources');
@@ -227,7 +238,7 @@ async function runCancellationSmokeTest() {
   let requestCount = 0;
   const server = createServer((_request, response) => {
     requestCount += 1;
-    writeJsonResponse(response, 200, createWebSearchResponse());
+    writeWebSearchSseResponse(response);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();

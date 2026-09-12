@@ -30,7 +30,7 @@
 - Authentication smoke coverage must verify that a native ChatGPT sign-in adds a VS Code session, a token refresh changes it, and sign-out removes it.
 - Loopback OAuth smoke coverage must verify the callback response closes the browser connection, success is shown only after credential persistence, token-exchange failures reach the browser, and login completion is not blocked by callback-server cleanup.
 - Keep HTTP and WebSocket assertions aligned so transport parity regressions are caught in one place.
-- Web Search coverage must prove Codex strips the `{ query }` schema into the hosted `web_search` tool, the fallback executor sends one isolated hosted `web_search` request, and returned sources are sanitized and deduplicated.
+- Web Search coverage must prove Codex strips the `{ query }` schema into the hosted `web_search` tool, the fallback executor sends one isolated streamed (`stream: true`) hosted `web_search` request, and returned sources are sanitized and deduplicated.
 - An in-band `Model not found` error for the requested model must not make `auto` issue an HTTP fallback request.
 - Keep branch reuse semantics deterministic: append-only reuse, fork reset, and tool-change busting should be covered by local smoke tests.
 - Settings that alter the Responses request envelope, including service tier and output limits, must force full-input replay without `previous_response_id`.

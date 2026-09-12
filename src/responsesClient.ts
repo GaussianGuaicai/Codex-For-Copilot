@@ -953,28 +953,6 @@ function evictReusableWebSocketSessions(): void {
   }
 }
 
-/**
- * Builds the shared OpenAI client used by both the streaming transport facade
- * and isolated one-shot Responses requests (for example the Web Search
- * fallback executor). Callers that need Codex-compatible headers should pass
- * the same identity/protocol fields they would pass to `streamResponseText`.
- */
-export function createResponsesClient(
-  options: Pick<
-    StreamResponseTextOptions,
-    | 'apiKey'
-    | 'baseURL'
-    | 'headers'
-    | 'authManager'
-    | 'accountKey'
-    | 'compatibilityProfile'
-    | 'requestCompression'
-    | 'onTransportMetrics'
-  >
-): OpenAI {
-  return createOpenAIClient(options);
-}
-
 function createOpenAIClient(
   options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'accountKey' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
   defaultHeaders?: Record<string, string>
@@ -1042,22 +1020,7 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
   };
 }
 
-export function buildDynamicHeaders(
-  options: Pick<
-    StreamResponseTextOptions,
-    | 'compatibilityProfile'
-    | 'identity'
-    | 'headers'
-    | 'turnStartedAtUnixMs'
-    | 'toolPlan'
-    | 'protocolSettings'
-    | 'clientIdentity'
-    | 'turnState'
-    | 'extensionVersion'
-    | 'userAgent'
-  >,
-  transport: 'http' | 'websocket'
-): Record<string, string> {
+function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'http' | 'websocket'): Record<string, string> {
   if (!options.compatibilityProfile?.enabled || !options.identity) {
     const headers = { ...options.headers };
     applyClientIdentityHeaders(headers, resolveClientIdentity(options));
