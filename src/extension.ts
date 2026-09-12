@@ -17,7 +17,8 @@ import {
 } from './nativeToolSearch/nativeToolGroupingBridge';
 import { getNativeToolSearchRuntimeStatus } from './nativeToolSearch/nativeToolSearchStatus';
 import { getLastEffectiveCodexProtocol } from './codexProtocol';
-import { registerWebSearchMarkerTool } from './hostedTools/webSearchTool';
+import { CodexIdentityManager } from './codexIdentity';
+import { registerWebSearchTool } from './hostedTools/webSearchTool';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const outputChannel = vscode.window.createOutputChannel('Codex Model Provider', { log: true });
@@ -61,6 +62,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const authenticationProvider = new CodexAuthenticationProvider(authManager);
   const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, logger.child('account-usage'), authManager);
   const provider = new CodexModelProvider(context, logger.child('provider'), undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
+  const webSearchIdentityManager = new CodexIdentityManager(context.globalState);
 
   context.subscriptions.push(authManager, authManager.onDidChangeAuth((event) => {
     logger.child('auth').info('auth.changed', { reason: event.reason });
@@ -78,7 +80,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       authenticationProvider,
       { supportsMultipleAccounts: true }
     ),
-    registerWebSearchMarkerTool(),
+    registerWebSearchTool({
+      context,
+      authManager,
+      createIdentity: () => webSearchIdentityManager.createThread()
+    }),
     vscode.lm.registerLanguageModelChatProvider('codex-for-copilot', provider),
     vscode.commands.registerCommand('codexModelProvider.openDebugLogs', () => {
       logger.debug('command.open-logs');

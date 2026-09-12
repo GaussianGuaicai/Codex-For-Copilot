@@ -1655,7 +1655,7 @@ function isFunctionCallContinuationIntegrityError(error: unknown): boolean {
     .some((message) => /no tool call found for function call output with call_id|no tool output found for function call\b/i.test(message));
 }
 
-function normalizeResponsesError(error: unknown, baseURL: string): Error {
+export function normalizeResponsesError(error: unknown, baseURL: string): Error {
   const endpoint = `${normalizeBaseURL(baseURL)}/responses`;
 
   if (error instanceof ResponsesStreamRateLimitError) {

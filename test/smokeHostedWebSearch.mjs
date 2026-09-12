@@ -1,4 +1,5 @@
 import { loadBundled, assertEqual } from './testBundleHelper.mjs';
+import { readFile } from 'node:fs/promises';
 
 const planModule = await loadBundled('src/hostedTools/hostedToolPlan.ts');
 const eventModule = await loadBundled('src/hostedTools/hostedToolEvents.ts');
@@ -33,6 +34,42 @@ try {
   assertEqual(plan.responseTools[0].search_context_size, 'high', 'hosted tool respects search context size');
   assertEqual(plan.responseTools[0].filters.allowed_domains[0], 'example.com', 'hosted tool applies allowed domains');
   assertEqual(plan.webSearchEnabled, true, 'web search selection is recorded');
+
+  // The single visible tool now carries a `{ query }` schema for non-Codex
+  // models. Codex must still strip it from function tools so the schema never
+  // leaks into the hosted request.
+  const querySchemaTool = {
+    name: CODEX_WEB_SEARCH_TOOL_NAME,
+    description: 'Search the web for up-to-date information.',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false
+    }
+  };
+  const querySchemaPlan = resolveHostedToolPlan([clientTool, querySchemaTool], {
+    externalWebAccess: true,
+    contextSize: undefined,
+    allowedDomains: []
+  });
+  assertEqual(querySchemaPlan.clientTools.length, 1, 'query-schema web search tool is removed from Codex function tools');
+  assertEqual(
+    querySchemaPlan.clientTools.some((tool) => tool.name === CODEX_WEB_SEARCH_TOOL_NAME),
+    false,
+    'the { query } schema never leaks into Codex function tools'
+  );
+  assertEqual(querySchemaPlan.responseTools[0].type, 'web_search', 'Codex still plans the hosted web_search tool');
+
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const declaredTool = manifest.contributes.languageModelTools.find((tool) => tool.name === CODEX_WEB_SEARCH_TOOL_NAME);
+  assertEqual(declaredTool?.inputSchema?.properties?.query?.type, 'string', 'the visible tool declares a query argument');
+  assertEqual(declaredTool?.inputSchema?.required?.[0], 'query', 'the visible tool requires the query argument');
+  assertEqual(
+    declaredTool?.modelDescription,
+    'Search the web for up-to-date information.',
+    'the visible tool description is model-neutral'
+  );
 
   const lifecycle = projectHostedToolLifecycleEvent({
     type: 'response.web_search_call.searching',
