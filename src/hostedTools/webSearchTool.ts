@@ -16,6 +16,14 @@ export interface WebSearchToolInput {
  */
 export function registerWebSearchTool(dependencies: WebSearchExecutorDependencies): vscode.Disposable {
   return vscode.lm.registerTool<WebSearchToolInput>(CODEX_WEB_SEARCH_TOOL_NAME, {
+    prepareInvocation(options) {
+      const query = normalizeWebSearchQuery(options.input?.query);
+      return {
+        invocationMessage: query
+          ? `Searching the web for “${query}”`
+          : 'Searching the web'
+      };
+    },
     async invoke(options, token) {
       const query = normalizeWebSearchQuery(options.input?.query);
       if (!query) {
