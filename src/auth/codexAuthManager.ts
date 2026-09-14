@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { parseCodexAuthJson } from './codexAuthJsonImporter';
 import { CodexAuthLock } from './codexAuthLock';
-import { getJwtExpiration, isJwtExpiringSoon, decodeJwtPayload } from './codexJwt';
+import { getJwtExpiration, isJwtExpiringSoon } from './codexJwt';
+import { parseCodexAccountIdentity } from './codexAccountIdentity';
 import { CodexSecretStore, randomRevision } from './codexSecretStore';
 import { ACCESS_TOKEN_REFRESH_WINDOW_MS, PERIODIC_REFRESH_INTERVAL_MS } from './codexTokenRefresh';
 import { CodexOAuthClient, type OAuthTokens } from './codexOAuthClient';
@@ -86,8 +87,8 @@ export class CodexAuthManager implements vscode.Disposable {
 
   async importAuthJson(rawJson: string): Promise<string> {
     const bundle = parseCodexAuthJson(rawJson);
-    const payload = safeDecode(bundle.tokens.id_token);
-    const record: RefreshableCodexCredentialRecord = { schemaVersion: 2, source: 'importedAuthJson', revision: randomRevision(), tokens: bundle.tokens, email: stringValue(payload.email), accessTokenExpiresAt: getJwtExpiration(bundle.tokens.access_token), lastRefreshAt: bundle.last_refresh ?? new Date().toISOString() };
+    const identity = parseCodexAccountIdentity(bundle.tokens);
+    const record: RefreshableCodexCredentialRecord = { schemaVersion: 2, source: 'importedAuthJson', revision: randomRevision(), tokens: bundle.tokens, email: identity.email, accessTokenExpiresAt: getJwtExpiration(bundle.tokens.access_token), lastRefreshAt: bundle.last_refresh ?? new Date().toISOString() };
     const accountKey = await this.store.setCredential(record);
     this.permanentFailureRevisions.delete(accountKey);
     this.fire('signedIn', accountKey, record.revision);
@@ -156,12 +157,10 @@ export class CodexAuthManager implements vscode.Disposable {
     } catch (error) { logger?.warn('refresh.failed', { error }); throw error; }
   }
 
-  private async completeSignIn(tokens: OAuthTokens): Promise<string> { const payload = safeDecode(tokens.id_token); const record: ExtensionOAuthCredentialRecord = { schemaVersion: 2, source: 'extensionOAuth', revision: randomRevision(), tokens, email: stringValue(payload.email), accessTokenExpiresAt: getJwtExpiration(tokens.access_token), lastRefreshAt: new Date().toISOString() }; const accountKey = await this.store.setCredential(record); this.permanentFailureRevisions.delete(accountKey); this.fire('signedIn', accountKey, record.revision); return accountKey; }
+  private async completeSignIn(tokens: OAuthTokens): Promise<string> { const identity = parseCodexAccountIdentity(tokens); const record: ExtensionOAuthCredentialRecord = { schemaVersion: 2, source: 'extensionOAuth', revision: randomRevision(), tokens, email: identity.email, accessTokenExpiresAt: getJwtExpiration(tokens.access_token), lastRefreshAt: new Date().toISOString() }; const accountKey = await this.store.setCredential(record); this.permanentFailureRevisions.delete(accountKey); this.fire('signedIn', accountKey, record.revision); return accountKey; }
 
   private fire(reason: CodexAuthChangeEvent['reason'], accountKey: string, revision?: string): void { this.changes.fire({ reason, accountKey, revision }); }
 }
 export function needsRefresh(record: CodexCredentialRecord | { tokens: { access_token: string }; last_refresh?: string; lastRefreshAt?: string }): boolean { const access = 'tokens' in record ? record.tokens.access_token : record.accessToken; const last = 'lastRefreshAt' in record ? record.lastRefreshAt : ('last_refresh' in record ? record.last_refresh : undefined); return isJwtExpiringSoon(access, ACCESS_TOKEN_REFRESH_WINDOW_MS) || !last || !Number.isFinite(Date.parse(last)) || Date.now() - Date.parse(last) >= PERIODIC_REFRESH_INTERVAL_MS; }
 function snapshotFor(record: CodexCredentialRecord, accountKey?: string): CodexCredentialSnapshot { return isRefreshableCredential(record) ? { source: record.source, accessToken: record.tokens.access_token, accountId: record.tokens.account_id, accountKey, expiresAt: record.accessTokenExpiresAt ?? getJwtExpiration(record.tokens.access_token), revision: record.revision, refreshable: true } : { source: record.source, accessToken: record.accessToken, accountId: record.accountId, accountKey, expiresAt: record.accessTokenExpiresAt, revision: record.revision, refreshable: false }; }
 function isRefreshableCredential(record: CodexCredentialRecord | undefined): record is RefreshableCodexCredentialRecord { return record?.source === 'extensionOAuth' || record?.source === 'importedAuthJson'; }
-function safeDecode(token: string): Record<string, unknown> { try { const value = decodeJwtPayload(token); return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; } catch { return {}; } }
-function stringValue(value: unknown): string | undefined { return typeof value === 'string' && value.trim() ? value.trim() : undefined; }

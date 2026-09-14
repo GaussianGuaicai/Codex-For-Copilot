@@ -53,6 +53,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 await import('node:fs/promises').then(({ writeFile }) => writeFile(entryPath, `
 export * from ${repoImport('src/auth/codexAuthJsonImporter')};
+export * from ${repoImport('src/auth/codexAccountIdentity')};
 export * from ${repoImport('src/auth/codexJwt')};
 export * from ${repoImport('src/auth/codexAuthManager')};
 export * from ${repoImport('src/auth/codexAuthRequest')};
@@ -149,6 +150,54 @@ try {
   assertEqual(importedRevokeCalls, 0, 'sign-out does not revoke an imported auth.json credential');
   importedSubscription.dispose();
   importedManager.dispose();
+
+  const profileIdentity = auth.parseCodexAccountIdentity({
+    id_token: jwt({ 'https://api.openai.com/auth.chatgpt_user_id': 'profile-user', 'https://api.openai.com/profile.email': 'profile@example.com' }),
+    access_token: futureToken,
+    refresh_token: 'profile-refresh',
+    account_id: 'workspace-profile'
+  });
+  assertEqual(profileIdentity.email, 'profile@example.com', 'identity parser reads the profile email claim');
+
+  const multiAccountSecrets = new Map();
+  const multiAccountManager = createImportedManager(auth, multiAccountSecrets);
+  const userAWorkspaceOne = authJsonFor('user-a', 'workspace-1', 'a@example.com', 'user-a-token');
+  const userBWorkspaceOne = authJsonFor('user-b', 'workspace-1', 'b@example.com', 'user-b-token');
+  const userAWorkspaceTwo = authJsonFor('user-a', 'workspace-2', 'a@example.com', 'user-a-workspace-two-token');
+  const userAKey = await multiAccountManager.importAuthJson(userAWorkspaceOne);
+  const userBKey = await multiAccountManager.importAuthJson(userBWorkspaceOne);
+  assertEqual((await multiAccountManager.listAccounts()).length, 2, 'different users in one workspace retain separate accounts');
+  assertEqual(userAKey === userBKey, false, 'different users in one workspace receive distinct local keys');
+  await multiAccountManager.switchAccount(userAKey);
+  assertEqual((await multiAccountManager.getCredentialSnapshot()).accessToken, 'user-a-token', 'switching restores user A credentials');
+  await multiAccountManager.switchAccount(userBKey);
+  assertEqual((await multiAccountManager.getCredentialSnapshot()).accessToken, 'user-b-token', 'switching restores user B credentials');
+  const updatedUserAKey = await multiAccountManager.importAuthJson(authJsonFor('user-a', 'workspace-1', 'a@example.com', 'user-a-new-token'));
+  assertEqual(updatedUserAKey, userAKey, 're-importing the same owner reuses its local key');
+  assertEqual((await multiAccountManager.listAccounts()).length, 2, 're-importing the same owner does not duplicate the account');
+  assertEqual((await multiAccountManager.getCredentialSnapshot(userAKey)).accessToken, 'user-a-new-token', 're-importing updates the existing owner credentials');
+  const userAWorkspaceTwoKey = await multiAccountManager.importAuthJson(userAWorkspaceTwo);
+  assertEqual(userAWorkspaceTwoKey === userAKey, false, 'the same user in a different workspace receives a separate local key');
+  assertEqual((await multiAccountManager.listAccounts()).length, 3, 'the same user can retain independent workspace accounts');
+  const multiAccountProvider = new auth.CodexAuthenticationProvider(multiAccountManager);
+  const multiAccountSessions = await multiAccountProvider.getSessions(undefined, {});
+  assertEqual(multiAccountSessions.length, 3, 'each stored owner produces a VS Code authentication session');
+  assertEqual(new Set(multiAccountSessions.map((session) => session.id)).size, 3, 'stored owners produce distinct VS Code authentication session IDs');
+  multiAccountProvider.dispose();
+  multiAccountManager.dispose();
+
+  const legacyUserATokens = authJsonTokens('user-a', 'workspace-1', 'a@example.com', 'legacy-user-a-token');
+  const legacyV2Secrets = new Map([
+    ['codexForCopilot.codexAuthAccounts', JSON.stringify({ accountKeys: ['workspace-1'], activeAccountKey: 'workspace-1' })],
+    ['codexForCopilot.codexAuthAccount.workspace-1', JSON.stringify({ schemaVersion: 2, source: 'importedAuthJson', revision: 'legacy-user-a', tokens: legacyUserATokens, email: 'a@example.com', lastRefreshAt: new Date().toISOString() })]
+  ]);
+  const legacyV2Manager = createImportedManager(auth, legacyV2Secrets);
+  const legacyUserBKey = await legacyV2Manager.importAuthJson(userBWorkspaceOne);
+  assertEqual(legacyUserBKey === 'workspace-1', false, 'legacy workspace key does not overwrite another user in the workspace');
+  assertEqual(JSON.parse(legacyV2Secrets.get('codexForCopilot.codexAuthAccount.workspace-1')).tokens.access_token, 'legacy-user-a-token', 'legacy workspace credential remains unchanged');
+  assertEqual((await legacyV2Manager.listAccounts()).length, 2, 'legacy storage retains both owners after import');
+  assertEqual(await legacyV2Manager.importAuthJson(userAWorkspaceOne), 'workspace-1', 're-importing the legacy owner retains its existing workspace key');
+  legacyV2Manager.dispose();
 
   const rawImportedSecrets = new Map([
     ['codexForCopilot.codexAuthBundle', JSON.stringify({ auth_mode: 'chatgpt', tokens: valid.tokens, last_refresh: new Date().toISOString() })]
@@ -389,7 +438,7 @@ try {
   await assertRejects(() => authenticationProvider.createSession(['unsupported-scope'], {}), 'unsupported authentication scope rejected');
   authenticationProvider.dispose();
 
-  console.log('Smoke test passed: auth import, PKCE, loopback completion, JWT parsing, refresh decisions, 401 retry, and VS Code authentication sessions are correct.');
+  console.log('Smoke test passed: multi-owner auth import, PKCE, loopback completion, JWT parsing, refresh decisions, 401 retry, and VS Code authentication sessions are correct.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
@@ -397,6 +446,34 @@ try {
 
 function jwt(payload) {
   return ['header', Buffer.from(JSON.stringify(payload)).toString('base64url'), 'signature'].join('.');
+}
+
+function authJsonFor(userId, accountId, email, accessToken) {
+  return JSON.stringify({ auth_mode: 'chatgpt', tokens: authJsonTokens(userId, accountId, email, accessToken) });
+}
+
+function authJsonTokens(userId, accountId, email, accessToken) {
+  return {
+    id_token: jwt({
+      'https://api.openai.com/auth.chatgpt_user_id': userId,
+      'https://api.openai.com/profile.email': email
+    }),
+    access_token: accessToken,
+    refresh_token: `${userId}-${accountId}-refresh`,
+    account_id: accountId
+  };
+}
+
+function createImportedManager(authApi, secrets) {
+  return new authApi.CodexAuthManager(
+    new authApi.CodexSecretStore({
+      async get(key) { return secrets.get(key); },
+      async store(key, value) { secrets.set(key, value); },
+      async delete(key) { secrets.delete(key); }
+    }),
+    () => ({ async withLock(callback) { return callback(); } }),
+    { async refresh() { throw new Error('multi-account test credentials must not refresh'); }, async revoke() {} }
+  );
 }
 
 function assertEqual(actual, expected, label) {

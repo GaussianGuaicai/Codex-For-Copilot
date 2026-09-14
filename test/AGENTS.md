@@ -7,7 +7,7 @@
 ## Key Files
 
 - `smokeResponsesClient.mjs`: local mock coverage for HTTP transport, WebSocket transport, WebSocket-to-HTTP fallback, and reasoning-item identity.
-- `smokeAuth.mjs`: local coverage for OAuth credential parsing, token refresh, and the VS Code authentication-session lifecycle.
+- `smokeAuth.mjs`: local coverage for OAuth credential parsing, multi-owner account storage, token refresh, and the VS Code authentication-session lifecycle.
 - `extensionHostSmoke.cjs`: asserts the manifest declares the Codex VS Code AuthenticationProvider before exercising the language-model boundary.
 - `smokeCodexRequestBuilder.mjs`: request-shape coverage, including configured-instruction preservation for requests with function tools.
 - `smokeProviderFallback.mjs`: local mock coverage for provider recovery, unavailable-model handling, full-input replay for tool-result continuations, and interleaved reasoning/text presentation.
@@ -28,6 +28,7 @@
 
 - Prefer narrow transport semantics checks over broad suites.
 - Authentication smoke coverage must verify that a native ChatGPT sign-in adds a VS Code session, a token refresh changes it, and sign-out removes it.
+- Authentication smoke coverage must preserve distinct local storage keys for different ChatGPT users sharing a workspace, while re-importing one verified owner updates its existing key.
 - Loopback OAuth smoke coverage must verify the callback response closes the browser connection, success is shown only after credential persistence, token-exchange failures reach the browser, and login completion is not blocked by callback-server cleanup.
 - Keep HTTP and WebSocket assertions aligned so transport parity regressions are caught in one place.
 - An in-band `Model not found` error for the requested model must not make `auto` issue an HTTP fallback request.
