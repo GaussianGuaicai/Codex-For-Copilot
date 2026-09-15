@@ -201,12 +201,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!picked) return;
       await authManager.switchAccount(picked.accountKey);
       logger.child('command').info('auth.switched', { accountKey: picked.accountKey });
-      vscode.window.showInformationMessage(`Active Codex account switched to ${picked.email ?? picked.accountId ?? picked.accountKey}.`);
+      vscode.window.showInformationMessage(`Active Codex account switched to ${accountDisplayName(picked)}.`);
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.removeAccount', async () => {
       const picked = await pickAccount(authManager, 'Remove Codex Account', 'Choose an account to remove (its credentials will be deleted).');
       if (!picked) return;
-      const label = picked.email ?? picked.accountId ?? picked.accountKey;
+      const label = accountDisplayName(picked);
       const confirm = await vscode.window.showWarningMessage(`Remove Codex account ${label}?`, { modal: true }, 'Remove');
       if (confirm !== 'Remove') return;
       await authManager.signOut(picked.accountKey);
@@ -345,18 +345,30 @@ async function pickAccount(
   authManager: CodexAuthManager,
   title: string,
   placeHolder: string
-): Promise<{ accountKey: string; email?: string; accountId?: string; isActive: boolean } | undefined> {
+): Promise<{ accountKey: string; email?: string; source: 'extensionOAuth' | 'importedAuthJson' | 'legacyCodexFile'; isActive: boolean } | undefined> {
   const accounts = await authManager.listAccounts();
   if (accounts.length === 0) {
     vscode.window.showInformationMessage('No Codex accounts are configured. Use "Add Codex Account" to sign in.');
     return undefined;
   }
   const items = accounts.map((account) => ({
-    label: `${account.isActive ? '$(check) ' : ''}${account.email ?? account.accountId ?? account.accountKey}`,
-    description: account.isActive ? 'active' : (account.accountId ?? ''),
+    label: `${account.isActive ? '$(check) ' : ''}${accountDisplayName(account)}`,
+    description: [account.isActive ? 'Active' : undefined, credentialSourceLabel(account.source)].filter(Boolean).join(' · '),
     detail: account.reauthRequired ? 'Re-authentication required' : undefined,
     account
   }));
   const picked = await vscode.window.showQuickPick(items, { title, placeHolder, matchOnDescription: true });
   return picked?.account;
+}
+
+function accountDisplayName(account: { email?: string }): string {
+  return account.email ?? 'ChatGPT account';
+}
+
+function credentialSourceLabel(source: 'extensionOAuth' | 'importedAuthJson' | 'legacyCodexFile'): string {
+  switch (source) {
+    case 'extensionOAuth': return 'ChatGPT sign-in';
+    case 'importedAuthJson': return 'Imported auth.json';
+    case 'legacyCodexFile': return 'Legacy Codex credentials';
+  }
 }
