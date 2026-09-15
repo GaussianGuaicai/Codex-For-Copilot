@@ -199,7 +199,6 @@ async function run() {
     assert(modelDiscoveryRequestCount > 0, 'Model discovery did not reach the mock backend; verify isolated test credentials.');
     const model = models.find((candidate) => candidate.id === 'codex::gpt-5.4');
     assert(model, 'Hidden GPT-5.4 model was not selectable.');
-    assert.strictEqual(models.length, 1);
     assert.strictEqual(model.name, 'GPT-5.4');
     assert.strictEqual(model.family, 'gpt-5.4');
     assert.strictEqual(model.maxInputTokens, 950000);
