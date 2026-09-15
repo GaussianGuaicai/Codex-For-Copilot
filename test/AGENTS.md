@@ -7,7 +7,7 @@
 ## Key Files
 
 - `smokeResponsesClient.mjs`: local mock coverage for HTTP transport, WebSocket transport, WebSocket-to-HTTP fallback, and reasoning-item identity.
-- `smokeAuth.mjs`: local coverage for OAuth credential parsing, token refresh, and the VS Code authentication-session lifecycle.
+- `smokeAuth.mjs`: local coverage for OAuth credential parsing, multi-owner account storage, token refresh, and the VS Code authentication-session lifecycle.
 - `extensionHostSmoke.cjs`: asserts the manifest declares the Codex VS Code AuthenticationProvider before exercising the language-model boundary.
 - `smokeCodexRequestBuilder.mjs`: request-shape coverage, including configured-instruction preservation for requests with function tools.
 - `smokeProviderFallback.mjs`: local mock coverage for provider recovery, unavailable-model handling, full-input replay for tool-result continuations, and interleaved reasoning/text presentation.
@@ -28,6 +28,10 @@
 
 - Prefer narrow transport semantics checks over broad suites.
 - Authentication smoke coverage must verify that a native ChatGPT sign-in adds a VS Code session, a token refresh changes it, and sign-out removes it.
+- Authentication smoke coverage must preserve distinct local storage keys for different ChatGPT users sharing a workspace, while re-importing one verified owner updates its existing key.
+- Inactive-account usage reads must use stored credentials without invoking the refresh-and-retry path; only the active account may refresh while loading account limits.
+- Authentication-provider session enumeration must use stored snapshots so account switching never refreshes unrelated credentials.
+- Logging smoke coverage must assert local account keys are hashed alongside existing credential and request identifier redaction.
 - Loopback OAuth smoke coverage must verify the callback response closes the browser connection, success is shown only after credential persistence, token-exchange failures reach the browser, and login completion is not blocked by callback-server cleanup.
 - Keep HTTP and WebSocket assertions aligned so transport parity regressions are caught in one place.
 - An in-band `Model not found` error for the requested model must not make `auto` issue an HTTP fallback request.
@@ -39,6 +43,7 @@
 - Reasoning-option tests must prove recognized `modelOptions.thinking` shapes override the model's default effort, and request diagnostics must identify tool-output full replay separately from ordinary prior-response reuse.
 - A model-generated tool-loop test must verify the first tool call is emitted once and the following tool result is replayed with its matching call.
 - The Extension Development Host smoke must exercise `vscode.lm.selectChatModels()` and a complete tool-call/result loop, so the provider-facing VS Code API boundary is covered separately from direct provider tests.
+- Extension Host smoke assertions must select and validate the intended Codex model without assuming VS Code exposes no additional provider models.
 - The Extension Development Host smoke pins the `extension` request-identity profile and asserts its generated `User-Agent`, `originator`, and `version` headers; restore that setting after each run.
 - Repeated reasoning deltas for one Responses item must retain one thinking-part ID, and reasoning that arrives after visible text must not interrupt the text sequence.
 - Complete function calls must be reported from `response.function_call_arguments.done` before later text, using the non-empty `output_item.added` name when the early event omits it; `response.output_item.done` must not duplicate the tool call.

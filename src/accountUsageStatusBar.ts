@@ -22,7 +22,9 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
   private readonly refreshTimer: ReturnType<typeof setInterval>;
   private readonly usageByAccount = new Map<string, AccountUsageEntry>();
   private refreshInFlight?: Promise<void>;
+  private refreshPending = false;
   private selectedModel = getProviderConfig().model;
+  private showAccountName = getProviderConfig().accountUsageShowAccountName;
   private readonly logger: CodexLogger;
 
   constructor(
@@ -43,6 +45,10 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
     this.disposables = [
       this.statusBarItem,
       vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('codexModelProvider.accountUsageShowAccountName')) {
+          this.showAccountName = getProviderConfig().accountUsageShowAccountName;
+          this.renderActive();
+        }
         if (event.affectsConfiguration('codexModelProvider.baseURL') || event.affectsConfiguration('codexModelProvider.credentialsSource') || event.affectsConfiguration('codexModelProvider.model')) {
           if (event.affectsConfiguration('codexModelProvider.model')) {
             this.selectedModel = getProviderConfig().model;
@@ -66,14 +72,22 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
 
   async refresh(): Promise<void> {
     if (this.refreshInFlight) {
+      this.refreshPending = true;
       return this.refreshInFlight;
     }
 
-    this.refreshInFlight = this.refreshNow().finally(() => {
+    this.refreshInFlight = this.refreshUntilCurrent().finally(() => {
       this.refreshInFlight = undefined;
     });
 
     return this.refreshInFlight;
+  }
+
+  private async refreshUntilCurrent(): Promise<void> {
+    do {
+      this.refreshPending = false;
+      await this.refreshNow();
+    } while (this.refreshPending);
   }
 
   async showDetails(): Promise<void> {
@@ -175,7 +189,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
     const results = await Promise.all(accounts.map(async (account) => {
       const label = account.label;
       const credentials = account.credentials
-        ?? (this.authManager ? await getCodexCredentialsForAccount(this.authManager, account.accountKey) : undefined);
+        ?? (this.authManager ? await getCodexCredentialsForAccount(this.authManager, account.accountKey, account.isActive) : undefined);
       if (!credentials) {
         return { accountKey: account.accountKey, label, isActive: account.isActive, error: true } as AccountUsageEntry;
       }
@@ -223,7 +237,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
     }
 
     const accountCount = this.usageByAccount.size;
-    const prefix = accountCount > 1 ? `$(organization) ${active.label} ` : '';
+    const prefix = accountCount > 1 && this.showAccountName ? `$(organization) ${active.label} ` : '';
     this.statusBarItem.text = `${prefix}${display.compactText}`;
     this.statusBarItem.tooltip = accountCount > 1
       ? `${display.tooltip}\n\n${accountCount} accounts — click to view all.`

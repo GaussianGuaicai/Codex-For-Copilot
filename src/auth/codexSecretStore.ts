@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { randomUUID } from 'node:crypto';
+import { identityForCredential, isSameCodexAccountOwner } from './codexAccountIdentity';
 import { decodeJwtPayload } from './codexJwt';
 import type { CodexAuthBundle, CodexCredentialRecord, LegacyCodexCredentialRecord, RefreshableCodexCredentialRecord } from './codexAuthTypes';
 
@@ -57,10 +59,10 @@ export class CodexSecretStore {
     return raw ? parseCredential(raw) : undefined;
   }
 
-  /** Persist a record under a derived account key; returns the key used. */
+  /** Persist a refreshable record, reusing a verified owner slot or allocating a local opaque key. */
   async setCredential(record: RefreshableCodexCredentialRecord, accountKey?: string): Promise<string> {
     await this.migrateLegacyIfNeeded();
-    const key = accountKey ?? deriveAccountKey(record);
+    const key = accountKey ?? await this.findAccountKeyFor(record) ?? `account-${randomUUID()}`;
     await this.secrets.store(this.accountKeyFor(key), JSON.stringify(record));
     await this.addToIndex(key);
     return key;
@@ -128,6 +130,18 @@ export class CodexSecretStore {
       index.activeAccountKey = accountKey;
     }
     await this.writeIndex(index);
+  }
+
+  private async findAccountKeyFor(record: RefreshableCodexCredentialRecord): Promise<string | undefined> {
+    const incomingIdentity = identityForCredential(record);
+    for (const accountKey of (await this.readIndex()).accountKeys) {
+      const raw = await this.secrets.get(this.accountKeyFor(accountKey));
+      const stored = raw ? parseCredential(raw) : undefined;
+      if (isRefreshableCredential(stored) && isSameCodexAccountOwner(incomingIdentity, identityForCredential(stored))) {
+        return accountKey;
+      }
+    }
+    return undefined;
   }
 
   /** Move the legacy single-key record into a derived account key. Runs once. */

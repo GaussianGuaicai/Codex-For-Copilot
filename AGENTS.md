@@ -29,6 +29,7 @@ Transport-related constraints that must not break:
 Account-usage constraints that must not break:
 
 - Compact account-usage display is driven by fields returned from the usage endpoint, not by guessed plan names or fixed window assumptions.
+- The status-bar account label is opt-in (`codexModelProvider.accountUsageShowAccountName`) and defaults off so compact usage remains readable with multiple accounts.
 - A complete workspace Credit budget takes compact-display precedence; unselected Credit budgets and rate-limit windows remain available in the details tooltip.
 - `rate_limit_reset_credits` is a reset-credit count, not a workspace Credit balance or budget.
 

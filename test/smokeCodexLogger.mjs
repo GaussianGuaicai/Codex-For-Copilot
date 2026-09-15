@@ -39,6 +39,8 @@ try {
     toolResult: 'TOOL_RESULT_SENTINEL',
     turnState: 'TURN_STATE_SENTINEL',
     previousResponseId: 'response-secret-id',
+    accountKey: 'local-account-key',
+    previousAccountKey: 'previous-local-account-key',
     circular,
     unreadable
   });
@@ -61,6 +63,8 @@ try {
   assert.equal(payloads[0].circular.self, '[circular]', 'circular references are safe');
   assert.equal(payloads[0].unreadable.value, '[unreadable]', 'throwing getters are safe');
   assert.equal(payloads[0].previousResponseId.length, 12, 'response identifiers are hashed');
+  assert.equal(payloads[0].accountKey.length, 12, 'local account keys are hashed');
+  assert.equal(payloads[0].previousAccountKey.length, 12, 'camelCase account keys are hashed');
   assert.equal(payloads[2].error.cause.message.includes('[redacted]'), true, 'error cause credentials are redacted');
   const output = events.map(({ message }) => message).join('\n');
   for (const secret of ['AUTHORIZATION_SENTINEL', 'COOKIE_SENTINEL', 'PROMPT_SENTINEL', 'INSTRUCTIONS_SENTINEL', 'TOOL_ARGUMENTS_SENTINEL', 'TOOL_RESULT_SENTINEL', 'TURN_STATE_SENTINEL', 'ACCESS_TOKEN_SENTINEL']) {
