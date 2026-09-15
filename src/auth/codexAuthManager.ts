@@ -78,6 +78,15 @@ export class CodexAuthManager implements vscode.Disposable {
     return snapshotFor(latest, key);
   }
 
+  /** Reads a stored credential without triggering proactive token refresh. */
+  async getStoredCredentialSnapshot(accountKey?: string): Promise<CodexCredentialSnapshot> {
+    const key = accountKey ?? await this.store.getActiveAccountKey();
+    if (!key) throw new AuthRequiredError();
+    const record = await this.store.getCredential(key);
+    if (!record) throw new AuthRequiredError();
+    return snapshotFor(record, key);
+  }
+
   async getAccessToken(accountKey?: string): Promise<string> { return (await this.getCredentialSnapshot(accountKey)).accessToken; }
 
   async switchAccount(accountKey: string): Promise<void> {

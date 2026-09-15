@@ -41,6 +41,7 @@ export interface ProviderConfig {
   instructions: string;
   defaultServiceTier?: 'default' | 'fast';
   defaultReasoningEffort?: KnownReasoningEffort;
+  accountUsageShowAccountName: boolean;
   maxOutputTokens: number;
   modelPricingUsdPerMTok: Record<string, ModelPricing>;
 }
@@ -85,6 +86,7 @@ export function getProviderConfig(): ProviderConfig {
     instructions: config.get('instructions', 'You are a helpful coding assistant integrated with VS Code.'),
     defaultServiceTier: normalizeDefaultServiceTier(config.get('defaultServiceTier', 'auto')),
     defaultReasoningEffort: normalizeDefaultReasoningEffort(config.get('defaultReasoningEffort', 'auto')),
+    accountUsageShowAccountName: config.get('accountUsageShowAccountName', false),
     maxOutputTokens: config.get('maxOutputTokens', 8192),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };

@@ -198,6 +198,14 @@
           ],
           "description": "Select which credential source the provider uses."
         },
+        "codexModelProvider.accountUsageShowAccountName": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the active account name next to Codex account limits in the status bar.",
+          "tags": [
+            "advanced"
+          ]
+        },
         "codexModelProvider.transport": {
           "type": "string",
           "default": "auto",

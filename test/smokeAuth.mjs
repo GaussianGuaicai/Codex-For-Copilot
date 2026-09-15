@@ -63,6 +63,7 @@ export * from ${repoImport('src/auth/codexPkce')};
 export * from ${repoImport('src/auth/codexOAuthClient')};
 export * from ${repoImport('src/auth/codexAuthenticationProvider')};
 export * from ${repoImport('src/auth/codexLoopbackLogin')};
+export * from ${repoImport('src/secrets')};
 `));
 
 await build({
@@ -172,6 +173,9 @@ try {
   assertEqual((await multiAccountManager.getCredentialSnapshot()).accessToken, 'user-a-token', 'switching restores user A credentials');
   await multiAccountManager.switchAccount(userBKey);
   assertEqual((await multiAccountManager.getCredentialSnapshot()).accessToken, 'user-b-token', 'switching restores user B credentials');
+  const inactiveAccountCredentials = await auth.getCodexCredentialsForAccount(multiAccountManager, userAKey, false);
+  assertEqual(inactiveAccountCredentials.apiKey, 'user-a-token', 'inactive account usage credentials retain the stored token');
+  assertEqual(inactiveAccountCredentials.authManager, undefined, 'inactive account usage credentials do not trigger refresh or 401 retry');
   const updatedUserAKey = await multiAccountManager.importAuthJson(authJsonFor('user-a', 'workspace-1', 'a@example.com', 'user-a-new-token'));
   assertEqual(updatedUserAKey, userAKey, 're-importing the same owner reuses its local key');
   assertEqual((await multiAccountManager.listAccounts()).length, 2, 're-importing the same owner does not duplicate the account');

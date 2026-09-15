@@ -129,9 +129,11 @@ async function readSecretStorageCredentials(context: vscode.ExtensionContext): P
 }
 
 /** Build Codex access-token credentials for one account, refreshing that account's token if needed. */
-export async function getCodexCredentialsForAccount(authManager: CodexAuthManager, accountKey: string): Promise<ApiCredentials | undefined> {
+export async function getCodexCredentialsForAccount(authManager: CodexAuthManager, accountKey: string, refresh = true): Promise<ApiCredentials | undefined> {
   try {
-    const snapshot = await authManager.getCredentialSnapshot(accountKey);
+    const snapshot = refresh
+      ? await authManager.getCredentialSnapshot(accountKey)
+      : await authManager.getStoredCredentialSnapshot(accountKey);
     const headers: Record<string, string> = { 'User-Agent': DEFAULT_USER_AGENT };
     if (snapshot.accountId?.trim()) {
       headers['ChatGPT-Account-ID'] = snapshot.accountId.trim();
@@ -140,7 +142,7 @@ export async function getCodexCredentialsForAccount(authManager: CodexAuthManage
       apiKey: snapshot.accessToken,
       headers,
       source: 'codexAuth',
-      authManager,
+      ...(refresh ? { authManager } : {}),
       accountKey,
       kind: 'codexAccessToken',
       omitMaxOutputTokens: true
