@@ -354,7 +354,7 @@ async function pickAccount(
   const items = accounts.map((account) => ({
     label: `${account.isActive ? '$(check) ' : ''}${accountDisplayName(account)}`,
     description: [account.isActive ? 'Active' : undefined, credentialSourceLabel(account.source)].filter(Boolean).join(' · '),
-    detail: account.reauthRequired ? 'Re-authentication required' : undefined,
+    detail: [workspaceLabel(account.accountId), account.reauthRequired ? 'Re-authentication required' : undefined].filter(Boolean).join(' · ') || undefined,
     account
   }));
   const picked = await vscode.window.showQuickPick(items, { title, placeHolder, matchOnDescription: true });
@@ -371,4 +371,9 @@ function credentialSourceLabel(source: 'extensionOAuth' | 'importedAuthJson' | '
     case 'importedAuthJson': return 'Imported auth.json';
     case 'legacyCodexFile': return 'Legacy Codex credentials';
   }
+}
+
+function workspaceLabel(accountId: string | undefined): string | undefined {
+  const normalized = accountId?.trim();
+  return normalized ? `Workspace ${normalized.slice(0, 8)}` : undefined;
 }
