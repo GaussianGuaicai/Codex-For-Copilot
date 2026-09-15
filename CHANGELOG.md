@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.0...v1.9.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **multi-account:** multi-account Codex identity storage ([#93](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/93)) ([38d63f1](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/38d63f1cff2c99f5eb75e3ffbffc8b9e36460235))
+
 ## [1.9.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.8.1...v1.9.0) (2026-09-08)
 
 
