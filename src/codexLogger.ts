@@ -21,7 +21,7 @@ const MAX_ERROR_CAUSES = 3;
 const SECRET_KEY = /(?:^|[_-])(authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|password|secret)(?:$|[_-])/i;
 const CONTENT_KEY = /^(?:prompt|instructions|input|output|content|reasoning|arguments?|result|encrypted|toolArguments|toolResult)$/i;
 const TURN_STATE_KEY = /(?:turn[_-]?state|sticky[_-]?state)/i;
-const IDENTIFIER_KEY = /(?:^|[_-])(response|previous[_-]?response|branch|call|thread|turn|session|installation|window)(?:[_-]?(?:id|key))?$/i;
+const IDENTIFIER_KEY = /(?:^|[_-])(response|previous[_-]?response|branch|call|thread|turn|session|installation|window|account)(?:[_-]?(?:id|key))?$/i;
 
 export class CodexLogger {
   private readonly context: LogFields;
