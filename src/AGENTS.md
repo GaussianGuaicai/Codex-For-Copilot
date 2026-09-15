@@ -13,6 +13,7 @@
 - `convertMessages.ts`: conversion from VS Code chat messages into Responses input items.
 - `responseBranchStore.ts`: in-memory branch reuse cache keyed by normalized request envelope and transcript prefix.
 - `auth/codexAuthenticationProvider.ts`: bridges saved ChatGPT OAuth credentials into VS Code's Authentication session registry.
+- `auth/codexAccountIdentity.ts`: extracts ChatGPT user, workspace, and profile identity claims used to safely distinguish saved account owners.
 - `codexWebSocketSession.ts`: serializes managed WebSocket streams and preserves safe continuation state.
 - `models.ts`: upstream model discovery and provider model shaping.
 - `codexModelCache.ts`: bounded stale-while-revalidate cache for discovered provider models.
@@ -25,6 +26,8 @@
 - Keep provider-visible callback semantics transport-agnostic: HTTP and WebSocket must report the same deltas and terminal events.
 - Keep ChatGPT Codex compatibility logic centralized in `responsesClient.ts`, `config.ts`, and `secrets.ts`; do not duplicate header or base URL normalization across call sites.
 - Native ChatGPT OAuth credentials must be exposed through the `codex-for-copilot` VS Code AuthenticationProvider and emit added, changed, or removed session events when credential state changes.
+- Local Codex account keys are opaque storage identities. Reuse one only for a verified matching ChatGPT user plus workspace (or legacy email plus workspace); never deduplicate by workspace ID alone.
+- Account selection UI must use readable email, source, and state labels. Show a concise remote workspace fingerprint in details when available, but never opaque local account keys or full remote IDs.
 - The loopback OAuth URL uses `localhost` but follows the upstream registered flow by binding `127.0.0.1`; callback responses must close browser connections, and server cleanup must never block credential persistence.
 - Keep the authorization endpoint and scopes synchronized with `openai/codex` `codex-rs/login/src/server.rs`; the current endpoint is `/oauth/authorize`, not the legacy `/authorize` path.
 - Keep Responses tool conversion and request-field shaping in `codexRequestBuilder.ts`; transport code consumes its shared request output rather than maintaining a second conversion path.
@@ -53,4 +56,5 @@
 - Request diagnostics must distinguish ordinary `previous_response_id` reuse, WebSocket tool-result incremental continuation, and tool-result full replay. Thinking Effort may arrive through `modelOptions`; support recognized reasoning and thinking shapes while logging only the resolved enum and its source.
 - Account usage must normalize server-provided Credit budgets from root `spend_control.individual_limit` and rate-limit buckets, plus balances and rate-limit windows, before display selection. Do not infer account usage from plan names or label a Credit budget with an unsupported billing period.
 - Account-usage fetches must apply the configured request identity headers after credential headers, matching model discovery and Responses requests.
+- Account-usage refreshes must re-run after an account switch that arrives mid-refresh. Only the active account may use refresh-and-retry authentication; inactive accounts use their stored token once so listing limits cannot rotate or reject their refresh credentials.
 - A complete workspace Credit budget is the compact account-usage display; all remaining rate limits and Credit budgets must remain visible in the details tooltip.

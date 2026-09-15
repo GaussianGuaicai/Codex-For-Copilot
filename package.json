@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "publisher": "Gaussian",
   "license": "MIT",
   "repository": {
@@ -205,6 +205,14 @@
             "Only use the API key saved with 'Codex: Set API Key'."
           ],
           "description": "Select which credential source the provider uses."
+        },
+        "codexModelProvider.accountUsageShowAccountName": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the active account name next to Codex account limits in the status bar.",
+          "tags": [
+            "advanced"
+          ]
         },
         "codexModelProvider.transport": {
           "type": "string",
