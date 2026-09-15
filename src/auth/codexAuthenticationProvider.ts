@@ -85,7 +85,8 @@ export class CodexAuthenticationProvider implements vscode.AuthenticationProvide
     const sessions: vscode.AuthenticationSession[] = [];
     for (const account of accounts) {
       try {
-        const snapshot = await this.authManager.getCredentialSnapshot(account.accountKey);
+        // Session enumeration must not rotate every stored account's refresh token.
+        const snapshot = await this.authManager.getStoredCredentialSnapshot(account.accountKey);
         sessions.push(toAuthenticationSession(account, snapshot));
       } catch {
         // Skip accounts whose credentials can no longer be read.

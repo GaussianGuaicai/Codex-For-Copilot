@@ -30,6 +30,7 @@
 - Authentication smoke coverage must verify that a native ChatGPT sign-in adds a VS Code session, a token refresh changes it, and sign-out removes it.
 - Authentication smoke coverage must preserve distinct local storage keys for different ChatGPT users sharing a workspace, while re-importing one verified owner updates its existing key.
 - Inactive-account usage reads must use stored credentials without invoking the refresh-and-retry path; only the active account may refresh while loading account limits.
+- Authentication-provider session enumeration must use stored snapshots so account switching never refreshes unrelated credentials.
 - Logging smoke coverage must assert local account keys are hashed alongside existing credential and request identifier redaction.
 - Loopback OAuth smoke coverage must verify the callback response closes the browser connection, success is shown only after credential persistence, token-exchange failures reach the browser, and login completion is not blocked by callback-server cleanup.
 - Keep HTTP and WebSocket assertions aligned so transport parity regressions are caught in one place.

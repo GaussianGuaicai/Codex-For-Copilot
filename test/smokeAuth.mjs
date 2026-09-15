@@ -391,6 +391,8 @@ try {
   const authChanges = new EventEmitter();
   let signedInSnapshot;
   const fakeAuthManager = {
+    credentialSnapshotCalls: 0,
+    storedCredentialSnapshotCalls: 0,
     onDidChangeAuth: authChanges.event,
     async getStatus() {
       return signedInSnapshot
@@ -404,6 +406,14 @@ try {
     },
     async getActiveAccountKey() { return signedInSnapshot ? 'acct_1' : undefined; },
     async getCredentialSnapshot() {
+      this.credentialSnapshotCalls += 1;
+      if (!signedInSnapshot) {
+        throw new Error('not signed in');
+      }
+      return signedInSnapshot;
+    },
+    async getStoredCredentialSnapshot() {
+      this.storedCredentialSnapshotCalls += 1;
       if (!signedInSnapshot) {
         throw new Error('not signed in');
       }
@@ -431,6 +441,8 @@ try {
   const session = await authenticationProvider.createSession(['openid'], {});
   await flushEvents();
   assertEqual(session.account.id, 'acct_1', 'session uses Codex account ID');
+  assertEqual(fakeAuthManager.credentialSnapshotCalls, 0, 'session enumeration avoids refresh-capable credential reads');
+  assertEqual(fakeAuthManager.storedCredentialSnapshotCalls > 0, true, 'session enumeration reads stored credential snapshots');
   assertEqual(sessionChanges[0].added[0].id, session.id, 'sign-in adds a VS Code session');
   signedInSnapshot = { ...signedInSnapshot, accessToken: 'refreshed-access-token', revision: 'second' };
   authChanges.fire({ reason: 'tokensRefreshed' });
