@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.1...v1.9.2) (2026-09-16)
+
+
+### Bug Fixes
+
+* **web-search:** make #webSearch usable by any tool-capable model ([#92](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/92)) ([3bca92e](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/3bca92e22eee0deef49678c308cd35fa038d1bea))
+
 ## [1.9.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.0...v1.9.1) (2026-09-15)
 
 
