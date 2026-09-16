@@ -24,7 +24,7 @@ Codex For Copilot is a lightweight VS Code Language Model Provider that connects
 - **Automatic model discovery** — exposes available upstream Codex models with configurable fallbacks.
 - **Fast streaming transport** — supports reusable WebSocket sessions with HTTP fallback.
 - **VS Code tool support** — forwards built-in, extension, and MCP tool calls through the Responses API.
-- **Hosted Web Search** — optionally gives Codex live web access through OpenAI's native Responses tool, with clickable sources.
+- **Hosted Web Search** — optionally gives Codex live web access through OpenAI's native Responses tool, with clickable sources. The same `#webSearch` tool also works with other tool-capable VS Code models.
 - **Optional Native Tool Search** — lets compatible Codex models search selected Agent tools on demand when you explicitly enable it.
 - **Conversation continuity** — reuses compatible response branches for efficient follow-up turns.
 - **Usage visibility** — shows available account limits or Credits in the status bar when supplied by the backend.
@@ -50,7 +50,7 @@ The extension stores imported and signed-in ChatGPT credentials in VS Code Secre
 
 Open VS Code Chat, choose **Codex** from the model picker, and start chatting or using Agent mode.
 
-To give a request live web access, enable **Web Search** in the Chat tools picker or reference `#webSearch` in the prompt. The Codex backend executes the search directly; the extension does not expose it as a VS Code function call.
+To give a request live web access, enable **Web Search** in the Chat tools picker or reference `#webSearch` in the prompt. With a Codex model the Codex backend executes the search directly through OpenAI's hosted `web_search` tool. With any other tool-capable VS Code model, the same `#webSearch` tool runs one isolated Responses request that also uses OpenAI's hosted `web_search` tool and returns the synthesized answer plus sources.
 
 Web Search settings under **Settings → Extensions → Codex** let you choose live or cached access, search context size, and an optional domain allowlist. You can also choose whether Chat shows compact statuses, search/open/find actions, or actions with clickable source pages.
 

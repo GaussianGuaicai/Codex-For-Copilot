@@ -5127,7 +5127,7 @@ async function runProviderStreamRateLimitIsolationSmokeTest() {
     subscriptions: []
   };
   const webSearchTool = {
-    name: 'codexForCopilot_searchWeb',
+    name: 'codexForCopilot_webSearch',
     description: 'Hosted Web Search selection marker',
     inputSchema: { type: 'object', properties: {} }
   };
