@@ -57,6 +57,7 @@ try {
   await runHttpTerminalFailureSmokeTest(streamResponseText);
   await runManagedWebSocketAccountKeyPinningSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
+  await runUnsupportedHttpContinuationSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
   await runManagedAutoFallbackVisibilitySmokeTest(streamResponseText);
@@ -937,6 +938,66 @@ async function runHttpTransportSmokeTest(streamResponseText) {
       { phase: 'text-started', source: 'summary', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0, presentationId: 'summary-fallback:2', textLength: 12 },
       { phase: 'text-completed', source: 'summary', itemId: 'rs_fallback', partIndex: 0, outputIndex: 0, presentationId: 'summary-fallback:2', textLength: 12 }
     ]), 'reasoning lifecycle logs structural boundaries without retaining reasoning text');
+  } finally {
+    server.close();
+  }
+}
+
+async function runUnsupportedHttpContinuationSmokeTest(streamResponseText, isContinuationMiss) {
+  const rejection = 'Unsupported parameter: previous_response_id';
+  const cases = [
+    { label: 'top-level detail', body: { detail: rejection }, expected: true },
+    { label: 'structured message', body: { error: { message: rejection } }, expected: true },
+    { label: 'structured detail', body: { error: { detail: rejection } }, expected: true },
+    { label: 'no previous id', body: { detail: rejection }, previousResponseId: undefined, expected: false },
+    { label: 'other parameter', body: { detail: 'Unsupported parameter: temperature' }, expected: false },
+    { label: 'ordinary bad request', body: { detail: 'Invalid input' }, expected: false },
+    { label: 'diagnostic prose', body: { detail: `Backend mentioned ${rejection} during diagnostics.` }, expected: false },
+    { label: 'wrong status', body: { detail: rejection }, status: 422, expected: false }
+  ];
+  let activeCase;
+  let requestCount = 0;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // Consume the request before returning the actual SDK error envelope.
+    }
+    requestCount += 1;
+    response.writeHead(activeCase.status ?? 400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(activeCase.body));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const testCase of cases) {
+      activeCase = testCase;
+      requestCount = 0;
+      let capturedError;
+      try {
+        await streamResponseText({
+          baseURL: `http://127.0.0.1:${server.address().port}/backend-api/codex/responses`,
+          apiKey: 'test-api-key',
+          headers: createHeaders(),
+          transport: 'http',
+          previousResponseId: 'previousResponseId' in testCase ? testCase.previousResponseId : 'resp_unsupported',
+          omitMaxOutputTokens: true,
+          model: 'gpt-5.5',
+          instructions: 'Smoke test instructions',
+          input: [{ role: 'user', content: 'Continue.' }],
+          maxOutputTokens: 32,
+          token: createCancellationToken(),
+          onTextDelta() {}
+        });
+      } catch (error) {
+        capturedError = error;
+      }
+      assertEqual(capturedError instanceof Error, true, `${testCase.label} surfaces an error`);
+      assertEqual(isContinuationMiss(capturedError), testCase.expected, `${testCase.label} classification`);
+      assertEqual(requestCount, 1, `${testCase.label} client does not retry`);
+      if (testCase.expected) {
+        assertEqual(capturedError.previousResponseId, 'resp_unsupported', `${testCase.label} response id`);
+        assertEqual(capturedError.disableReuseUntilExpiry, true, `${testCase.label} disables reuse`);
+        assertEqual(capturedError.cause?.status, 400, `${testCase.label} preserves SDK cause`);
+      }
+    }
   } finally {
     server.close();
   }
