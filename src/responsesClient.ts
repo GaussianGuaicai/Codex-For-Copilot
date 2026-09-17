@@ -326,6 +326,15 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         throw error;
       }
 
+      if (isUnsupportedHttpContinuationRejection(error)) {
+        throw new ResponsesContinuationMissError(
+          'Responses API rejected previous_response_id over HTTP.',
+          options.previousResponseId,
+          { cause: error instanceof Error ? error : undefined },
+          true
+        );
+      }
+
       if (isResponsesContinuationMissPayload(error)) {
         throw new ResponsesContinuationMissError(
           CONTINUATION_MISS_MESSAGE,
@@ -1642,6 +1651,26 @@ function parseToolCallInput(argumentsJson: string): object {
   } catch {
     return { _raw: argumentsJson };
   }
+}
+
+function isUnsupportedHttpContinuationRejection(error: unknown): boolean {
+  if (!(error instanceof APIError) || error.status !== 400) {
+    return false;
+  }
+
+  const rejection = 'Unsupported parameter: previous_response_id';
+  let matched = false;
+  // The SDK may preserve a top-level detail only in its status-prefixed message.
+  walkErrorEnvelope({ error: error.error, message: error.message.replace(/^400\s+/, '') }, (value) => {
+    if (typeof value === 'string') {
+      matched = value.trim() === rejection;
+    } else if (typeof value === 'object' && value !== null) {
+      const detail = readOwnErrorProperty(value, 'detail');
+      matched = typeof detail === 'string' && detail.trim() === rejection;
+    }
+    return !matched;
+  });
+  return matched;
 }
 
 function isOpaqueHttpContinuationRejection(error: unknown): boolean {

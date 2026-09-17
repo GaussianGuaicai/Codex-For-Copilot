@@ -232,6 +232,8 @@ try {
   await runStatefulMarkerRecordFailureSmokeTest();
   await runStatefulMarkerInvalidCompletionIdSmokeTest();
   await runHttpContinuationRecoverySmokeTest();
+  await runHttpContinuationRecoverySmokeTest({ unsupported: true });
+  await runHttpContinuationRecoverySmokeTest({ unsupported: true, rejectRecovery: true });
   await runStructuredHttpContinuationRecoverySmokeTest();
   await runContinuationMissAfterVisibleOutputSmokeTest();
   await runRequestEnvelopeReuseInvalidationSmokeTest();
@@ -2604,7 +2606,7 @@ async function runStatefulMarkerInvalidCompletionIdSmokeTest() {
   }
 }
 
-async function runHttpContinuationRecoverySmokeTest() {
+async function runHttpContinuationRecoverySmokeTest({ unsupported = false, rejectRecovery = false } = {}) {
   const responseRequests = [];
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
@@ -2621,9 +2623,9 @@ async function runHttpContinuationRecoverySmokeTest() {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     responseRequests.push(body);
 
-    if (body.previous_response_id) {
-      response.writeHead(400);
-      response.end();
+    if (body.previous_response_id || (rejectRecovery && responseRequests.length > 1)) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(unsupported ? JSON.stringify({ detail: 'Unsupported parameter: previous_response_id' }) : undefined);
       return;
     }
 
@@ -2673,17 +2675,25 @@ async function runHttpContinuationRecoverySmokeTest() {
       token
     );
 
-    await provider.provideLanguageModelChatResponse(
-      model,
-      [
-        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
-        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
-        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
-      ],
-      {},
-      { report() {} },
-      token
-    );
+    let recoveryError;
+    try {
+      await provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+        ],
+        {},
+        { report() {} },
+        token
+      );
+    } catch (error) {
+      recoveryError = error;
+    }
+    if (!rejectRecovery && recoveryError) {
+      throw recoveryError;
+    }
 
     assertEqual(responseRequests.length, 3, 'continuation recovery request count');
     assertEqual(responseRequests[1].previous_response_id, 'resp_initial', 'continuation request response id');
@@ -2698,6 +2708,12 @@ async function runHttpContinuationRecoverySmokeTest() {
       ]),
       'recovery request full input'
     );
+
+    if (rejectRecovery) {
+      assertEqual(recoveryError instanceof Error, true, 'failed full replay surfaces an error without further retries');
+      assertEqual(recoveryError.message.includes('Unsupported parameter: previous_response_id'), true, 'failed full replay preserves the rejection');
+      return;
+    }
 
     await provider.provideLanguageModelChatResponse(
       model,
