@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.2...v1.9.3) (2026-09-20)
+
+
+### Bug Fixes
+
+* **http:** Fix HTTP continuation recovery for unsupported previous_response_id ([#96](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/96)) ([6d83780](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/6d83780c687e65f90467a3bf7bc92f908bafa975))
+
 ## [1.9.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.1...v1.9.2) (2026-09-16)
 
 
