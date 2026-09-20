@@ -234,6 +234,7 @@ try {
   await runHttpContinuationRecoverySmokeTest();
   await runHttpContinuationRecoverySmokeTest({ unsupported: true });
   await runHttpContinuationRecoverySmokeTest({ unsupported: true, rejectRecovery: true });
+  await runAutoTransportHttpContinuationRecoverySmokeTest();
   await runStructuredHttpContinuationRecoverySmokeTest();
   await runContinuationMissAfterVisibleOutputSmokeTest();
   await runRequestEnvelopeReuseInvalidationSmokeTest();
@@ -2743,6 +2744,304 @@ async function runHttpContinuationRecoverySmokeTest({ unsupported = false, rejec
       'disabled continuation full input'
     );
   } finally {
+    await closeServer(server);
+  }
+}
+
+async function runAutoTransportHttpContinuationRecoverySmokeTest() {
+  const webSocketRequests = [];
+  const httpRequests = [];
+  const httpRejection = {};
+  const sockets = new Set();
+  let recoveryResponseCount = 0;
+  let webSocketRequestCount = 0;
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      return;
+    }
+
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    httpRequests.push(body);
+
+    if (httpRequests.length === 1) {
+      if (body.previous_response_id !== 'resp_initial') {
+        response.writeHead(500, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'Expected the rejected HTTP continuation request.' } }));
+        return;
+      }
+      httpRejection.status = 400;
+      httpRejection.body = { detail: 'Unsupported parameter: previous_response_id' };
+      response.writeHead(httpRejection.status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(httpRejection.body));
+      return;
+    }
+
+    if (body.previous_response_id) {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Recovery requests must omit previous_response_id.' } }));
+      return;
+    }
+
+    recoveryResponseCount += 1;
+    writeSseResponseWithOutputItem(
+      response,
+      recoveryResponseCount === 1 ? 'recovered reply' : 'final reply',
+      recoveryResponseCount === 1 ? 'resp_recovered' : 'resp_final',
+      recoveryResponseCount === 1 ? 'msg_recovered' : 'msg_final'
+    );
+  });
+  const webSocketServer = new webSocketModule.WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+
+  webSocketServer.on('connection', (webSocket) => {
+    sockets.add(webSocket);
+    webSocket.once('close', () => sockets.delete(webSocket));
+    webSocket.on('message', (data) => {
+      const body = JSON.parse(data.toString());
+      webSocketRequests.push(body);
+      webSocketRequestCount += 1;
+
+      if (webSocketRequestCount === 1) {
+        sendWebSocketTextResponse(webSocket, 'first reply', 'resp_initial', 'msg_initial');
+        return;
+      }
+
+      if (webSocketRequestCount === 2 && body.previous_response_id === 'resp_initial') {
+        webSocket.close(1011, 'WebSocket connection closed before output');
+        return;
+      }
+
+      if (webSocketRequestCount === 3 && !body.previous_response_id) {
+        sendWebSocketTextResponse(webSocket, 'final reply', 'resp_final', 'msg_final');
+        return;
+      }
+
+      webSocket.close(1011, 'Unexpected WebSocket continuation request');
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalFetch = globalThis.fetch;
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const originalTransport = configValues.transport;
+  const originalWebsocketPrewarm = configValues.websocketPrewarm;
+  const originalNoProxy = process.env.NO_PROXY;
+  const originalRewriteWebSocketURL = rewriteWebSocketURL;
+  const logs = [];
+  configValues.baseURL = 'https://chatgpt.com/backend-api/codex/responses';
+  configValues.credentialsSource = 'codexAuth';
+  configValues.transport = 'auto';
+  configValues.websocketPrewarm = 'disabled';
+  process.env.NO_PROXY = [originalNoProxy, 'chatgpt.com'].filter(Boolean).join(',');
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    const targetUrl = new URL(requestUrl);
+    targetUrl.protocol = 'http:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return originalFetch(targetUrl, init);
+  };
+  rewriteWebSocketURL = (input) => {
+    const targetUrl = new URL(input.toString());
+    targetUrl.protocol = 'ws:';
+    targetUrl.hostname = '127.0.0.1';
+    targetUrl.port = String(address.port);
+    return targetUrl;
+  };
+
+  const context = { subscriptions: [] };
+  const provider = new CodexModelProvider(
+    context,
+    createOutputChannel(logs),
+    undefined,
+    undefined,
+    undefined,
+    {
+      async getCredentialSnapshot() {
+        return {
+          source: 'legacyCodexFile',
+          accessToken: 'auto-continuation-token',
+          accountId: 'auto-continuation-account',
+          revision: 'auto-continuation-revision',
+          refreshable: false
+        };
+      }
+    }
+  );
+
+  try {
+    const token = createCancellationToken();
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    if (!model) {
+      throw new Error('Expected model for auto transport HTTP continuation recovery coverage.');
+    }
+
+    const initialParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] }],
+        {},
+        { report(part) { initialParts.push(part); } },
+        token
+      ),
+      token,
+      'auto transport continuation initial turn'
+    );
+
+    assertEqual(webSocketRequests.length, 1, 'auto continuation initial turn starts with WebSocket');
+    assertEqual('previous_response_id' in webSocketRequests[0], false, 'initial WebSocket request has no previous response id');
+    assertEqual(
+      JSON.stringify(webSocketRequests[0].input),
+      JSON.stringify([{ role: 'user', content: 'First request', type: 'message' }]),
+      'initial WebSocket request sends the complete initial input'
+    );
+    assertEqual(
+      initialParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'first reply',
+      'initial WebSocket response is emitted once'
+    );
+
+    const recoveredParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] }
+        ],
+        {},
+        { report(part) { recoveredParts.push(part); } },
+        token
+      ),
+      token,
+      'auto transport continuation recovery'
+    );
+
+    assertEqual(webSocketRequests.length, 2, 'second turn first attempts WebSocket exactly once');
+    assertEqual(webSocketRequests[1].previous_response_id, 'resp_initial', 'second WebSocket request uses the reusable response id');
+    assertEqual(
+      JSON.stringify(webSocketRequests[1].input),
+      JSON.stringify([{ role: 'user', content: 'Follow up', type: 'message' }]),
+      'second WebSocket request sends only incremental input'
+    );
+    assertEqual(httpRejection.status, 400, 'HTTP fallback returns the unsupported continuation status');
+    assertEqual(
+      JSON.stringify(httpRejection.body),
+      JSON.stringify({ detail: 'Unsupported parameter: previous_response_id' }),
+      'HTTP fallback returns the exact unsupported continuation body'
+    );
+    assertEqual(httpRequests.length, 2, 'WebSocket failure falls back to one HTTP continuation request and one recovery request');
+    assertEqual(httpRequests[0].previous_response_id, 'resp_initial', 'HTTP fallback preserves previous_response_id');
+    assertEqual(
+      JSON.stringify(httpRequests[0].input),
+      JSON.stringify([{ role: 'user', content: 'Follow up', type: 'message' }]),
+      'HTTP fallback preserves incremental input'
+    );
+    const fallbackMessages = logs
+      .filter((entry) => entry.message.includes('response transport fallback'))
+      .map((entry) => entry.message);
+    assertEqual(
+      fallbackMessages.filter((message) => message.includes('WebSocket connection closed before output')).length,
+      1,
+      'exactly one WebSocket-to-HTTP fallback is reported for the rejected turn'
+    );
+    assertEqual('previous_response_id' in httpRequests[1], false, 'recovery request omits previous_response_id');
+    assertEqual(
+      JSON.stringify(httpRequests[1].input),
+      JSON.stringify([
+        { role: 'user', content: 'First request', type: 'message' },
+        { role: 'assistant', content: 'first reply', type: 'message' },
+        { role: 'user', content: 'Follow up', type: 'message' }
+      ]),
+      'recovery request contains the complete conversation history'
+    );
+    assertEqual(
+      recoveredParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'recovered reply',
+      'recovered assistant output is emitted exactly once'
+    );
+    assertEqual(recoveredParts.filter((part) => part instanceof LanguageModelTextPart).length, 1, 'recovery emits one visible text part');
+
+    const finalParts = [];
+    await withSmokeTimeout(
+      provider.provideLanguageModelChatResponse(
+        model,
+        [
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('First request')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('first reply')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Follow up')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('recovered reply')] },
+          { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('One more request')] }
+        ],
+        {},
+        { report(part) { finalParts.push(part); } },
+        token
+      ),
+      token,
+      'auto transport continuation disabled follow-up'
+    );
+
+    assertEqual(webSocketRequests.length, 3, 'disabled continuation sends one full-input follow-up without retrying the rejected continuation');
+    assertEqual('previous_response_id' in webSocketRequests[2], false, 'final request does not reuse the rejected response id');
+    assertEqual(
+      JSON.stringify(webSocketRequests[2].input),
+      JSON.stringify([
+        { role: 'user', content: 'First request', type: 'message' },
+        { role: 'assistant', content: 'first reply', type: 'message' },
+        { role: 'user', content: 'Follow up', type: 'message' },
+        { role: 'assistant', content: 'recovered reply', type: 'message' },
+        { role: 'user', content: 'One more request', type: 'message' }
+      ]),
+      'final WebSocket request uses complete input after auto continuation rejection'
+    );
+    assertEqual(
+      finalParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'final reply',
+      'final follow-up succeeds without a continuation retry'
+    );
+  } finally {
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    globalThis.fetch = originalFetch;
+    rewriteWebSocketURL = originalRewriteWebSocketURL;
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
+    configValues.transport = originalTransport;
+    if (originalWebsocketPrewarm === undefined) {
+      delete configValues.websocketPrewarm;
+    } else {
+      configValues.websocketPrewarm = originalWebsocketPrewarm;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    for (const socket of sockets) {
+      socket.terminate();
+    }
+    await closeWebSocketServer(webSocketServer);
     await closeServer(server);
   }
 }
@@ -5501,6 +5800,28 @@ function writeSseResponse(response, text, responseId) {
   response.write(`data: ${JSON.stringify({ type: 'response.completed', response: { id: responseId, object: 'response', status: 'completed' } })}\n\n`);
   response.write('data: [DONE]\n\n');
   response.end();
+}
+
+function sendWebSocketTextResponse(webSocket, text, responseId, itemId) {
+  webSocket.send(JSON.stringify({
+    type: 'response.created',
+    response: { id: responseId, object: 'response', status: 'in_progress' }
+  }));
+  webSocket.send(JSON.stringify({ type: 'response.output_text.delta', delta: text }));
+  webSocket.send(JSON.stringify({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      id: itemId,
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text }]
+    }
+  }));
+  webSocket.send(JSON.stringify({
+    type: 'response.completed',
+    response: { id: responseId, object: 'response', status: 'completed' }
+  }));
 }
 
 function writeSseResponseWithOutputItem(response, text, responseId, itemId) {
