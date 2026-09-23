@@ -1725,8 +1725,15 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const upstreamModels = await fetchAvailableModels(config, credentials, token, clientIdentity);
     const models = this.applyModelDiscoveryPolicy(buildProviderModels(config, upstreamModels, credentials.kind), config, authIdentity);
     logger.debug('getAvailableModels discovery success', {
+      catalogClientVersion: config.clientVersion,
       discoveredCount: upstreamModels.length,
       returnedCount: models.length,
+      minimumClientVersions: upstreamModels.flatMap((model) => {
+        const version = model.minimal_client_version;
+        return typeof version === 'string' && version.trim()
+          ? [{ slug: model.slug, minimalClientVersion: version.trim() }]
+          : [];
+      }),
       models: models.map((model) => ({
         requestModel: model.requestModel,
         activeRawContextWindow: model.rawContextWindow,

@@ -185,8 +185,8 @@
         },
         "codexModelProvider.clientVersion": {
           "type": "string",
-          "default": "0.0.0",
-          "description": "client_version query parameter used when discovering available upstream models.",
+          "default": "999.0.0",
+          "description": "Advanced override for the client_version query parameter used only when discovering upstream models; independent of the Codex protocol version.",
           "tags": [
             "advanced"
           ]

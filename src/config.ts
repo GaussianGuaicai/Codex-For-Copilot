@@ -8,6 +8,8 @@ import {
   type RequestIdentitySettings
 } from './codexRequestIdentity';
 
+export const CODEX_CATALOG_CLIENT_VERSION = '999.0.0';
+
 export interface ModelPricing {
   input?: number;
   cachedInput?: number;
@@ -51,7 +53,7 @@ export function getProviderConfig(): ProviderConfig {
 
   return {
     baseURL: config.get('baseURL', 'https://chatgpt.com/backend-api/codex/responses'),
-    clientVersion: config.get('clientVersion', '0.0.0'),
+    clientVersion: config.get('clientVersion', CODEX_CATALOG_CLIENT_VERSION),
     credentialsSource: config.get('credentialsSource', 'auto'),
     transport: normalizeTransport(config.get('transport', 'auto')),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
