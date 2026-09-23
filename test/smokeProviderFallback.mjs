@@ -216,6 +216,7 @@ try {
   await runUnauthorizedLegacyToolCallSmokeTest();
   await runNativeReplayValidationSmokeTest();
   await runModelCatalogMetadataSmokeTest();
+  await runFutureModelCatalogSmokeTest();
   await runProviderMalformedCatalogFallbackSmokeTest();
   await runProviderLongContextSelectionSmokeTest();
   await runProviderFallbackSmokeTest();
@@ -1029,6 +1030,74 @@ async function runModelCatalogMetadataSmokeTest() {
     assertEqual(catalogRequestCount, 7, 'visibility, credential-kind, and catalog validation request count');
   } finally {
     server.close();
+  }
+}
+
+async function runFutureModelCatalogSmokeTest() {
+  const requestedVersions = [];
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    if (request.method !== 'GET' || url.pathname !== '/backend-api/codex/models') {
+      response.writeHead(500);
+      response.end();
+      return;
+    }
+    const version = url.searchParams.get('client_version');
+    requestedVersions.push(version);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ models: version === '0.0.0'
+      ? [createMockModel('gpt-legacy', 'GPT Legacy')]
+      : [createMockModel('gpt-future-sol', 'GPT Future Sol', {
+          context_window: 420000,
+          max_context_window: 900000,
+          effective_context_window_percent: 80,
+          default_reasoning_level: 'high',
+          supported_reasoning_levels: [
+            { effort: 'low', description: 'Low reasoning' },
+            { effort: 'high', description: 'High reasoning' }
+          ],
+          minimal_client_version: '1000.0.0'
+        })] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const originalBaseURL = configValues.baseURL;
+  const originalClientVersion = configValues.clientVersion;
+  const originalCredentialsSource = configValues.credentialsSource;
+  configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+  configValues.credentialsSource = 'secretStorage';
+  configValues.clientVersion = '0.0.0';
+  const logs = [];
+  const provider = new CodexModelProvider({
+    secrets: { async get() { return 'test-api-key'; } },
+    subscriptions: []
+  }, createOutputChannel(logs));
+
+  try {
+    const token = createCancellationToken();
+    const legacy = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(legacy.map((model) => model.id).join(','), 'codex::gpt-legacy', 'old catalog is cached separately');
+
+    delete configValues.clientVersion;
+    const discovered = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(discovered.map((model) => model.id).join(','), 'codex::gpt-future-sol', 'unknown model appears with the default catalog version');
+    assertEqual(discovered[0].name, 'GPT Future Sol', 'future model uses upstream display name');
+    assertEqual(discovered[0].maxInputTokens, 720000, 'future model uses upstream maximum context and effective percentage');
+    assertEqual(discovered[0].configurationSchema?.properties?.contextSize?.enum.join(','), '336000,720000', 'future model exposes discovered active and long context');
+    assertEqual(discovered[0].configurationSchema?.properties?.reasoningEffort?.enum.join(','), 'high,low', 'future model exposes upstream reasoning levels');
+    assertEqual(discovered[0].configurationSchema?.properties?.reasoningEffort?.default, 'high', 'future model uses upstream default reasoning');
+    assertEqual(logs.some((entry) => entry.level === 'debug' && entry.message.includes('minimalClientVersion') && entry.message.includes('1000.0.0')), true, 'minimum client version is logged without filtering the model');
+    await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(requestedVersions.join(','), '0.0.0,999.0.0', 'default version re-fetches once without reusing old catalog');
+
+    configValues.clientVersion = '1000.0.0';
+    await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(requestedVersions.join(','), '0.0.0,999.0.0,1000.0.0', 'advanced version override has a distinct cache key');
+  } finally {
+    configValues.baseURL = originalBaseURL;
+    configValues.clientVersion = originalClientVersion;
+    configValues.credentialsSource = originalCredentialsSource;
+    await closeServer(server);
   }
 }
 

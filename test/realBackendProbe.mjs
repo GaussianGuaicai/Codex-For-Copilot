@@ -42,12 +42,23 @@ const requestServiceTier = requestedServiceTier === 'fast'
 
 const tempDir = await mkdtemp(join(resolveTempDirectory(), 'codex-for-copilot-real-'));
 const secretsBundlePath = join(tempDir, 'secrets.cjs');
+const configBundlePath = join(tempDir, 'config.cjs');
 const modelsBundlePath = join(tempDir, 'models.cjs');
 const responsesBundlePath = join(tempDir, 'responsesClient.cjs');
 const moduleLoad = Module._load;
 const require = createRequire(import.meta.url);
 
 try {
+  await build({
+    entryPoints: ['src/config.ts'],
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    target: 'node20',
+    outfile: configBundlePath,
+    external: ['vscode']
+  });
+
   await build({
     entryPoints: ['src/secrets.ts'],
     bundle: true,
@@ -97,6 +108,7 @@ try {
     return moduleLoad.call(this, request, parent, isMain);
   };
 
+  const { getProviderConfig } = require(configBundlePath);
   const { getApiCredentials, DEFAULT_USER_AGENT } = require(secretsBundlePath);
   const { fetchAvailableModels } = require(modelsBundlePath);
   const {
@@ -137,7 +149,7 @@ try {
   assertEqual(credentials.omitMaxOutputTokens, true, 'omit max_output_tokens');
   const discoveredModels = await fetchAvailableModels({
     baseURL: 'https://chatgpt.com/backend-api/codex/responses',
-    clientVersion: '0.0.0',
+    clientVersion: getProviderConfig().clientVersion,
     includeHiddenModels: false
   }, credentials, {
     isCancellationRequested: false,

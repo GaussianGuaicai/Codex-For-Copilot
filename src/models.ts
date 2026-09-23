@@ -66,6 +66,7 @@ interface UpstreamModel {
   supported_in_api?: unknown;
   visibility?: unknown;
   multi_agent_version?: unknown;
+  minimal_client_version?: unknown;
   default_reasoning_level?: unknown;
   supported_reasoning_levels?: unknown;
 }

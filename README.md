@@ -101,6 +101,7 @@ Most users can keep the defaults. Advanced settings are available under **Settin
 
 - credential source
 - backend URL
+- model catalog `client_version` override (defaults to `999.0.0` for discovery only; does not change Codex protocol headers)
 - HTTP or WebSocket transport
 - fallback model and model visibility
 - reasoning effort and service tier
