@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.4](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.3...v1.9.4) (2026-09-23)
+
+
+### Bug Fixes
+
+* **release:** validate single-commit squash titles ([#100](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/100)) ([606509b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/606509bc3d60fa4229b88184edf972fe24978f41))
+
 ## [1.9.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.2...v1.9.3) (2026-09-20)
 
 
