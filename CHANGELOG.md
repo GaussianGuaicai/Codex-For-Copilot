@@ -7,6 +7,7 @@ This changelog is maintained by Release Please from Conventional Commit titles m
 
 ### Bug Fixes
 
+* **models:** discover new Codex models automatically ([#99](https://github.com/GaussianGuaicai/Codex-For-Copilot/pull/99)) ([26ac812](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/26ac81248ef035163e37b7bebf9d810e23dd8879))
 * **release:** validate single-commit squash titles ([#100](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/100)) ([606509b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/606509bc3d60fa4229b88184edf972fe24978f41))
 
 ## [1.9.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.2...v1.9.3) (2026-09-20)
