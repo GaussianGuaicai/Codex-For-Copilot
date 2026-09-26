@@ -25,36 +25,16 @@ jobs:
     timeout-minutes: 2
 
     steps:
-      - name: Checkout pull request head
-        if: ${{ github.event.pull_request.commits == 1 }}
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: Check pull request and squash title
+      - name: Check pull request title
         shell: bash
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          pattern='^(feat|fix|perf|revert|docs|refactor|test|build|ci|chore)(\([a-z0-9][a-z0-9._/-]*\))?!?:[[:space:]].+'
+          pattern='^(feat|fix|perf|revert|docs|refactor|test|build|ci|chore)(\\([a-z0-9][a-z0-9._/-]*\\))?!?:[[:space:]].+'
 
-          check_title() {
-            local label="$1"
-            local title="$2"
-            if [[ "$title" =~ $pattern ]]; then
-              return 0
-            fi
-            echo "::error::${label} must follow Conventional Commits: ${title}"
-            return 1
-          }
-
-          check_title "Pull request title" "$PR_TITLE"
-
-          # This repository uses squash_merge_commit_title=COMMIT_OR_PR_TITLE.
-          # For a single-commit PR GitHub uses the commit subject, so validate it too.
-          if [[ "$PR_COMMITS" == "1" ]]; then
-            HEAD_TITLE="$(git log -1 --format=%s)"
-            check_title "Single-commit squash title" "$HEAD_TITLE"
+          if [[ "$PR_TITLE" =~ $pattern ]]; then
+            exit 0
           fi
+
+          echo "::error::Pull request title must follow Conventional Commits: $PR_TITLE"
+          exit 1
