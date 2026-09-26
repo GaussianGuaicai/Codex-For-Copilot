@@ -130,10 +130,15 @@ npm run package:vsix
 
 Release and Marketplace publishing details are documented in [docs/releasing.md](docs/releasing.md).
 
-## Remote-SSH
+## Remote workspaces
 
-The extension runs in the local UI extension host so it can use credentials stored on your computer. When working over Remote-SSH, keep the extension installed locally rather than installing a second copy on the remote host.
+In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the workspace extension host. In a local workspace it runs locally. This keeps the Codex model provider alongside the remote Chat agent, matching the workaround confirmed in [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25) while [VS Code investigates the upstream routing bug](https://github.com/microsoft/vscode/issues/326554). VS Code chooses the host from the extension manifest, so no `remote.extensionKind` setting is needed for the normal setup.
+
+VS Code SecretStorage is backed by the local client even when an extension runs remotely, so credentials saved through this extension remain available. The read-only `~/.codex/auth.json` fallback instead reads from the machine running the extension; import the file or sign in through the extension if that file exists only on your computer. For sign-in from a remote host, use **Codex for Copilot: Sign in with Device Code** if the browser callback cannot reach the remote loopback listener. The remote host must also be able to reach the Codex backend; configure a proxy for its extension host if needed.
+
+If a remote chat still routes to a Copilot model, use **Developer: Show Running Extensions** to check where Codex For Copilot runs and check for a local `remote.extensionKind` override. The upstream fix will work with this manifest without another extension update. If you later prefer local execution, you can set `"remote.extensionKind": { "gaussian.gaussian-codex-for-copilot": ["ui"] }` in local User Settings.
 
 ## License
 
 [MIT](LICENSE)
+
