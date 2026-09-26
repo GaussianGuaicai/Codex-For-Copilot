@@ -132,11 +132,11 @@ Release and Marketplace publishing details are documented in [docs/releasing.md]
 
 ## Remote workspaces
 
-In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the workspace extension host. In a local workspace it runs locally. This keeps the Codex model provider alongside the remote Chat agent, matching the workaround confirmed in [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25) while [VS Code investigates the upstream routing bug](https://github.com/microsoft/vscode/issues/326554). VS Code chooses the host from the extension manifest, so no `remote.extensionKind` setting is needed for this workaround.
+In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the remote workspace host to work around [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25). It runs locally in local workspaces. No settings change is needed.
 
-VS Code SecretStorage is backed by the local client even when an extension runs remotely, so credentials saved through this extension remain available. The read-only `~/.codex/auth.json` fallback instead reads from the machine running the extension; import the file or sign in through the extension if that file exists only on your computer. For sign-in from a remote host, use **Codex for Copilot: Sign in with Device Code** if the browser callback cannot reach the remote loopback listener. The remote host must also be able to reach the Codex backend; configure a proxy for its extension host if needed.
+VS Code SecretStorage credentials remain available. The `~/.codex/auth.json` fallback is read on the host running the extension. If browser sign-in fails remotely, use **Codex for Copilot: Sign in with Device Code**.
 
-If a remote chat still routes to a Copilot model, use **Developer: Show Running Extensions** to check where Codex For Copilot runs and check for a local `remote.extensionKind` override. This preference continues to run the extension remotely after the upstream fix; it cannot automatically switch the extension back to the local UI host.
+This preference remains remote after [VS Code fixes the routing bug](https://github.com/microsoft/vscode/issues/326554); it does not automatically switch back to the local host.
 
 ## License
 
