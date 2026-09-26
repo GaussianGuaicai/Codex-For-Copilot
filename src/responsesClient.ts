@@ -1641,7 +1641,12 @@ function parseToolCallInput(argumentsJson: string): object {
   }
 
   try {
-    const parsed = JSON.parse(argumentsJson);
+    const parsed = JSON.parse(argumentsJson, (key, value) => {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        return undefined;
+      }
+      return value;
+    });
 
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed;
