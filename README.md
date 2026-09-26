@@ -141,4 +141,3 @@ If a remote chat still routes to a Copilot model, use **Developer: Show Running 
 ## License
 
 [MIT](LICENSE)
-
