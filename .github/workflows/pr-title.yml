@@ -30,7 +30,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^(feat|fix|perf|revert|docs|refactor|test|build|ci|chore)(\\([a-z0-9][a-z0-9._/-]*\\))?!?:[[:space:]].+'
+          pattern='^(feat|fix|perf|revert|docs|refactor|test|build|ci|chore)(\([a-z0-9][a-z0-9._/-]*\))?!?:[[:space:]].+'
 
           if [[ "$PR_TITLE" =~ $pattern ]]; then
             exit 0
