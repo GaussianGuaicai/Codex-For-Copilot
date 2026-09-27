@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.5](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.4...v1.9.5) (2026-09-27)
+
+
+### Bug Fixes
+
+* **remote:** prefer workspace host for Codex models ([#102](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/102)) ([4c10840](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/4c10840bb7223ae86eecca44b8141ba93ecdd684))
+* safely deserialize tool call input (CWE-502) ([#104](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/104)) ([e9b3e5f](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/e9b3e5fb7e510d10a94d960ba0f9eb199f952049))
+
 ## [1.9.4](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.3...v1.9.4) (2026-09-23)
 
 
