@@ -304,6 +304,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     })
   );
+  void authManager.startPeriodicRefresh();
 }
 
 export function deactivate(): void {}

@@ -44,7 +44,7 @@ Open the Command Palette and choose one of the following:
 - **`Codex for Copilot: Import Codex auth.json`** to import existing Codex CLI ChatGPT credentials.
 - **`Codex: Set API Key`** to store an API key in VS Code SecretStorage.
 
-The extension stores imported and signed-in ChatGPT credentials in VS Code SecretStorage and refreshes them automatically, including refresh-token rotation. Importing copies the credentials and never writes to the original `~/.codex/auth.json` file; signing out of an imported credential only removes the extension's copy. The direct `~/.codex/auth.json` fallback remains read-only.
+The extension stores imported and signed-in ChatGPT credentials in VS Code SecretStorage and refreshes them automatically, including refresh-token rotation. On activation and every five minutes while VS Code is running, it checks all stored accounts (including inactive ones) and refreshes only those due. Importing copies the credentials and never writes to the original `~/.codex/auth.json` file; signing out of an imported credential only removes the extension's copy. The direct `~/.codex/auth.json` fallback remains read-only. If another client rotates or revokes an imported refresh token, the extension's copy cannot recover automatically; sign in through this extension for separate credentials, or re-import a current `auth.json` for that account.
 
 ### 3. Select Codex
 
