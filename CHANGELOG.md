@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.6](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.5...v1.9.6) (2026-09-28)
+
+
+### Bug Fixes
+
+* **auth:** refresh credentials for all stored accounts ([#107](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/107)) ([7b9a386](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/7b9a386409c083e5098116ed3059328265c074e0))
+
 ## [1.9.5](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.4...v1.9.5) (2026-09-27)
 
 
