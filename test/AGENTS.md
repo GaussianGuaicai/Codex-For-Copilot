@@ -26,6 +26,9 @@
 
 ## Constraints
 
+- Logger tests must cover disabled field evaluation, live level changes, lazy-field redaction, and structured single-argument writes.
+- Boundary batching tests must verify fewer reports without losing text, splitting surrogate pairs, retaining timers, or changing subsequent normal playback.
+- Provider integration must cover large sanitized arguments, multiple tool boundaries, live Trace gating, and deferred telemetry based on the immutable serialized replay snapshot.
 - Prefer narrow transport semantics checks over broad suites.
 - Authentication smoke coverage must verify that a native ChatGPT sign-in adds a VS Code session, a token refresh changes it, and sign-out removes it.
 - Authentication smoke coverage must preserve distinct local storage keys for different ChatGPT users sharing a workspace, while re-importing one verified owner updates its existing key.

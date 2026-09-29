@@ -93,6 +93,28 @@ try {
   assertEqual(backend.length, 7, 'backend callback retains every delta');
   assertEqual(reported[0].at, 1_000, 'first report remains synchronous');
 
+  const boundaryParts = [];
+  const boundaryPresenter = new StreamPresenter(undefined, undefined, {
+    now: () => now,
+    maxReportCharacters: 64,
+    targetReportCharacters: 20,
+    timerApi: timers
+  });
+  const boundaryText = 'x'.repeat(20) + 'y'.repeat(511) + '\u{1F600}' + 'z'.repeat(1_534);
+  boundaryPresenter.push({ kind: 'text', identity: 'text', text: boundaryText, emit: (part) => boundaryParts.push(part) });
+  assertEqual(boundaryParts[0].length, 20, 'boundary batching does not change the first frame');
+  boundaryPresenter.flushBoundary(512);
+  assertEqual(boundaryParts.join(''), boundaryText, 'tool boundary preserves all text and surrogate pairs');
+  assertEqual(boundaryParts.length, 5, '2047 buffered characters drain in four bounded reports instead of 32');
+  assertEqual(boundaryParts.every((part) => part.length <= 512 && !/[\uD800-\uDBFF]$/.test(part)), true, 'boundary reports stay bounded without splitting a surrogate pair');
+  assertEqual(boundaryPresenter.pendingCharacters, 0, 'all text is delivered before the tool callback can proceed');
+  assertEqual(scheduled, undefined, 'boundary cancels its pending timer');
+  boundaryPresenter.push({ kind: 'text', identity: 'text', text: 'a'.repeat(120), emit: (part) => boundaryParts.push(part) });
+  assertEqual(boundaryParts.at(-1).length, 20, 'the next phase still starts with the normal first frame');
+  const normalBoundaryStart = boundaryParts.length;
+  boundaryPresenter.flushBoundary();
+  assertEqual(boundaryParts.slice(normalBoundaryStart).every((part) => part.length <= 64), true, 'larger tool batches do not change default boundary sizing');
+
   let defaultScheduled;
   const defaultEmitted = [];
   const defaultPresenter = new StreamPresenter(undefined, undefined, {

@@ -115,6 +115,7 @@ const TEXT_STREAM_MIN_REPORT_INTERVAL_MS = 80;
 const TEXT_STREAM_MAX_REPORT_INTERVAL_MS = 100;
 const TEXT_STREAM_TARGET_REPORT_CHARACTERS = 20;
 const TEXT_STREAM_MAX_REPORT_CHARACTERS = 64;
+const TOOL_BOUNDARY_MAX_REPORT_CHARACTERS = 512;
 const TEXT_STREAM_SMOOTHING_BUFFER_CHARACTERS = 1_024;
 const WEB_SEARCH_STATUS_DETAIL_GRACE_MS = 300;
 // The WebSocket tool-output continuation path passed the real-backend release
@@ -973,16 +974,17 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             throw new Error('Responses returned a Native Tool Search function call without an item id.');
           }
           flushReplayText();
+          const serializedToolInput = stableSerialize(toolInput);
           replayResponseItems.push({
             ...(toolPlan.mode === 'native-hosted' ? { id: itemId } : {}),
             type: 'function_call',
             call_id: callId,
             name: toolPlan.mode === 'native-hosted' ? call.name : name,
             ...(toolPlan.mode === 'native-hosted' && call.namespace ? { namespace: call.namespace } : {}),
-            arguments: stableSerialize(toolInput)
+            arguments: serializedToolInput
           });
           const pendingPresentationCharacters = presenter.pendingCharacters;
-          presenter.flushBoundary();
+          presenter.flushBoundary(TOOL_BOUNDARY_MAX_REPORT_CHARACTERS);
           const discardedReasoningCharacters = reasoningPresenter.startNextPhase();
           const reportedAt = Date.now();
           latency.mark('firstToolCall', reportedAt);
@@ -995,7 +997,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             discardedReasoningCharactersAtToolCall: discardedReasoningCharacters
           });
           const lifecycle = toolCallLifecycleAt.get(callId);
-          this.outputChannel.trace('response tool call timing', {
+          this.outputChannel.trace('response tool call timing', () => ({
             callId,
             name,
             backendName: call.name,
@@ -1006,26 +1008,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             toolArgumentsDoneToReportedMs: lifecycle?.argumentsDoneAt === undefined
               ? null
               : Math.max(0, reportedAt - lifecycle.argumentsDoneAt)
-          });
-          setImmediate(() => {
-            try {
-              const serializedToolInput = JSON.stringify(toolInput);
-              this.outputChannel.trace('response tool call', {
+          }));
+          if (this.outputChannel.isEnabled('trace')) {
+            setImmediate(() => {
+              this.outputChannel.trace('response tool call', () => ({
                 requestModel: selectedModel.requestModel,
                 callId,
                 name,
                 inputPresent: true,
                 inputBytes: Buffer.byteLength(serializedToolInput),
                 inputHash: shortHash(serializedToolInput)
-              });
-            } catch {
-              this.outputChannel.trace('response tool call telemetry unavailable', {
-                requestModel: selectedModel.requestModel,
-                callId,
-                name
-              });
-            }
-          });
+              }));
+            });
+          }
         },
         onHostedToolLifecycleEvent: (event) => {
           this.outputChannel.trace('response hosted tool lifecycle', {

@@ -72,6 +72,32 @@ try {
   }
   const throwingSink = { trace() { throw new Error('sink failure'); }, debug() { throw new Error('sink failure'); }, info() { throw new Error('sink failure'); }, warn() { throw new Error('sink failure'); }, error() { throw new Error('sink failure'); } };
   assert.doesNotThrow(() => createCodexLogger(throwingSink).info('logger.failure-isolated', { prompt: 'PROMPT_SENTINEL' }), 'logger failures must not affect the caller');
+  const filteredEvents = [];
+  const filteredSink = {
+    logLevel: 3,
+    ...Object.fromEntries(['trace', 'debug', 'info', 'warn', 'error'].map((level) => [level, (...args) => filteredEvents.push({ level, args })]))
+  };
+  const filteredLogger = createCodexLogger(filteredSink).child('provider').operation('chat.response');
+  let evaluations = 0;
+  const expensiveFields = { get prompt() { evaluations += 1; return 'PROMPT_SENTINEL'; } };
+  filteredLogger.debug('filtered', expensiveFields);
+  filteredLogger.trace('filtered.lazy', () => { evaluations += 1; return {}; });
+  assert.equal(evaluations, 0, 'disabled fields are not read or computed');
+  assert.equal(filteredEvents.length, 0, 'disabled events never reach the sink');
+  filteredSink.logLevel = 1;
+  filteredLogger.trace('enabled.lazy', () => { evaluations += 1; return { prompt: 'PROMPT_SENTINEL' }; });
+  assert.equal(evaluations, 1, 'level changes immediately enable lazy evaluation');
+  assert.equal(filteredEvents[0].args.length, 1, 'structured logs have no undefined trailing argument');
+  assert.equal(filteredEvents[0].args[0].includes('PROMPT_SENTINEL'), false, 'lazy fields are still redacted');
+  assert.doesNotThrow(() => filteredLogger.debug('failed.factory', () => { throw new Error('factory failure'); }));
+  filteredSink.logLevel = 6;
+  filteredLogger.error('disabled.error', { get message() { evaluations += 1; return 'unused'; } });
+  assert.equal(evaluations, 1, 'Off skips error serialization');
+  assert.equal(filteredEvents.length, 1, 'Off suppresses every severity');
+  const legacyEvents = [];
+  createCodexLogger({ debug(...args) { legacyEvents.push(args); }, info() {}, warn() {}, error() {} })
+    .debug('legacy.lazy', () => ({ count: 1 }));
+  assert.deepEqual(legacyEvents, [['legacy.lazy', { count: 1 }]], 'legacy sinks retain event and payload arguments');
   console.log('Smoke test passed: structured logging keeps operation correlation and redacts sensitive values.');
 } finally {
   await rm(tempDir, { recursive: true, force: true });

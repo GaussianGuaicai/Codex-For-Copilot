@@ -23,6 +23,9 @@
 
 ## Constraints
 
+- Logger filtering must precede lazy field evaluation and sanitization, follow live sink log levels, and preserve legacy test-sink payloads.
+- Tool boundaries may use larger bounded synchronous text batches; normal playback and completion-drain pacing must remain unchanged.
+- Tool-call telemetry must reuse the stable serialization of sanitized replay arguments and avoid scheduling or hashing diagnostics when Trace is disabled.
 - Keep provider-visible callback semantics transport-agnostic: HTTP and WebSocket must report the same deltas and terminal events.
 - Keep ChatGPT Codex compatibility logic centralized in `responsesClient.ts`, `config.ts`, and `secrets.ts`; do not duplicate header or base URL normalization across call sites.
 - Native ChatGPT OAuth credentials must be exposed through the `codex-for-copilot` VS Code AuthenticationProvider and emit added, changed, or removed session events when credential state changes.

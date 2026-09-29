@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -1532,6 +1533,18 @@ async function runProviderFallbackSmokeTest() {
 }
 
 async function runInterleavedResponsePresentationSmokeTest() {
+  let toolBoundaryMode = false;
+  const boundaryText = 'x'.repeat(2_068);
+  const largeArgument = 'safe-argument-'.repeat(4_096);
+  const serializedArguments = JSON.stringify({ a: 1, z: largeArgument });
+  const logEvents = [];
+  const logSink = {
+    logLevel: 3,
+    ...Object.fromEntries(['trace', 'debug', 'info', 'warn', 'error'].map((level) => [level, (message) => {
+      const payloadStart = message.indexOf(' {');
+      logEvents.push({ event: message.slice(0, payloadStart), payload: JSON.parse(message.slice(payloadStart + 1)) });
+    }]))
+  };
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -1554,6 +1567,21 @@ async function runInterleavedResponsePresentationSmokeTest() {
       'cache-control': 'no-cache',
       connection: 'keep-alive'
     });
+    if (toolBoundaryMode) {
+      for (let index = 0; index < 2; index += 1) {
+        send({ type: 'response.output_text.delta', delta: boundaryText });
+        const item = {
+          id: `fc_boundary_${index}`, type: 'function_call', call_id: `call_boundary_${index}`,
+          name: 'read_file', arguments: `{"z":${JSON.stringify(largeArgument)},"__proto__":{"unsafe":true},"a":1}`
+        };
+        send({ type: 'response.output_item.added', output_index: index, item: { ...item, arguments: '' } });
+        send({ type: 'response.function_call_arguments.done', item_id: item.id, output_index: index, name: item.name, arguments: item.arguments });
+        send({ type: 'response.output_item.done', output_index: index, item });
+      }
+      send({ type: 'response.completed', response: { id: 'resp_boundary', status: 'completed' } });
+      response.end('data: [DONE]\n\n');
+      return;
+    }
     send({
       type: 'response.reasoning_text.delta',
       item_id: 'rs_planning',
@@ -1599,7 +1627,7 @@ async function runInterleavedResponsePresentationSmokeTest() {
       },
       subscriptions: []
     },
-    createOutputChannel(),
+    logSink,
     undefined,
     undefined,
     undefined,
@@ -1633,6 +1661,41 @@ async function runInterleavedResponsePresentationSmokeTest() {
       { type: 'text', value: '我先看一下仓库的' },
       { type: 'text', value: '结构。' }
     ]), 'raw reasoning falls back as one bounded Thinking part before visible text');
+    toolBoundaryMode = true;
+    for (const logLevel of [3, 1]) {
+      logSink.logLevel = logLevel;
+      logEvents.length = 0;
+      const boundaryParts = [];
+      await provider.provideLanguageModelChatResponse(
+        model,
+        [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new LanguageModelTextPart('Inspect two files.')] }],
+        { tools: [{ name: 'read_file', description: 'Read a file.', inputSchema: { type: 'object', properties: { a: { type: 'number' }, z: { type: 'string' } } } }] },
+        { report(part) {
+          if (part instanceof LanguageModelToolCallPart) {
+            const precedingText = boundaryParts.filter((value) => value instanceof LanguageModelTextPart);
+            const callIndex = boundaryParts.filter((value) => value instanceof LanguageModelToolCallPart).length;
+            assertEqual(precedingText.map((value) => value.value).join(''), boundaryText.repeat(callIndex + 1), 'all pending text precedes each tool call');
+            assertEqual(part.input.z, largeArgument, 'large tool arguments arrive intact');
+            assertEqual(Object.hasOwn(part.input, '__proto__'), false, 'unsafe argument keys remain filtered');
+            part.input.z = 'mutated-after-report';
+          }
+          boundaryParts.push(part);
+        } },
+        token
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      const textParts = boundaryParts.filter((part) => part instanceof LanguageModelTextPart);
+      assertEqual(textParts.length, 10, 'two tool boundaries each emit one first frame and four larger batches');
+      assertEqual(textParts.every((part) => part.value.length <= 512), true, 'provider tool-boundary reports remain bounded');
+      assertEqual(boundaryParts.filter((part) => part instanceof LanguageModelToolCallPart).length, 2, 'done events never duplicate either tool call');
+      const toolLogs = logEvents.filter((entry) => entry.event === '[provider] response tool call');
+      assertEqual(toolLogs.length, logLevel === 1 ? 2 : 0, 'tool diagnostics follow the live log level');
+      for (const entry of toolLogs) {
+        assertEqual(entry.payload.inputBytes, Buffer.byteLength(serializedArguments), 'telemetry reuses sanitized stable argument bytes');
+        assertEqual(entry.payload.inputHash, createHash('sha256').update(serializedArguments).digest('hex').slice(0, 12), 'deferred telemetry hashes the replay snapshot, not the mutated input');
+        assertEqual(JSON.stringify(entry).includes(largeArgument), false, 'tool telemetry never exposes argument content');
+      }
+    }
   } finally {
     await closeServer(server);
   }

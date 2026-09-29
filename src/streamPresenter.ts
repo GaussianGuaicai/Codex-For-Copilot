@@ -165,8 +165,11 @@ export class StreamPresenter {
   }
 
   /** Immediately completes a semantic phase, such as the boundary before a tool call. */
-  flushBoundary(): void {
-    this.flush();
+  flushBoundary(maxReportCharacters = this.maxReportCharacters): void {
+    this.clearTimer();
+    while (this.pending) {
+      this.flushOne(true, Math.max(this.maxReportCharacters, maxReportCharacters));
+    }
     this.resetBoundary();
   }
 
@@ -222,7 +225,7 @@ export class StreamPresenter {
     };
   }
 
-  private flushOne(forceCatchUp = false): void {
+  private flushOne(forceCatchUp = false, maxReportCharacters = this.maxReportCharacters): void {
     const pending = this.pending;
     if (!pending) {
       return;
@@ -230,7 +233,7 @@ export class StreamPresenter {
 
     const catchUp = forceCatchUp || this.shouldCatchUp(pending.text.length);
     const reportCharacters = catchUp
-      ? this.maxReportCharacters
+      ? maxReportCharacters
       : this.targetReportCharacters;
     const [visibleText, remainingText] = splitAtCharacterBoundary(pending.text, reportCharacters);
     const reportedAt = this.now();
