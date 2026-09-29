@@ -10,10 +10,12 @@ export interface CodexAccountIdentity {
 /** Extracts optional owner claims without making valid credentials depend on JWT parsing. */
 export function parseCodexAccountIdentity(tokens: CodexTokenData, email?: string): CodexAccountIdentity {
   const payload = safePayload(tokens.id_token);
+  const auth = objectValue(payload['https://api.openai.com/auth']);
+  const profile = objectValue(payload['https://api.openai.com/profile']);
   return {
-    userId: stringValue(payload['https://api.openai.com/auth.chatgpt_user_id']) ?? stringValue(payload['https://api.openai.com/auth.user_id']),
-    accountId: stringValue(tokens.account_id) ?? stringValue(payload['https://api.openai.com/auth.chatgpt_account_id']),
-    email: stringValue(email) ?? stringValue(payload.email) ?? stringValue(payload['https://api.openai.com/profile.email'])
+    userId: stringValue(auth.chatgpt_user_id) ?? stringValue(auth.user_id) ?? stringValue(payload['https://api.openai.com/auth.chatgpt_user_id']) ?? stringValue(payload['https://api.openai.com/auth.user_id']),
+    accountId: stringValue(tokens.account_id) ?? stringValue(auth.chatgpt_account_id) ?? stringValue(payload['https://api.openai.com/auth.chatgpt_account_id']),
+    email: stringValue(email) ?? stringValue(payload.email) ?? stringValue(profile.email) ?? stringValue(payload['https://api.openai.com/profile.email'])
   };
 }
 
@@ -30,11 +32,14 @@ export function isSameCodexAccountOwner(left: CodexAccountIdentity, right: Codex
 
 function safePayload(token: string): Record<string, unknown> {
   try {
-    const payload = decodeJwtPayload(token);
-    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+    return objectValue(decodeJwtPayload(token));
   } catch {
     return {};
   }
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function stringValue(value: unknown): string | undefined {
