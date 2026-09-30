@@ -2,6 +2,18 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.7](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.6...v1.9.7) (2026-09-30)
+
+
+### Bug Fixes
+
+* **auth:** preserve account IDs from nested JWT claims ([#110](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/110)) ([63bf1a8](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/63bf1a8174a4884c252c75d2f3cb8a8dda898f09))
+
+
+### Performance Improvements
+
+* **streaming:** reduce tool-call presentation overhead ([#109](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/109)) ([10a7757](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/10a775776f7e05d4580c9e7653b5c0efb6ea0b4b))
+
 ## [1.9.6](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.5...v1.9.6) (2026-09-28)
 
 
