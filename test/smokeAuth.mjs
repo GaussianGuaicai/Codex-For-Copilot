@@ -105,6 +105,84 @@ try {
   assertEqual(auth.needsRefresh({ ...valid, tokens: { ...valid.tokens, access_token: soonToken } }), true, 'refresh when access token expires soon');
   assertEqual(auth.needsRefresh({ ...valid, last_refresh: new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString() }), true, 'refresh when last_refresh is old');
 
+  const nestedTokens = {
+    id_token: jwt({
+      'https://api.openai.com/auth': { chatgpt_account_id: 'nested-workspace', chatgpt_user_id: 'nested-user' },
+      'https://api.openai.com/profile': { email: 'nested@example.com' }
+    }),
+    access_token: futureToken,
+    refresh_token: 'nested-refresh'
+  };
+  const nestedIdentity = auth.parseCodexAccountIdentity(nestedTokens);
+  assertEqual(nestedIdentity.accountId, 'nested-workspace', 'identity parser reads the nested workspace claim without account_id');
+  assertEqual(nestedIdentity.userId, 'nested-user', 'identity parser reads the nested user claim');
+  assertEqual(nestedIdentity.email, 'nested@example.com', 'identity parser reads the nested profile email');
+  const explicitIdentity = auth.parseCodexAccountIdentity({ ...nestedTokens, account_id: 'explicit-workspace' }, 'explicit@example.com');
+  assertEqual(explicitIdentity.accountId, 'explicit-workspace', 'explicit workspace selection takes precedence over JWT claims');
+  assertEqual(explicitIdentity.email, 'explicit@example.com', 'explicit email takes precedence over JWT claims');
+  const legacyIdentity = auth.parseCodexAccountIdentity({
+    ...nestedTokens,
+    id_token: jwt({
+      'https://api.openai.com/auth.chatgpt_account_id': 'legacy-workspace',
+      'https://api.openai.com/auth.user_id': 'legacy-user',
+      'https://api.openai.com/profile.email': 'legacy@example.com'
+    })
+  });
+  assertEqual(legacyIdentity.accountId, 'legacy-workspace', 'legacy dotted workspace claims remain supported');
+  assertEqual(legacyIdentity.userId, 'legacy-user', 'legacy dotted user claims remain supported');
+  assertEqual(legacyIdentity.email, 'legacy@example.com', 'legacy dotted profile claims remain supported');
+  assertEqual(auth.parseCodexAccountIdentity({
+    ...nestedTokens,
+    id_token: jwt({ 'https://api.openai.com/auth': { user_id: 'alternate-user' } })
+  }).userId, 'alternate-user', 'nested user_id remains a supported owner claim');
+  for (const invalidClaim of [null, [], 'invalid', { chatgpt_account_id: 42, chatgpt_user_id: false, email: [] }]) {
+    const identity = auth.parseCodexAccountIdentity({
+      ...nestedTokens,
+      id_token: jwt({ 'https://api.openai.com/auth': invalidClaim, 'https://api.openai.com/profile': invalidClaim })
+    });
+    assertEqual(JSON.stringify(identity), '{}', 'malformed namespaced claims are ignored');
+  }
+  assertEqual(auth.parseCodexAccountIdentity({ ...nestedTokens, id_token: 'malformed', account_id: 'explicit-workspace' }).accountId, 'explicit-workspace', 'malformed JWTs do not discard explicit workspace selection');
+
+  const nestedSecrets = new Map();
+  const nestedStore = new auth.CodexSecretStore({
+    async get(key) { return nestedSecrets.get(key); },
+    async store(key, value) { nestedSecrets.set(key, value); },
+    async delete(key) { nestedSecrets.delete(key); }
+  });
+  const nestedOAuth = new auth.CodexOAuthClient(async () => new Response(JSON.stringify(nestedTokens), { status: 200 }));
+  const nestedManager = new auth.CodexAuthManager(
+    nestedStore,
+    () => ({ async withLock(callback) { return callback(); } }),
+    nestedOAuth
+  );
+  const nestedLoginTokens = await nestedOAuth.exchangeAuthorizationCode('test-code', 'http://localhost/auth/callback', 'test-verifier');
+  assertEqual(nestedLoginTokens.account_id, undefined, 'OAuth regression fixture has no top-level account_id');
+  const nestedKey = await nestedManager.completeSignIn(nestedLoginTokens);
+  assertEqual((await nestedManager.getCredentialSnapshot(nestedKey)).accountId, 'nested-workspace', 'native sign-in resolves the workspace from the JWT');
+  assertEqual((await nestedManager.getStatus(nestedKey)).accountId, 'nested-workspace', 'auth status reports the resolved workspace');
+  assertEqual((await nestedManager.listAccounts())[0].accountId, 'nested-workspace', 'account listing reports the resolved workspace');
+  assertEqual(await nestedManager.completeSignIn(nestedLoginTokens), nestedKey, 'signing in again reuses the verified nested owner');
+  const restoredNestedManager = new auth.CodexAuthManager(
+    nestedStore,
+    () => ({ async withLock(callback) { return callback(); } }),
+    { async refresh() { throw new Error('stored snapshots must not refresh'); }, async revoke() {} }
+  );
+  assertEqual((await restoredNestedManager.getStoredCredentialSnapshot(nestedKey)).accountId, 'nested-workspace', 'existing OAuth records without account_id work without signing in again');
+  const storedNestedCredentials = await auth.getCodexCredentialsForAccount(restoredNestedManager, nestedKey, false);
+  assertEqual(storedNestedCredentials.headers['ChatGPT-Account-ID'], 'nested-workspace', 'inactive account usage retains the resolved workspace header');
+  restoredNestedManager.dispose();
+  const nestedHeaders = [];
+  const nestedResponse = await auth.codexFetch(nestedManager, 'https://example.test/usage', {}, async (_input, init) => {
+    nestedHeaders.push(init.headers['ChatGPT-Account-ID']);
+    return new Response('', { status: nestedHeaders.length === 1 ? 401 : 200 });
+  }, nestedKey);
+  assertEqual(nestedResponse.status, 200, 'nested OAuth credentials recover after a refresh');
+  assertEqual(JSON.stringify(nestedHeaders), JSON.stringify(['nested-workspace', 'nested-workspace']), 'initial and refreshed requests both send the workspace header');
+  const refreshedNestedCredentials = await auth.getCodexCredentialsForAccount(nestedManager, nestedKey);
+  assertEqual(refreshedNestedCredentials.headers['ChatGPT-Account-ID'], 'nested-workspace', 'active provider credentials retain the resolved workspace header');
+  nestedManager.dispose();
+
   const importedSecrets = new Map();
   const importedSecretStorage = {
     async get(key) { return importedSecrets.get(key); },
@@ -647,8 +725,8 @@ function authJsonFor(userId, accountId, email, accessToken) {
 function authJsonTokens(userId, accountId, email, accessToken) {
   return {
     id_token: jwt({
-      'https://api.openai.com/auth.chatgpt_user_id': userId,
-      'https://api.openai.com/profile.email': email
+      'https://api.openai.com/auth': { chatgpt_user_id: userId, chatgpt_account_id: accountId },
+      'https://api.openai.com/profile': { email }
     }),
     access_token: accessToken,
     refresh_token: `${userId}-${accountId}-refresh`,
