@@ -47,6 +47,7 @@ try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
   runHostedWebSearchEventSmokeTest(createResponsesServerEventHandler);
   await runNestedConnectionCauseSmokeTest(streamResponseText);
+  await runLimitClassificationSmokeTest(streamResponseText);
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpRequestRateLimitRetrySmokeTest(streamResponseText);
   await runHttpStreamRateLimitRetrySmokeTest(streamResponseText);
@@ -299,7 +300,7 @@ async function runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText) {
     }
 
     assertEqual(requestCount, 1, 'HTTP rate limit after visible output is not retried');
-    assertEqual(capturedError?.message.includes('OpenAI rate limit exceeded'), true, 'HTTP rate limit surfaces a real error');
+    assertEqual(capturedError?.name === 'ResponsesRateLimitedError', true, 'HTTP rate limit surfaces a real error');
     assertEqual(failures.length, 1, 'unsafe HTTP rate limit is reported as terminal');
   } finally {
     server.close();
@@ -2510,5 +2511,54 @@ function writeSseFailedResponse(response, code, message) {
 function assertEqual(actual, expected, label) {
   if (actual !== expected) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
+
+async function runLimitClassificationSmokeTest(streamResponseText) {
+  for (const mode of ['http-quota', 'http-stream-quota', 'websocket-quota', 'auto-quota', 'websocket-error-quota', 'http-unknown-429']) {
+    let httpRequests = 0;
+    let wsRequests = 0;
+    let completed = 0;
+    const server = createServer((_request, response) => {
+      httpRequests += 1;
+      if (mode === 'http-stream-quota') {
+        writeSseFailedResponse(response, 'rate_limit_exceeded', "You've hit your usage limit. Try again at 12:00.");
+      } else {
+        response.writeHead(429, { 'content-type': 'application/json', 'retry-after-ms': '1' });
+        response.end(JSON.stringify({ error: {
+          code: mode === 'http-unknown-429' ? 'unknown_limit' : 'insufficient_quota',
+          message: mode === 'http-unknown-429' ? 'Too many requests.' : 'Account credit balance exhausted.'
+        } }));
+      }
+    });
+    const sockets = new WebSocketServer({ server });
+    sockets.on('connection', (socket) => socket.on('message', () => {
+      wsRequests += 1;
+      socket.send(JSON.stringify(mode === 'websocket-error-quota'
+        ? { type: 'error', error: { type: 'usage_limit_reached', message: 'Limit reached.' } }
+        : { type: 'response.failed', response: { id: 'resp_quota', status: 'failed', error: {
+          code: 'usage_limit_reached', message: 'Limit reached. Try again tomorrow.'
+        } } }));
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    let error;
+    try {
+      const transport = mode.startsWith('websocket') ? 'websocket' : mode === 'auto-quota' ? 'auto' : 'http';
+      await streamResponseText({
+        ...createStreamOptions(`http://127.0.0.1:${server.address().port}/backend-api/codex/responses`, transport),
+        onResponseCompleted() { completed += 1; }
+      });
+    } catch (caught) {
+      error = caught;
+    } finally {
+      for (const socket of sockets.clients) socket.terminate();
+      sockets.close();
+      server.close();
+    }
+    const unknown = mode === 'http-unknown-429';
+    assertEqual(error?.name, unknown ? 'ResponsesRateLimitedError' : 'ResponsesQuotaExceededError', `${mode} classification`);
+    assertEqual(httpRequests + wsRequests, unknown ? 3 : 1, `${mode} quota never retries; unknown 429 keeps SDK retry budget`);
+    assertEqual(completed, 0, `${mode} never completes`);
+    if (mode === 'auto-quota') assertEqual(httpRequests, 0, 'structured quota never falls back to HTTP');
   }
 }

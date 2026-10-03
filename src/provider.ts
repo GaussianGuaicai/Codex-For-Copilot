@@ -12,6 +12,7 @@ import {
   stableSerialize,
   type ResponsesInputMessage
 } from './convertMessages';
+import { ResponsesQuotaExceededError, ResponsesRateLimitedError, toChatLimitError } from './responsesLimitError';
 import { getProviderConfig, type ProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, isProviderModelIdentifier, parseModelIdentifier, type ParsedModelIdentifier, type ResolvedProviderModel } from './models';
 import {
@@ -1193,6 +1194,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           await streamResponseText(streamOptions);
         } catch (error) {
           resetAttemptState();
+          if (error instanceof ResponsesQuotaExceededError || error instanceof ResponsesRateLimitedError) {
+            void this.accountUsageRefreshSink?.refresh();
+            throw toChatLimitError(error);
+          }
           throw error;
         }
       } finally {
