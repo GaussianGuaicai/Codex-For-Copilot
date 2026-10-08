@@ -15,6 +15,8 @@ The extension source lives in [`src/`](src/). Key modules are:
 
 The extension manifest declares the `codex-for-copilot` AuthenticationProvider under `contributes.authentication`; its ID and label must match the runtime registration in `src/extension.ts`.
 
+The root `package.json` declares `extensionKind` as `["ui", "workspace"]` to prefer local credential reuse in remote workspaces. Keep the hosting guidance in `README.md` aligned; local-first hosting does not resolve VS Code's cross-host model routing issue.
+
 Compiled output is written to `out/` and should be treated as build artifacts. Tests live in `test/`. Workspace debug helpers are in `.vscode/`.
 
 Transport-related constraints that must not break:

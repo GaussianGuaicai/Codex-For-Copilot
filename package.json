@@ -22,8 +22,8 @@
     "onStartupFinished"
   ],
   "extensionKind": [
-    "workspace",
-    "ui"
+    "ui",
+    "workspace"
   ],
   "main": "./out/extension.js",
   "scripts": {

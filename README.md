@@ -132,11 +132,11 @@ Release and Marketplace publishing details are documented in [docs/releasing.md]
 
 ## Remote workspaces
 
-In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the remote workspace host to work around [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25). It runs locally in local workspaces. No settings change is needed.
+In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the local UI host when available, with the workspace host as a fallback. This allows remote workspaces to reuse credentials stored by the local extension. No `remote.extensionKind` override is needed for this preference.
 
-VS Code SecretStorage credentials remain available. The `~/.codex/auth.json` fallback is read on the host running the extension. If browser sign-in fails remotely, use **Codex for Copilot: Sign in with Device Code**.
+SecretStorage credentials and the `~/.codex/auth.json` fallback are accessed on the host running the extension. If the extension runs on the workspace host instead, local credentials are not guaranteed to be available there; use **Codex for Copilot: Sign in with Device Code** if needed.
 
-This preference remains remote after [VS Code fixes the routing bug](https://github.com/microsoft/vscode/issues/326554); it does not automatically switch back to the local host.
+Local UI hosting may encounter the cross-host model routing problem described in [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25) and [VS Code issue #326554](https://github.com/microsoft/vscode/issues/326554). Changing the hosting preference does not fix that problem. If remote chat reports that a selected Codex model is unavailable, a workaround is to set `remote.extensionKind` for `Gaussian.gaussian-codex-for-copilot` to `["workspace"]` and reload the window.
 
 ## License
 
