@@ -31,13 +31,27 @@ export function classifyResponsesLimit(payload: unknown): 'quota' | 'rate' | und
   return undefined;
 }
 
-/** Use ordinary Error names so they survive the LM RPC serialization boundary. */
+/**
+ * Preserve classification across LM RPC, but keep diagnostics out of Chat.
+ * Copilot's ExtChatEndpoint formats third-party failures with toErrorMessage(e, true),
+ * which appends the stack (including its duplicate message) whenever it is present.
+ * Log the original error before converting it; do not forward its cause or stack.
+ */
 export function toChatLimitError(error: ResponsesQuotaExceededError | ResponsesRateLimitedError): Error {
   const quota = error instanceof ResponsesQuotaExceededError;
+  const retryHint = getRetryHint(error.message);
   const message = quota
-    ? `Codex usage limit reached. Try again after your usage resets, or switch accounts. ${error.message}`
-    : `Codex is temporarily rate limited. Try again shortly. ${error.message}`;
-  const result = new Error(message, { cause: error });
+    ? `Codex usage limit reached. ${retryHint ?? 'Try again after your usage resets'}, or switch accounts.`
+    : `Codex is temporarily rate limited. ${retryHint ?? 'Try again shortly'}.`;
+  const result = new Error(message);
   result.name = quota ? 'ChatQuotaExceeded' : 'ChatRateLimited';
+  result.stack = undefined;
   return result;
+}
+
+function getRetryHint(message: string): string | undefined {
+  // Keep only actionable retry timing, never append an SDK envelope or raw error.
+  // Decimal delays must remain intact, while JSON delimiters and stack lines stop it.
+  const hint = message.match(/\btry again (?:at|in|after|on|tomorrow\b|later\b)[^.!?\r\n"}\]]*(?:\.\d+[^.!?\r\n"}\]]*)*/i)?.[0].trim();
+  return hint && hint.length <= 200 ? hint[0].toUpperCase() + hint.slice(1) : undefined;
 }

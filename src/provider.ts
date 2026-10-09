@@ -1195,6 +1195,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         } catch (error) {
           resetAttemptState();
           if (error instanceof ResponsesQuotaExceededError || error instanceof ResponsesRateLimitedError) {
+            requestLogger.warn('response limit reached', { error });
             void this.accountUsageRefreshSink?.refresh();
             throw toChatLimitError(error);
           }
