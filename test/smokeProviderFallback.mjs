@@ -258,6 +258,7 @@ try {
   await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
   await runProviderVirtualToolFallbackNotificationSmokeTest();
   await runLocalTokenEstimateDiagnosticSmokeTest();
+  await runTokenCountEndpointCapabilitySmokeTest();
   console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
 } finally {
   Module._load = moduleLoad;
@@ -6944,6 +6945,97 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
     await responsePromise?.catch(() => undefined);
     performanceNow = () => Date.now();
     configValues.modelAliases = {};
+    await closeServer(server);
+  }
+}
+
+async function runTokenCountEndpointCapabilitySmokeTest() {
+  const originalBaseURL = configValues.baseURL;
+  const originalCredentialsSource = configValues.credentialsSource;
+  const requestCounts = new Map();
+  const logs = [];
+  let releaseUnsupportedRequest;
+  let markUnsupportedStarted;
+  const unsupportedStarted = new Promise((resolve) => { markUnsupportedStarted = resolve; });
+  const unsupportedRelease = new Promise((resolve) => { releaseUnsupportedRequest = resolve; });
+
+  const server = createServer(async (request, response) => {
+    const path = request.url?.split('?')[0] ?? '';
+    if (request.method === 'GET' && path.endsWith('/models')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.5', 'GPT-5.5')] }));
+      return;
+    }
+    if (request.method !== 'POST' || !path.endsWith('/responses/input_tokens')) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+
+    for await (const _chunk of request) {
+      // Consume the token-count request.
+    }
+    const route = path.split('/')[1];
+    const count = (requestCounts.get(route) ?? 0) + 1;
+    requestCounts.set(route, count);
+    if (route === 'unsupported') {
+      markUnsupportedStarted();
+      await unsupportedRelease;
+      response.writeHead(404);
+    } else if (route === 'transient' && count === 1) {
+      response.writeHead(503);
+    } else {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ input_tokens: 37 }));
+      return;
+    }
+    response.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  const model = {
+    id: 'codex::gpt-5.5',
+    name: 'GPT-5.5',
+    family: 'gpt-5.5',
+    version: 'mock',
+    maxInputTokens: 258400
+  };
+  const token = createCancellationToken();
+  const provider = new CodexModelProvider(
+    { secrets: { async get() { return 'test-api-key'; } }, subscriptions: [] },
+    createOutputChannel(logs)
+  );
+  const baseURL = `http://127.0.0.1:${server.address().port}`;
+  const countAt = (route) => requestCounts.get(route) ?? 0;
+  try {
+    configValues.credentialsSource = 'secretStorage';
+    configValues.baseURL = `${baseURL}/unsupported/responses`;
+    const pending = provider.provideTokenCount(model, '12345678', token);
+    await unsupportedStarted;
+    const concurrent = await provider.provideTokenCount(model, '12345678', token);
+    assertEqual(concurrent, 2, 'other token counts use local estimate while probing');
+    assertEqual(countAt('unsupported'), 1, 'concurrent token counts share one endpoint probe');
+    releaseUnsupportedRequest();
+    assertEqual(await pending, 2, '404 uses local estimate');
+    assertEqual(await provider.provideTokenCount(model, '12345678', token), 2, 'cached unsupported endpoint estimates locally');
+    assertEqual(countAt('unsupported'), 1, 'cached unsupported endpoint receives no further requests');
+    assertEqual(logs.filter((entry) => entry.level === 'warn'
+      && entry.message.includes('endpoint does not support remote counting')).length, 1,
+    'unsupported endpoint warning appears once');
+
+    configValues.baseURL = `${baseURL}/transient/responses`;
+    assertEqual(await provider.provideTokenCount(model, '12345678', token), 2, '503 uses local estimate');
+    assertEqual(await provider.provideTokenCount(model, '12345678', token), 37, 'temporary failure does not disable remote count');
+    assertEqual(await provider.provideTokenCount(model, '12345678', token), 37, 'supported endpoint remains enabled');
+    assertEqual(countAt('transient'), 3, 'temporary failure is retried and successful remote counts continue');
+
+    configValues.baseURL = `${baseURL}/supported/responses`;
+    assertEqual(await provider.provideTokenCount(model, '12345678', token), 37, 'a different endpoint can count tokens');
+    assertEqual(countAt('supported'), 1, 'negative result is scoped to original endpoint');
+  } finally {
+    releaseUnsupportedRequest();
+    configValues.baseURL = originalBaseURL;
+    configValues.credentialsSource = originalCredentialsSource;
     await closeServer(server);
   }
 }

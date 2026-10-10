@@ -35,6 +35,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const {
+  countInputTokens,
+  UnsupportedTokenCountEndpointError,
   createResponsesServerEventHandler,
   disposeReusableResponsesWebSockets,
   isResponsesContinuationMissError,
@@ -45,6 +47,7 @@ const {
 
 try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
+  await runInputTokenCountStatusSmokeTest(countInputTokens, UnsupportedTokenCountEndpointError);
   runHostedWebSearchEventSmokeTest(createResponsesServerEventHandler);
   await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runLimitClassificationSmokeTest(streamResponseText);
@@ -80,6 +83,52 @@ try {
   disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+async function runInputTokenCountStatusSmokeTest(countInputTokens, UnsupportedTokenCountEndpointError) {
+  let status = 404;
+  let requests = 0;
+  const server = createServer(async (request, response) => {
+    requests += 1;
+    for await (const _chunk of request) {
+      // Consume the request body.
+    }
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(status === 200 ? JSON.stringify({ input_tokens: 37 }) : JSON.stringify({ error: 'unavailable' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    for (const testedStatus of [404, 405, 501, 503, 200]) {
+      status = testedStatus;
+      let count;
+      let error;
+      try {
+        count = await countInputTokens({
+          baseURL: `http://127.0.0.1:${server.address().port}/v1/responses`,
+          apiKey: 'test-api-key',
+          model: 'gpt-test',
+          input: 'Count these tokens.',
+          token: createCancellationToken()
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      const unsupported = [404, 405, 501].includes(status);
+      assertEqual(error instanceof UnsupportedTokenCountEndpointError, unsupported, `HTTP ${status} unsupported endpoint classification`);
+      if (unsupported) {
+        assertEqual(error.status, status, `HTTP ${status} preserves status`);
+      } else if (status === 503) {
+        assertEqual(error instanceof Error, true, 'temporary server error remains retryable');
+      } else {
+        assertEqual(error, undefined, 'supported token count succeeds');
+        assertEqual(count, 37, 'supported endpoint returns official count');
+      }
+    }
+    assertEqual(requests, 5, 'all token-count statuses are tested');
+  } finally {
+    server.close();
+  }
 }
 
 function runHostedWebSearchEventSmokeTest(createEventHandler) {

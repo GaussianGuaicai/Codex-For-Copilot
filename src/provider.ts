@@ -23,6 +23,7 @@ import {
 } from './reasoningEffort';
 import {
   countInputTokens,
+  UnsupportedTokenCountEndpointError,
   disposeReusableResponsesWebSockets,
   isResponsesContinuationMissError,
   normalizeBaseURL,
@@ -111,6 +112,8 @@ const MAX_PENDING_REPORTED_TOOL_CALLS = 200;
 const TOOL_OUTPUT_CONTINUATION_CAPABILITY_TTL_MS = 30 * 60_000;
 const MAX_TOOL_OUTPUT_CONTINUATION_CAPABILITIES = 64;
 const MAX_LOCAL_TOKEN_ESTIMATE_DIAGNOSTICS = 64;
+const TOKEN_COUNT_UNSUPPORTED_TTL_MS = 10 * 60_000;
+const MAX_TOKEN_COUNT_CAPABILITIES = 64;
 const STATEFUL_MARKER_LOCAL_ERROR = 'Stateful continuation marker could not be resolved locally.';
 const TEXT_STREAM_MIN_REPORT_INTERVAL_MS = 80;
 const TEXT_STREAM_MAX_REPORT_INTERVAL_MS = 100;
@@ -194,6 +197,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
   private readonly toolOutputContinuationCapabilities = new Map<string, ToolOutputContinuationCapability>();
   private readonly localTokenEstimateDiagnostics = new Set<string>();
+  private readonly tokenCountCapabilities = new Map<string, { supported: boolean; observedAt: number }>();
+  private readonly tokenCountProbes = new Set<string>();
   private localTokenEstimateCount = 0;
   private localTokenEstimateDurationMs = 0;
   private readonly modelCache = new CodexModelCache<ProviderModelCatalog>({
@@ -1546,70 +1551,129 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<number> {
     const config = getProviderConfig();
-    if (!supportsOfficialTokenCounting(config.baseURL)) {
+    const endpoint = normalizeBaseURL(config.baseURL);
+    const officialCountingAvailable = supportsOfficialTokenCounting(config.baseURL);
+    const capability = this.getTokenCountCapability(endpoint);
+    const probePending = capability === undefined && this.tokenCountProbes.has(endpoint);
+
+    if (!officialCountingAvailable || capability === false || probePending) {
       const estimated = this.estimateTokenCountLocally(text);
       this.logLocalTokenEstimateDiagnosticOnce({
         baseURL: config.baseURL,
         modelId: model.id,
         requestModel: parseModelIdentifier(model.id || config.model).requestModel,
         count: estimated,
-        reason: 'official-counting-unavailable-for-backend'
+        reason: !officialCountingAvailable
+          ? 'official-counting-unavailable-for-backend'
+          : capability === false
+            ? 'counting-endpoint-unsupported'
+            : 'counting-capability-probe-pending'
       });
       return estimated;
     }
 
-    const credentials = await getApiCredentials(this.context, this.authManager);
-    if (!credentials) {
-      const estimated = this.estimateTokenCountLocally(text);
-      this.logLocalTokenEstimateDiagnosticOnce({
-        baseURL: config.baseURL,
-        modelId: model.id,
-        requestModel: parseModelIdentifier(model.id || config.model).requestModel,
-        count: estimated,
-        reason: 'missing-credentials'
-      });
-      return estimated;
+    // Allow one initial capability probe per endpoint. Other token counts use
+    // local estimates until the first result shows whether remote counting works.
+    const ownsProbe = capability === undefined;
+    if (ownsProbe) {
+      this.tokenCountProbes.add(endpoint);
     }
-
-    const startedAt = Date.now();
 
     try {
-      const catalog = await this.getAvailableModelCatalog(config, credentials, token);
-      const selectedModel = this.resolveRequestModel(model.id, config, catalog.models, catalog.authoritative);
-      const input = typeof text === 'string' ? text : convertMessagesToResponsesInput([text]);
-      const count = await countInputTokens({
-        baseURL: config.baseURL,
-        apiKey: credentials.apiKey,
-        headers: credentials.headers,
-        authManager: credentials.authManager,
-        accountKey: credentials.accountKey,
-        model: selectedModel.requestModel,
-        input,
-        token
-      });
-      this.outputChannel.debug('provideTokenCount official count', {
-        modelId: model.id,
-        requestModel: selectedModel.requestModel,
-        count,
-        durationMs: Date.now() - startedAt
-      });
-      return count;
-    } catch (error) {
-      if (token.isCancellationRequested || isAbortError(error)) {
-        throw error;
+      const credentials = await getApiCredentials(this.context, this.authManager);
+      if (!credentials) {
+        const estimated = this.estimateTokenCountLocally(text);
+        this.logLocalTokenEstimateDiagnosticOnce({
+          baseURL: config.baseURL,
+          modelId: model.id,
+          requestModel: parseModelIdentifier(model.id || config.model).requestModel,
+          count: estimated,
+          reason: 'missing-credentials'
+        });
+        return estimated;
       }
-      const estimated = this.estimateTokenCountLocally(text);
-      const requestModel = parseModelIdentifier(model.id || config.model).requestModel;
-      this.outputChannel.warn('provideTokenCount fell back to local estimate after counting request failure', {
-        modelId: model.id,
-        requestModel,
-        count: estimated,
-        source: 'local-estimate',
-        officialCountingAvailable: true,
-        durationMs: Date.now() - startedAt
-      });
-      return estimated;
+
+      const startedAt = Date.now();
+
+      try {
+        const catalog = await this.getAvailableModelCatalog(config, credentials, token);
+        const selectedModel = this.resolveRequestModel(model.id, config, catalog.models, catalog.authoritative);
+        const input = typeof text === 'string' ? text : convertMessagesToResponsesInput([text]);
+        const count = await countInputTokens({
+          baseURL: config.baseURL,
+          apiKey: credentials.apiKey,
+          headers: credentials.headers,
+          authManager: credentials.authManager,
+          accountKey: credentials.accountKey,
+          model: selectedModel.requestModel,
+          input,
+          token
+        });
+        this.recordTokenCountCapability(endpoint, true);
+        this.outputChannel.debug('provideTokenCount official count', {
+          modelId: model.id,
+          requestModel: selectedModel.requestModel,
+          count,
+          durationMs: Date.now() - startedAt
+        });
+        return count;
+      } catch (error) {
+        if (token.isCancellationRequested || isAbortError(error)) {
+          throw error;
+        }
+        const estimated = this.estimateTokenCountLocally(text);
+        const requestModel = parseModelIdentifier(model.id || config.model).requestModel;
+        if (error instanceof UnsupportedTokenCountEndpointError) {
+          if (this.recordTokenCountCapability(endpoint, false)) {
+            this.outputChannel.warn('provideTokenCount endpoint does not support remote counting; using local estimates', {
+              requestModel,
+              status: error.status,
+              subsequentOccurrencesSuppressed: true
+            });
+          }
+          return estimated;
+        }
+        this.outputChannel.warn('provideTokenCount fell back to local estimate after counting request failure', {
+          modelId: model.id,
+          requestModel,
+          count: estimated,
+          source: 'local-estimate',
+          officialCountingAvailable: true,
+          durationMs: Date.now() - startedAt
+        });
+        return estimated;
+      }
+    } finally {
+      if (ownsProbe) {
+        this.tokenCountProbes.delete(endpoint);
+      }
     }
+  }
+
+  private getTokenCountCapability(endpoint: string): boolean | undefined {
+    const entry = this.tokenCountCapabilities.get(endpoint);
+    if (!entry) {
+      return undefined;
+    }
+    if (!entry.supported && Date.now() - entry.observedAt >= TOKEN_COUNT_UNSUPPORTED_TTL_MS) {
+      this.tokenCountCapabilities.delete(endpoint);
+      return undefined;
+    }
+    return entry.supported;
+  }
+
+  private recordTokenCountCapability(endpoint: string, supported: boolean): boolean {
+    const previous = this.tokenCountCapabilities.get(endpoint);
+    this.tokenCountCapabilities.delete(endpoint);
+    this.tokenCountCapabilities.set(endpoint, { supported, observedAt: Date.now() });
+    while (this.tokenCountCapabilities.size > MAX_TOKEN_COUNT_CAPABILITIES) {
+      const oldestKey = this.tokenCountCapabilities.keys().next().value;
+      if (typeof oldestKey !== 'string') {
+        break;
+      }
+      this.tokenCountCapabilities.delete(oldestKey);
+    }
+    return previous?.supported !== supported;
   }
 
   private estimateTokenCountLocally(text: string | vscode.LanguageModelChatRequestMessage): number {
@@ -1625,7 +1689,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     modelId: string;
     requestModel: string;
     count: number;
-    reason: 'official-counting-unavailable-for-backend' | 'missing-credentials';
+    reason: 'official-counting-unavailable-for-backend' | 'missing-credentials'
+      | 'counting-endpoint-unsupported' | 'counting-capability-probe-pending';
   }): void {
     const diagnosticKey = JSON.stringify([
       normalizeBaseURL(options.baseURL),

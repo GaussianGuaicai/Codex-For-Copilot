@@ -111,6 +111,13 @@ export interface ReasoningStreamLifecycleEvent {
   textLength?: number;
 }
 
+export class UnsupportedTokenCountEndpointError extends Error {
+  constructor(readonly status: number) {
+    super(`Responses input token counting endpoint is unavailable (HTTP ${status}).`);
+    this.name = 'UnsupportedTokenCountEndpointError';
+  }
+}
+
 export interface CountInputTokensOptions {
   baseURL: string;
   apiKey: string;
@@ -1640,6 +1647,10 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
       });
 
   if (!response.ok) {
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new UnsupportedTokenCountEndpointError(response.status);
+    }
     const body = await safeReadResponseBody(response);
     throw new Error(`Responses input token count failed with ${response.status} ${response.statusText}.${body ? ` ${body}` : ''}`);
   }
