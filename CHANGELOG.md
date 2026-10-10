@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.8](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.7...v1.9.8) (2026-10-10)
+
+
+### Bug Fixes
+
+* classify Codex quota and rate limit errors for VS Code Chat ([#112](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/112)) ([080bb97](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/080bb97f986df5f6b4fca3d4173fa45093278c77))
+
 ## [1.9.7](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.6...v1.9.7) (2026-09-30)
 
 
