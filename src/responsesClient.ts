@@ -130,6 +130,7 @@ export interface StreamResponseTextOptions {
   accountKey?: string;
   transport?: 'auto' | 'http' | 'websocket';
   compatibilityProfile?: CodexCompatibilityProfile;
+  enablePromptCacheKey?: boolean;
   identity?: CodexRequestIdentity;
   turnState?: string;
   authIdentity?: string;
@@ -502,7 +503,14 @@ async function streamResponseTextOverWebSocket(
     // Register the SDK error listener before sending on a reused open socket.
     // The backend can reject a bad previous_response_id immediately.
     const stream = socket.stream();
-    socket.send(buildResponsesCreateEvent(options));
+    const requestEvent = buildResponsesCreateEvent(options);
+    socket.send(requestEvent);
+    // Match the managed WebSocket path: report the ID actually sent on the wire.
+    // The provider uses this after a successful response to judge tool continuation.
+    options.onTransportMetrics?.({
+      previousResponseIdUsed: Boolean(requestEvent.previous_response_id),
+      incrementalInputCount: Array.isArray(requestEvent.input) ? requestEvent.input.length : 0
+    });
 
     for await (const streamEvent of stream) {
       if (options.token.isCancellationRequested) {
@@ -1021,6 +1029,7 @@ function buildResponsesCreateEvent(options: StreamResponseTextOptions): Response
 function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexRequestBuilderOptions {
   return {
     compatibilityEnabled: options.compatibilityProfile?.enabled ?? false,
+    enablePromptCacheKey: options.enablePromptCacheKey,
     identity: options.identity,
     model: options.model,
     instructions: options.instructions,

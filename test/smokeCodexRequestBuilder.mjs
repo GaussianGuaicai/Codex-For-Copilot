@@ -58,6 +58,14 @@ try {
     reasoning: undefined,
     tools: []
   });
+  const cacheKeyOptions = { ...base, compatibilityEnabled: false, enablePromptCacheKey: true, tools: [] };
+  const proxyRequest = buildCodexResponsesRequest(cacheKeyOptions);
+  const proxyNextTurn = buildCodexResponsesRequest({
+    ...cacheKeyOptions,
+    identity: { ...identity, turnId: '99999999-9999-4999-8999-999999999999' },
+    input: [{ type: 'message', role: 'user', content: 'next' }]
+  });
+  const proxyWebSocketEvent = buildCodexResponsesWebSocketEvent(cacheKeyOptions);
   const hostedWebSearchRequest = buildCodexResponsesRequest({
     ...base,
     compatibilityEnabled: false,
@@ -105,6 +113,11 @@ try {
   assertEqual(compatibilityDefaultReasoningRequest.include[0], 'reasoning.encrypted_content', 'compatibility default reasoning requests encrypted content');
   assertEqual('reasoning' in standardRequest, false, 'standard request does not add default reasoning');
   assertEqual('include' in standardRequest, false, 'standard request does not request encrypted reasoning');
+  assertEqual('prompt_cache_key' in standardRequest, false, 'standard API-key requests omit cache key by default');
+  assertEqual(proxyRequest.prompt_cache_key, identity.threadId, 'opt-in proxy cache key uses stable thread ID');
+  assertEqual(proxyNextTurn.prompt_cache_key, identity.threadId, 'proxy cache key is stable across turns');
+  assertEqual(proxyWebSocketEvent.prompt_cache_key, identity.threadId, 'proxy WebSocket cache key matches HTTP');
+  assertEqual('client_metadata' in proxyRequest, false, 'cache key opt-in does not add Codex metadata');
   assertEqual(hostedWebSearchRequest.tools[0].type, 'web_search', 'OpenAI hosted web search tool is preserved');
   assertEqual(hostedWebSearchRequest.include[0], 'web_search_call.action.sources', 'web search sources are requested');
   assertEqual(hostedWebSearchRequest.tools.some((tool) => tool.type === 'function'), false, 'hosted web search does not become a function tool');

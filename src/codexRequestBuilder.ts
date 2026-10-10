@@ -31,6 +31,7 @@ export type CodexResponsesWebSocketRequest = Omit<CodexResponsesRequest, 'stream
 
 export interface CodexRequestBuilderOptions {
   compatibilityEnabled: boolean;
+  enablePromptCacheKey?: boolean;
   identity?: CodexRequestIdentity;
   model: string;
   instructions: string;
@@ -109,10 +110,12 @@ export function buildCodexResponsesRequestWithMetrics(
         ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {})
       }
     : include.length > 0 ? { include } : {};
-  const identityFields = options.compatibilityEnabled && options.identity
+  const identityFields = options.identity
     ? {
-        prompt_cache_key: options.identity.threadId,
-        client_metadata: metadata
+        ...(options.compatibilityEnabled || options.enablePromptCacheKey
+          ? { prompt_cache_key: options.identity.threadId }
+          : {}),
+        ...(options.compatibilityEnabled ? { client_metadata: metadata } : {})
       }
     : {};
   const reasoning = normalizeReasoningForRequest(options);

@@ -255,6 +255,11 @@
           ],
           "description": "Controls Zstandard compression for large ChatGPT Codex Responses requests."
         },
+        "codexModelProvider.enablePromptCacheKey": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send a stable per-thread prompt_cache_key to custom Responses-compatible endpoints, such as CLIProxyAPI. Off by default because some endpoints do not support it. Official Codex compatibility continues to include its key."
+        },
         "codexModelProvider.webSearchExternalAccess": {
           "type": "boolean",
           "default": true,

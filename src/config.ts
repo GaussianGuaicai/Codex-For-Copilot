@@ -31,6 +31,7 @@ export interface ProviderConfig {
   transport: 'auto' | 'http' | 'websocket';
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
+  enablePromptCacheKey: boolean;
   protocol: CodexProtocolSettings;
   requestIdentity: RequestIdentitySettings;
   nativeToolSearch: 'auto' | 'enabled' | 'disabled';
@@ -58,6 +59,7 @@ export function getProviderConfig(): ProviderConfig {
     transport: normalizeTransport(config.get('transport', 'auto')),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
+    enablePromptCacheKey: config.get('enablePromptCacheKey', false),
     protocol: {
       profile: normalizeProtocolProfile(config.get('protocolProfile', 'auto')),
       headerOverrides: normalizeStringRecord(config.get('headerOverrides', {}), 32, 1024),

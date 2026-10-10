@@ -108,6 +108,12 @@ Most users can keep the defaults. Advanced settings are available under **Settin
 - request compression and WebSocket prewarming
 - Web Search access, context, domains, and status detail
 
+For custom Responses-compatible API endpoints such as CLIProxyAPI, you can opt in to
+sending a stable per-thread prompt cache key with
+`"codexModelProvider.enablePromptCacheKey": true`. It is disabled by default
+because not every third-party endpoint accepts `prompt_cache_key`; the official
+ChatGPT Codex compatibility profile continues to send its cache key normally.
+
 For a proxy-required network, set VS Code's `http.proxy` setting or the Extension Host's `HTTPS_PROXY`/`HTTP_PROXY` environment variable. The provider applies that proxy consistently to model discovery, account usage, HTTP Responses requests, token counting, and WebSocket requests; `NO_PROXY` remains honored.
 
 ## Develop locally
