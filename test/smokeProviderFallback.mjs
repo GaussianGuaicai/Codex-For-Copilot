@@ -213,6 +213,7 @@ const { CodexModelProvider, hasCanonicalReplayContinuationIntegrity } = require(
 const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
 
 try {
+  await runProviderLimitErrorSmokeTest();
   runCanonicalReplayIntegritySmokeTest();
   await runUnauthorizedLegacyToolCallSmokeTest();
   await runNativeReplayValidationSmokeTest();
@@ -5599,7 +5600,7 @@ async function runProviderStreamRateLimitIsolationSmokeTest() {
     assertEqual(visibleRequestCount, 1, 'provider-visible hosted Web Search blocks HTTP rate-limit retry');
     assertEqual(visibleParts.filter((part) => part instanceof LanguageModelThinkingPart && part.value.includes('provider visible search')).length, 1, 'detailed hosted Web Search action is emitted once');
     assertEqual(getStatefulMarkers(visibleParts).length, 0, 'provider-visible failed response emits no marker');
-    assertEqual(visibleError instanceof Error, true, 'provider-visible rate limit surfaces');
+    assertEqual(visibleError?.name, 'ChatRateLimited', 'provider-visible rate limit uses the native error name');
 
     const safeProvider = new CodexModelProvider(context, createOutputChannel());
     const safeParts = [];
@@ -7030,4 +7031,82 @@ function createOutputChannel(logs) {
     warn: record('warn'),
     error: record('error')
   };
+}
+
+async function runProviderLimitErrorSmokeTest() {
+  const originalBaseURL = configValues.baseURL;
+  const originalTransport = configValues.transport;
+  try {
+    for (const { code, backendMessage, expectedMessage } of [
+      { code: 'usage_limit_reached', backendMessage: 'The usage limit has been reached.',
+        expectedMessage: 'Codex usage limit reached. Try again after your usage resets, or switch accounts.' },
+      { code: 'usage_limit_reached', backendMessage: 'Backend detail. Try again at 12:00.',
+        expectedMessage: 'Codex usage limit reached. Try again at 12:00, or switch accounts.' },
+      { code: 'rate_limit_exceeded', backendMessage: 'Backend detail. Try again in 12.3s.',
+        expectedMessage: 'Codex is temporarily rate limited. Try again in 12.3s.' },
+      { code: 'rate_limit_exceeded', backendMessage: 'Too many requests.',
+        expectedMessage: 'Codex is temporarily rate limited. Try again shortly.' },
+      { code: 'usage_limit_reached', backendMessage: '429 {"error":{"message":"Usage limit reached. try again tomorrow."}}',
+        expectedMessage: 'Codex usage limit reached. Try again tomorrow, or switch accounts.' },
+      { code: 'invalid_request_error', backendMessage: 'Backend detail. Try again at 12:00.' }
+    ]) {
+      let requests = 0;
+      let refreshes = 0;
+      const server = createServer((_request, response) => {
+        requests += 1;
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'Already visible.' })}\n\n`);
+        response.write(`data: ${JSON.stringify({ type: 'response.failed', response: {
+          id: 'resp_failed_limit', status: 'failed', error: { code, message: backendMessage }
+        } })}\n\n`);
+        response.end('data: [DONE]\n\n');
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      configValues.baseURL = `http://127.0.0.1:${server.address().port}/backend-api/codex/responses`;
+      configValues.transport = 'http';
+      const logs = [];
+      const provider = new CodexModelProvider(
+        { secrets: { async get() { return 'test-api-key'; } }, subscriptions: [] },
+        createOutputChannel(logs), undefined, { async refresh() { refreshes += 1; } }
+      );
+      const parts = [];
+      let error;
+      try {
+        await provider.provideLanguageModelChatResponse(
+          { id: 'codex::gpt-5.6-sol', name: 'Codex', family: 'gpt-5.6-sol', version: 'mock', maxInputTokens: 258400 },
+          [{ role: 1, content: [new LanguageModelTextPart('Continue work.')] }], {},
+          { report(part) { parts.push(part); } }, createCancellationToken()
+        );
+      } catch (caught) {
+        error = caught;
+      } finally {
+        await closeServer(server);
+      }
+      assertEqual(error?.name, code === 'usage_limit_reached' ? 'ChatQuotaExceeded' : code === 'rate_limit_exceeded' ? 'ChatRateLimited' : 'Error', 'provider native error classification');
+      assertEqual(requests, 1, 'visible partial response is never replayed');
+      assertEqual(refreshes, code === 'invalid_request_error' ? 0 : 1, 'limit failure refreshes usage once');
+      assertEqual(parts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''), 'Already visible.', 'partial text is preserved without fake completion text');
+      assertEqual(getStatefulMarkers(parts).length, 0, 'failed turn does not generate a continuation marker');
+      if (expectedMessage) {
+        assertEqual(error.message, expectedMessage, 'Chat receives only actionable limit guidance');
+        // LM RPC serializes name/message/stack/cause. Rehydrate as an Error as VS Code does.
+        const serialized = JSON.parse(JSON.stringify({ name: error.name, message: error.message, stack: error.stack, cause: error.cause }));
+        const received = Object.assign(new Error(), serialized, { stack: serialized.stack });
+        assertEqual(received.name, error.name, 'classification survives RPC serialization');
+        assertEqual(received.stack, undefined, 'RPC cannot expose extension paths or a duplicate stack message');
+        assertEqual(received.cause, undefined, 'raw backend errors stay outside the UI error envelope');
+        // Copilot ExtChatEndpoint uses toErrorMessage(e, true): message + stack if present.
+        const reason = received.stack ? `${received.message}: ${received.stack}` : received.message;
+        assertEqual(reason, expectedMessage, 'verbose participant formatting stays concise after RPC');
+        assertEqual(logs.some((entry) => entry.message.includes('response limit reached')
+          && entry.message.includes(code === 'usage_limit_reached' ? 'ResponsesQuotaExceededError' : 'ResponsesRateLimitedError')), true, 'original limit diagnostics remain in provider logs');
+      } else {
+        assertEqual(error.message.includes(backendMessage), true, 'ordinary failures retain backend details');
+        assertEqual(typeof error.stack, 'string', 'ordinary failures retain their diagnostic stack');
+      }
+    }
+  } finally {
+    configValues.baseURL = originalBaseURL;
+    configValues.transport = originalTransport;
+  }
 }
