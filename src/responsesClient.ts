@@ -73,6 +73,7 @@ const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
 const MAX_ERROR_JSON_LENGTH = 16 * 1024;
 const STREAM_RATE_LIMIT_MAX_RETRIES = 1;
+const MAX_STREAM_RETRY_DELAY_MS = 24 * 60 * 60 * 1_000;
 const UNREADABLE_ERROR_PROPERTY = Symbol('unreadableErrorProperty');
 
 interface ReusableResponsesWebSocketSession {
@@ -1417,7 +1418,13 @@ function handleResponsesServerEvent(
       throw new ResponsesQuotaExceededError(message);
     }
     if (limit === 'rate') {
-      throw new ResponsesRateLimitedError(message, parseRetryDelayMs(message));
+      throw new ResponsesRateLimitedError(
+        message,
+        parseStreamRetryAfterMs(
+          getObjectProperty(event, 'error'),
+          event
+        ) ?? parseRetryDelayMs(message)
+      );
     }
     options.onResponseFailed?.(message);
     throw new Error(message);
@@ -1447,7 +1454,7 @@ function handleResponsesServerEvent(
     if (classifyResponsesLimit(error) === 'rate') {
       throw new ResponsesRateLimitedError(
         error?.message ?? 'Responses API rate limit exceeded.',
-        parseRetryDelayMs(error?.message)
+        parseStreamRetryAfterMs(error) ?? parseRetryDelayMs(error?.message)
       );
     }
 
@@ -1613,6 +1620,57 @@ function parseRetryDelayMs(message: string | null | undefined): number | undefin
     return undefined;
   }
   return /^(?:ms|millisecond)/i.test(match[2]) ? value : value * 1_000;
+}
+
+function parseStreamRetryAfterMs(...sources: unknown[]): number | undefined {
+  for (const source of sources) {
+    const headers = getObjectProperty(source, 'headers');
+    if (!headers) {
+      continue;
+    }
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() !== 'retry-after' || typeof value !== 'string') {
+        continue;
+      }
+      const delayMs = parseRetryAfterHeaderMs(value);
+      if (delayMs !== undefined) {
+        return delayMs;
+      }
+    }
+  }
+  return undefined;
+}
+
+function parseRetryAfterHeaderMs(value: string): number | undefined {
+  const normalized = value.trim();
+  if (/^\d+$/.test(normalized)) {
+    const seconds = Number(normalized);
+    const delayMs = seconds * 1_000;
+    return Number.isSafeInteger(delayMs) && delayMs <= MAX_STREAM_RETRY_DELAY_MS
+      ? delayMs
+      : undefined;
+  }
+
+  if (!/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(normalized)) {
+    return undefined;
+  }
+  const timestamp = Date.parse(normalized);
+  const delayMs = timestamp - Date.now();
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toUTCString() !== normalized
+    || delayMs < 0 || delayMs > MAX_STREAM_RETRY_DELAY_MS) {
+    return undefined;
+  }
+  return delayMs;
+}
+
+function getObjectProperty(value: unknown, property: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const candidate = (value as Record<string, unknown>)[property];
+  return candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : undefined;
 }
 
 async function waitForRetryDelay(delayMs: number | undefined, signal: AbortSignal): Promise<void> {
