@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.9](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.8...v1.9.9) (2026-10-23)
+
+
+### Bug Fixes
+
+* preserve pending stateful continuations beyond cache TTL ([#120](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/120)) ([060484b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/060484b4f76853f6d75871057de5f3ac46dd14e1))
+* respect Retry-After in streamed rate-limit errors ([#122](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/122)) ([de693dc](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/de693dca6b58ff68702eb200be4fc2ad8c82960a))
+
 ## [1.9.8](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.7...v1.9.8) (2026-10-13)
 
 
