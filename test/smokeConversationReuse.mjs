@@ -530,6 +530,17 @@ function runStatefulMarkerBranchStoreSmokeTest(ResponseBranchStore) {
     responseId: 'resp_marker_pending',
     incrementalInput: [completeOutputs[0]]
   }), undefined, 'exact marker rejects partial pending-call outputs');
+
+  const pendingOriginalNow = Date.now;
+  Date.now = () => pendingOriginalNow() + 10 * 60 * 1000 + 1;
+  try {
+    assertEqual(pendingStore.findReusableBranch(pendingEnvelope, completeOutputs, {
+      responseId: 'resp_marker_pending',
+      incrementalInput: completeOutputs
+    })?.responseId, 'resp_marker_pending', 'pending tool marker survives the ordinary cache TTL');
+  } finally {
+    Date.now = pendingOriginalNow;
+  }
 }
 
 function runBranchStoreSmokeTest(ResponseBranchStore) {

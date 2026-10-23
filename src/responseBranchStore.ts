@@ -343,7 +343,7 @@ export class ResponseBranchStore {
     const now = Date.now();
 
     for (const [branchId, branch] of this.branches.entries()) {
-      if (now - branch.updatedAt > this.ttlMs) {
+      if (now - branch.updatedAt > this.ttlMs && !isAwaitingFunctionCallOutput(branch)) {
         this.branches.delete(branchId);
       }
     }
@@ -361,7 +361,11 @@ export class ResponseBranchStore {
     }
 
     const branchesByAge = [...this.branches.values()]
-      .sort((left, right) => left.updatedAt - right.updatedAt);
+      .sort((left, right) => {
+        const pendingDifference = Number(isAwaitingFunctionCallOutput(left))
+          - Number(isAwaitingFunctionCallOutput(right));
+        return pendingDifference || left.updatedAt - right.updatedAt;
+      });
 
     while (this.branches.size > this.maxBranches && branchesByAge.length > 0) {
       const oldest = branchesByAge.shift();
@@ -370,6 +374,23 @@ export class ResponseBranchStore {
       }
     }
   }
+}
+
+function isAwaitingFunctionCallOutput(branch: ResponseBranchEntry): boolean {
+  if (branch.supersededForHistoryReuse || !branch.state?.turn.completed) {
+    return false;
+  }
+
+  return branch.state.continuation?.responseItems.some((item) => {
+    if (typeof item !== 'object' || item === null) {
+      return false;
+    }
+
+    const record = item as Record<string, unknown>;
+    return record.type === 'function_call'
+      && typeof record.call_id === 'string'
+      && record.call_id.trim().length > 0;
+  }) ?? false;
 }
 
 function cloneBranchState(state: CodexBranchState): CodexBranchState {
