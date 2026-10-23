@@ -49,6 +49,7 @@ try {
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
   await runInputTokenCountStatusSmokeTest(countInputTokens, UnsupportedTokenCountEndpointError);
   runHostedWebSearchEventSmokeTest(createResponsesServerEventHandler);
+  runStreamRetryAfterSmokeTest(createResponsesServerEventHandler);
   await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runLimitClassificationSmokeTest(streamResponseText);
   await runHttpTransportSmokeTest(streamResponseText);
@@ -431,7 +432,20 @@ async function runRetryBackoffCancellationSmokeTest(streamResponseText) {
   const token = createMutableCancellationToken();
   const server = createServer((_request, response) => {
     requestCount += 1;
-    writeSseFailedResponse(response, 'rate_limit_exceeded', 'Please try again in 10 seconds.');
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(`data: ${JSON.stringify({
+      type: 'response.failed',
+      response: {
+        id: 'resp_limited',
+        status: 'failed',
+        error: {
+          code: 'rate_limit_exceeded',
+          message: 'Rate limit exceeded.',
+          headers: { 'Retry-After': '120' }
+        }
+      }
+    })}\n\n`);
+    response.end('data: [DONE]\n\n');
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
@@ -451,6 +465,113 @@ async function runRetryBackoffCancellationSmokeTest(streamResponseText) {
     clearTimeout(cancellationTimer);
     server.close();
   }
+}
+
+function runStreamRetryAfterSmokeTest(createEventHandler) {
+  const handle = createEventHandler(createStreamOptions('http://127.0.0.1/responses', 'http'));
+  const responseFailed = captureThrownError(() => handle({
+    type: 'response.failed',
+    response: {
+      id: 'resp_header_delay',
+      status: 'failed',
+      error: {
+        code: 'rate_limit_exceeded',
+        message: 'Please try again in 9 seconds.',
+        headers: { 'rEtRy-AfTeR': '2' }
+      }
+    }
+  }));
+  assertEqual(responseFailed?.name, 'ResponsesRateLimitedError', 'response.failed header remains rate limited');
+  assertEqual(responseFailed?.retryDelayMs, 2_000, 'response.failed nested header overrides message advice');
+
+  const nestedPrecedence = captureThrownError(() => handle({
+    type: 'error',
+    headers: { 'Retry-After': '7' },
+    error: {
+      code: 'rate_limit_exceeded',
+      message: 'Rate limit exceeded.',
+      headers: { 'Retry-After': '3' }
+    }
+  }));
+  assertEqual(nestedPrecedence?.retryDelayMs, 3_000, 'error nested header precedes top-level header');
+
+  const topLevelFallback = captureThrownError(() => handle({
+    type: 'error',
+    headers: { 'retry-after': '4' },
+    error: {
+      code: 'rate_limit_exceeded',
+      message: 'Please try again in 8 seconds.',
+      headers: { 'Retry-After': '1.5' }
+    }
+  }));
+  assertEqual(topLevelFallback?.retryDelayMs, 4_000, 'invalid nested header falls back to top-level header');
+
+  const messageFallback = captureThrownError(() => handle({
+    type: 'response.failed',
+    response: {
+      id: 'resp_invalid_header',
+      status: 'failed',
+      error: {
+        code: 'rate_limit_exceeded',
+        message: 'Please try again in 6ms.',
+        headers: { 'Retry-After': '999999999999999999999' }
+      }
+    }
+  }));
+  assertEqual(messageFallback?.retryDelayMs, 6, 'unsafe nested header falls back to message advice');
+
+  const quota = captureThrownError(() => handle({
+    type: 'error',
+    headers: { 'Retry-After': '1' },
+    error: {
+      code: 'insufficient_quota',
+      message: 'Account credit balance exhausted.',
+      headers: { 'Retry-After': '2' }
+    }
+  }));
+  assertEqual(quota?.name, 'ResponsesQuotaExceededError', 'Retry-After does not make quota errors retryable');
+
+  const originalNow = Date.now;
+  Date.now = () => Date.parse('Wed, 21 Oct 2026 12:00:00 GMT');
+  try {
+    for (const [header, expected] of [
+      ['Wed, 21 Oct 2026 12:00:05 GMT', 5_000],
+      ['Wed, 21 Oct 2026 11:59:59 GMT', 6],
+      ['Tue, 31 Feb 2026 12:00:00 GMT', 6],
+      ['Fri, 23 Oct 2026 12:00:00 GMT', 6],
+      ['-1', 6],
+      ['1e3', 6],
+      ['0', 0],
+      [' 2 ', 2_000]
+    ]) {
+      const error = captureThrownError(() => handle({
+        type: 'error',
+        error: {
+          code: 'rate_limit_exceeded',
+          message: 'Please try again in 6ms.',
+          headers: { 'Retry-After': header }
+        }
+      }));
+      assertEqual(error?.retryDelayMs, expected, `Retry-After boundary: ${header}`);
+    }
+  } finally {
+    Date.now = originalNow;
+  }
+
+  const terminal = captureThrownError(() => handle({
+    type: 'error',
+    error: { code: 'invalid_request_error', message: 'Invalid request.', headers: { 'Retry-After': '2' } }
+  }));
+  assertEqual(terminal?.name, 'Error', 'Retry-After does not make non-rate errors retryable');
+}
+
+function captureThrownError(callback) {
+  try {
+    callback();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('Expected callback to throw.');
 }
 
 async function runTruncatedHttpStreamSmokeTest(streamResponseText) {
