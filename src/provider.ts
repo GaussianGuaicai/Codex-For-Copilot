@@ -629,7 +629,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       && (!requiresFullInputForToolOutput || shouldAttemptToolOutputContinuation);
     const canonicalReplaySnapshot = reusableBranch?.state?.continuation;
     const canonicalReplayAppendedInput = reusableBranch?.comparison.appendedInput ?? [];
-    const fullReplayInput = toolPlan.mode === 'native-hosted' || reasoningSelection !== undefined
+    const preserveReasoningHistory = reasoningEffortUpdates
+      || (canonicalReplaySnapshot?.fullRequest.input as readonly { type?: string }[] | undefined)
+        ?.some((item) => item.type === 'configuration_update') === true;
+    const fullReplayInput = toolPlan.mode === 'native-hosted' || preserveReasoningHistory
       ? buildCanonicalReplayInput({
           previousSnapshot: canonicalReplaySnapshot,
           convertedInput: input,
@@ -1366,7 +1369,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           nativeToolSearchFallback: true
         });
         legacyFallbackReplayInput = buildLegacyFallbackReplayInput(
-          reasoningSelection ? recoveryReplayInput : markerCanonicalReplayInput ?? input
+          preserveReasoningHistory ? recoveryReplayInput : markerCanonicalReplayInput ?? input
         );
         await streamRequest(legacyFallbackReplayInput);
       } else if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
@@ -1471,7 +1474,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       const builtFullRequest = buildCodexResponsesRequest({
         ...requestOptions,
         identity: requestIdentity,
-        input: legacyFallbackReplayInput ?? (reasoningSelection ? recoveryReplayInput : recordedInput),
+        input: legacyFallbackReplayInput ?? (preserveReasoningHistory ? recoveryReplayInput : recordedInput),
       });
       const fullRequest = isMarkerContinuation
         ? builtFullRequest

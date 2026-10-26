@@ -7333,7 +7333,23 @@ async function runReasoningEffortTransitionSmokeTest({ transport = 'http', suppo
     assertEqual(updates(requests.at(-1)).length, 0, 'dismissal does not silently change effort');
     if (!supportsUpdates) assertEqual(requests.at(-1).reasoning.effort, 'high', 'unsupported models also preserve declined effort');
 
-    if (!supportsUpdates) return;
+    if (!supportsUpdates) {
+      await run('low', undefined, 'Unsupported history');
+      choice = 'Apply to Current Task';
+      await provider.provideLanguageModelChatResponse(model, [
+        createSystemMessage('Agent Host instructions'),
+        { role: 1, content: [new LanguageModelTextPart('Unsupported history')] },
+        { role: 2, content: [new LanguageModelTextPart('ok')] },
+        { role: 1, content: [new LanguageModelTextPart('Ordinary continuation')] }
+      ], { modelOptions: { reasoningEffort: 'high' } }, { report() {} }, token);
+      assertEqual(JSON.stringify(requests.at(-1).input), JSON.stringify([
+        { role: 'user', content: 'Unsupported history', type: 'message' },
+        { role: 'assistant', content: 'ok', type: 'message' },
+        { role: 'user', content: 'Ordinary continuation', type: 'message' }
+      ]), 'unsupported effort changes preserve the converted full-history format');
+      assertEqual(requests.at(-1).reasoning.effort, 'high', 'unsupported full-history continuation applies confirmed ordinary effort');
+      return;
+    }
     rejectNextContinuation = true;
     choice = 'Apply to Current Task';
     marker = await run('none', marker);
