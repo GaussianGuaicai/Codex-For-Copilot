@@ -76,6 +76,7 @@ import {
 } from './hostedTools/hostedToolEvents';
 import { StreamPresenter, mergeStreamPresentationMetrics } from './streamPresenter';
 import { ReasoningStreamPresenter } from './reasoningStreamPresenter';
+import { ReasoningEffortSessions, type ReasoningEffortSessionContext } from './reasoningEffortSession';
 import {
   CodexModelCache,
   MODEL_CACHE_FRESH_TTL_MS,
@@ -84,6 +85,7 @@ import {
 } from './codexModelCache';
 
 type RuntimeProvideLanguageModelChatResponseOptions = vscode.ProvideLanguageModelChatResponseOptions & {
+  readonly chatSessionContext?: ReasoningEffortSessionContext;
   readonly modelConfiguration?: Record<string, unknown>;
   readonly configuration?: Record<string, unknown>;
 };
@@ -195,6 +197,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
   private readonly responseBranchStore = new ResponseBranchStore();
+  private readonly reasoningEffortSessions = new ReasoningEffortSessions((effort) => vscode.window.showInformationMessage(
+    `Thinking Effort changed to ${effort}. Apply it to the current task in the conversation where you changed it?`,
+    'Apply to Current Task',
+    'Future Tasks Only'
+  ));
   private readonly runtimeAvailability = new RuntimeModelAvailability();
   private readonly identityManager: CodexIdentityManager;
   private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
@@ -233,6 +240,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     let configurationFingerprint = withoutDefaultEffort(getProviderConfig());
     this.context.subscriptions.push(
       this.modelInfoChangedEmitter,
+      new vscode.Disposable(() => this.reasoningEffortSessions.dispose()),
       new vscode.Disposable(() => disposeReusableResponsesWebSockets()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('codexModelProvider')) {
@@ -260,7 +268,16 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     return this.logger;
   }
 
+  /** Called only by the proposed chatProvider bridge in the accompanying VS Code prototype. */
+  handleLanguageModelChatSessionConfigurationChange(
+    model: vscode.LanguageModelChatInformation,
+    context: ReasoningEffortSessionContext
+  ): Promise<void> {
+    return this.reasoningEffortSessions.handleChange(model.id, context);
+  }
+
   handleAuthenticationChanged(): void {
+    this.reasoningEffortSessions.dispose();
     disposeReusableResponsesWebSockets();
     resetCodexFetchCapabilities();
     this.lastConnectionConfigurationKey = undefined;
@@ -385,7 +402,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       options as RuntimeProvideLanguageModelChatResponseOptions,
       config.defaultReasoningEffort
     );
-    const reasoningEffort = reasoning.effort;
+    const liveReasoning = this.reasoningEffortSessions.resolve(
+      model.id, (options as RuntimeProvideLanguageModelChatResponseOptions).chatSessionContext, reasoning.effort
+    );
+    const reasoningEffort = liveReasoning.effort;
     const requestStartedAt = latency.entryAt;
     const input = convertedMessages.input;
     const observedToolResults = this.consumeReportedToolResults(input);
@@ -496,6 +516,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     let reuseEnvelope = buildResponseBranchReuseEnvelope({
       baseURL: normalizeBaseURL(config.baseURL),
       authIdentity,
+      sessionId: liveReasoning.sessionId,
       toolSignatures: toolPlan.toolSignatures,
       effectiveInputBudget: selectedModel.effectiveInputBudget,
       ...requestOptions
@@ -537,8 +558,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       ? undefined
       : this.responseBranchStore.explainReuseMiss(reuseEnvelope, input);
     latency.mark('branchResolved');
-    // VS Code has no public live picker event. Read only the immutable options
-    // supplied for this request and confirm changes on a proven local continuation.
+    // Stock VS Code supplies immutable request options. The experimental
+    // session bridge has already obtained consent for its exact originating task.
     const previousReasoningSelection = reusableBranch?.state?.continuation?.reasoningSelection;
     let reasoningSelection = previousReasoningSelection ? { ...previousReasoningSelection } : undefined;
     let reasoningUpdateInput: ResponsesInputMessage[] = [];
@@ -547,8 +568,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       requestOptions.reasoning = reusableBranch?.state?.continuation?.fullRequest.reasoning ?? undefined;
     }
     if (reasoningEffort) {
-      let applyToCurrentTask = false;
-      if (previousReasoningSelection && reasoningEffort !== previousReasoningSelection.observed) {
+      let applyToCurrentTask = liveReasoning.live;
+      if (!liveReasoning.live && previousReasoningSelection && reasoningEffort !== previousReasoningSelection.observed) {
         const choice = await vscode.window.showInformationMessage(
           `Thinking Effort changed to ${reasoningEffort}. Apply it to the current task's next model request?`,
           'Apply to Current Task',
@@ -577,6 +598,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     // use ordinary reasoning.effort, so a confirmed change forces canonical replay.
     reuseEnvelope = buildResponseBranchReuseEnvelope({
       baseURL: normalizeBaseURL(config.baseURL), authIdentity,
+      sessionId: liveReasoning.sessionId,
       toolSignatures: toolPlan.toolSignatures,
       effectiveInputBudget: selectedModel.effectiveInputBudget,
       ...requestOptions
@@ -724,7 +746,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       serviceTier: config.defaultServiceTier ?? 'auto',
       reasoningEffort: reasoningSelection?.effective ?? reasoningEffort ?? null,
       requestReasoningEffort: requestOptions.reasoning?.effort ?? null,
-      reasoningEffortSource: reasoning.source,
+      reasoningEffortSource: liveReasoning.live ? 'sessionConfirmation' : reasoning.source,
       reasoningEffortInputConflict: reasoning.hasExplicitConflict,
       messageCount: messages.length,
       inputItemCount: input.length,
@@ -1345,6 +1367,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         reuseEnvelope = buildResponseBranchReuseEnvelope({
           baseURL: normalizeBaseURL(config.baseURL),
           authIdentity,
+          sessionId: liveReasoning.sessionId,
           toolSignatures: toolPlan.toolSignatures,
           effectiveInputBudget: selectedModel.effectiveInputBudget,
           ...requestOptions
@@ -2531,12 +2554,13 @@ function createTemporarilyUnavailableModelError(model: string, cause: unknown): 
 export function buildResponseBranchReuseEnvelope(options: {
   baseURL: string;
   authIdentity: string;
+  sessionId?: string;
   toolSignatures?: ResponseBranchToolSignatures;
   effectiveInputBudget?: number;
 } & CodexRequestEnvelopeOptions): ResponseBranchReuseEnvelope {
-  const { baseURL, authIdentity, toolSignatures, effectiveInputBudget, ...requestOptions } = options;
+  const { baseURL, authIdentity, sessionId, toolSignatures, effectiveInputBudget, ...requestOptions } = options;
   const requestFingerprint = fingerprintCodexRequestEnvelope(requestOptions);
-  const scopeKey = stableSerialize({ baseURL, authIdentity });
+  const scopeKey = stableSerialize({ baseURL, authIdentity, ...(sessionId ? { sessionId } : {}) });
   return {
     identityKey: stableSerialize({
       scopeKey,

@@ -215,6 +215,7 @@ const { CodexModelProvider, hasCanonicalReplayContinuationIntegrity } = require(
 const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
 
 try {
+  await runScopedEffortBridgeSmokeTest();
   await runReasoningEffortTransitionSmokeTest();
   await runReasoningEffortTransitionSmokeTest({ transport: 'websocket' });
   await runReasoningEffortTransitionSmokeTest({ supportsUpdates: false });
@@ -7446,6 +7447,104 @@ async function runReasoningEffortTransitionSmokeTest({ transport = 'http', suppo
     globalThis.fetch = originalFetch;
     for (const key of Object.keys(configValues)) delete configValues[key];
     Object.assign(configValues, saved);
+    await closeServer(server);
+  }
+}
+
+async function runScopedEffortBridgeSmokeTest() {
+  const savedConfig = { ...configValues };
+  const originalFetch = globalThis.fetch;
+  const originalPrompt = vscodeMock.window.showInformationMessage;
+  const requests = [];
+  const prompts = [];
+  const consent = [];
+  let releaseResponse;
+  let observeResponse;
+  const responseGate = new Promise((resolve) => { releaseResponse = resolve; });
+  const responseObserved = new Promise((resolve) => { observeResponse = resolve; });
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'Sol', { supports_reasoning_effort_updates: true })] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    requests.push(body);
+    const index = requests.length;
+    if (index === 1) {
+      observeResponse();
+      await responseGate;
+    }
+    writeSseResponseWithOutputItem(response, 'ok', `resp_live_${index}`, `msg_live_${index}`);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  Object.assign(configValues, { baseURL: `https://localhost:${server.address().port}/backend-api/codex/responses`,
+    protocolProfile: 'custom', transport: 'http', defaultReasoningEffort: 'auto' });
+  globalThis.fetch = (input, init) => {
+    const target = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    target.protocol = 'http:';
+    target.hostname = '127.0.0.1';
+    return originalFetch(target, init);
+  };
+  vscodeMock.window.showInformationMessage = (message, ...choices) => {
+    prompts.push({ message, choices });
+    return new Promise((resolve) => consent.push(resolve));
+  };
+  const provider = new CodexModelProvider({ secrets: { async get() { return 'test-api-key'; } }, subscriptions: [] }, createOutputChannel());
+  const context = (sessionId, taskId, effort, revision = 0, source = 'request', state = 'running') => ({
+    protocolVersion: 1, sessionId, taskId, revision, source, state, configuration: { reasoningEffort: effort }
+  });
+  const a = context('session-a', 'task-a', 'low');
+  const b = context('session-b', 'task-b', 'low');
+  try {
+    const token = createCancellationToken();
+    const [model] = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const run = async (effort, liveContext, text, marker) => {
+      const parts = [];
+      await provider.provideLanguageModelChatResponse(model,
+        marker ? createAgentHostContinuationMessages(marker, 'Live instructions', text) : [
+          createSystemMessage('Live instructions'), { role: 1, content: [new LanguageModelTextPart(text)] }
+        ], { modelOptions: { reasoningEffort: effort }, chatSessionContext: liveContext },
+        { report(part) { parts.push(part); } }, token);
+      return getSingleStatefulMarkerPart(parts, 'scoped live effort');
+    };
+    const pendingA = run('low', a, 'Live session A');
+    await responseObserved;
+    const markerB = await run('low', b, 'Live session A');
+    const change = provider.handleLanguageModelChatSessionConfigurationChange(model,
+      context('session-a', 'task-a', 'high', 1, 'user'));
+    assertEqual(prompts.length, 1, 'native event immediately prompts while A response is held open');
+    assertEqual(requests.length, 2, 'notification neither restarts nor adds a model request');
+    assertEqual(prompts[0].choices.join(','), 'Apply to Current Task,Future Tasks Only', 'no candidate session picker is offered');
+    consent[0]('Apply to Current Task');
+    await change;
+    releaseResponse();
+    const markerA = await pendingA;
+    assertEqual(requests[0].reasoning.effort, 'low', 'active response keeps its original effort');
+    const updatedA = await run('low', a, 'Continue live A', markerA);
+    assertEqual(requests.at(-1).reasoning.effort, 'low', 'confirmed live change retains original request pin');
+    assertEqual(requests.at(-1).input.at(-1).reasoning.effort, 'high', 'next A request receives update despite old options');
+    await run('low', b, 'Continue live B', markerB);
+    assertEqual(requests.at(-1).reasoning.effort, 'low', 'same-model session B is unchanged');
+    assertEqual(requests.at(-1).input.some((item) => item.type === 'configuration_update'), false, 'A update never reaches B');
+    assertEqual(prompts.length, 1, 'request boundaries do not repeat live consent');
+    assertEqual(requests[0].prompt_cache_key === requests[1].prompt_cache_key, false, 'identical transcripts in native sessions cannot share branch identity');
+    const closing = provider.handleLanguageModelChatSessionConfigurationChange(model,
+      context('session-a', 'task-a', 'none', 2, 'user'));
+    await provider.handleLanguageModelChatSessionConfigurationChange(model,
+      context('session-a', 'task-a', 'none', 2, 'lifecycle', 'ended'));
+    consent[1]('Apply to Current Task');
+    await closing;
+    await run('medium', context('session-a', 'new-task-a', 'medium'), 'Next task in A', updatedA);
+    assertEqual(requests.at(-1).input.at(-1).reasoning.effort, 'medium', 'late consent for ended task cannot override its successor');
+  } finally {
+    releaseResponse();
+    vscodeMock.window.showInformationMessage = originalPrompt;
+    globalThis.fetch = originalFetch;
+    for (const key of Object.keys(configValues)) delete configValues[key];
+    Object.assign(configValues, savedConfig);
     await closeServer(server);
   }
 }

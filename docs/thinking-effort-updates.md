@@ -70,3 +70,9 @@ replacement, and in-flight request isolation. Capability parsing also checks mis
 false, and malformed metadata. The tests require loopback server access and no real
 Codex credentials. Live backend cache-hit measurements and an interactive native
 picker change during an Agent task have not been verified.
+
+## Experimental native-session bridge
+
+An implementation prototype is available in [prototypes/vscode-session-effort](../prototypes/vscode-session-effort/README.md), including an applicable VS Code/bundled-Copilot patch and an isolated development-extension preparation command. In the patched host it can ask immediately from the originating native picker event and apply consent only to that Agent task. It never infers the source from a configuration file or active panel and never offers a list of candidate sessions.
+
+The normal extension manifest does not enable proposed APIs. Stock VS Code retains the request-boundary behavior described above. The experimental contract, validation performed, and unverified full-editor build are documented with the patch; this does not claim immediate native-picker support in released VS Code.
