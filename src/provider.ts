@@ -17,6 +17,8 @@ import { getProviderConfig, type ProviderConfig } from './config';
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, isProviderModelIdentifier, parseModelIdentifier, type ParsedModelIdentifier, type ResolvedProviderModel } from './models';
 import {
   resolveReasoningEffort,
+  normalizeKnownReasoningEffort,
+  planReasoningEffortUpdate,
   toResponsesReasoning,
   type ReasoningEffort,
   type ReasoningEffortResolution
@@ -87,6 +89,7 @@ type RuntimeProvideLanguageModelChatResponseOptions = vscode.ProvideLanguageMode
 };
 
 interface ResolvedRequestModel extends ParsedModelIdentifier {
+  supportsReasoningEffortUpdates?: boolean;
   effectiveInputBudget?: number;
 }
 
@@ -223,11 +226,23 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     };
     this.identityManager = new CodexIdentityManager(runtimeContext.globalState ?? createMemoryMemento());
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
+    const withoutDefaultEffort = (config: ProviderConfig) => {
+      const { defaultReasoningEffort: _effort, ...settings } = config;
+      return stableSerialize(settings);
+    };
+    let configurationFingerprint = withoutDefaultEffort(getProviderConfig());
     this.context.subscriptions.push(
       this.modelInfoChangedEmitter,
       new vscode.Disposable(() => disposeReusableResponsesWebSockets()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('codexModelProvider')) {
+          const nextFingerprint = withoutDefaultEffort(getProviderConfig());
+          // Effort-only edits must not tear down an active response or discard
+          // the model capability metadata needed at the next request boundary.
+          if (nextFingerprint === configurationFingerprint) {
+            return;
+          }
+          configurationFingerprint = nextFingerprint;
           disposeReusableResponsesWebSockets();
           resetCodexFetchCapabilities();
           this.lastConnectionConfigurationKey = undefined;
@@ -354,6 +369,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
     selectedModel = {
       ...selectedModel,
+      supportsReasoningEffortUpdates: cachedCatalog?.models.find((candidate) => candidate.requestModel === selectedModel.requestModel)?.supportsReasoningEffortUpdates
+        ?? selectedModel.supportsReasoningEffortUpdates,
       effectiveInputBudget: resolveConfiguredContextSize(
         selectedModel.effectiveInputBudget,
         model,
@@ -455,6 +472,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       protocolSettings: config.protocol,
       clientIdentity
     };
+    const reasoningEffortUpdates = compatibilityProfile.enabled
+      && selectedModel.supportsReasoningEffortUpdates === true
+      && normalizeKnownReasoningEffort(reasoningEffort) !== undefined;
     const toolSchemas = toolPlan;
     latency.recordContext({
       fullInputCount: input.length,
@@ -493,8 +513,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       && (statefulMarker.kind === 'none' || !statefulMarker.isLeadingStandalone);
     const candidateReusableBranch = markerHint
       ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input, markerHint)
+        ?? this.responseBranchStore.findBranchForReasoningChange(reuseEnvelope, input, markerHint)
       : useHistoryFallback
         ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input)
+          ?? this.responseBranchStore.findBranchForReasoningChange(reuseEnvelope, input)
         : undefined;
     const localHistoryStatus = !markerHint && candidateReusableBranch
       ? getExactLocalBranchHistoryStatus(
@@ -515,6 +537,52 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       ? undefined
       : this.responseBranchStore.explainReuseMiss(reuseEnvelope, input);
     latency.mark('branchResolved');
+    // VS Code has no public live picker event. Read only the immutable options
+    // supplied for this request and confirm changes on a proven local continuation.
+    const previousReasoningSelection = reusableBranch?.state?.continuation?.reasoningSelection;
+    let reasoningSelection = previousReasoningSelection ? { ...previousReasoningSelection } : undefined;
+    let reasoningUpdateInput: ResponsesInputMessage[] = [];
+    if (!reasoningEffort && previousReasoningSelection) {
+      // Missing options do not constitute a confirmed new selection.
+      requestOptions.reasoning = reusableBranch?.state?.continuation?.fullRequest.reasoning ?? undefined;
+    }
+    if (reasoningEffort) {
+      let applyToCurrentTask = false;
+      if (previousReasoningSelection && reasoningEffort !== previousReasoningSelection.observed) {
+        const choice = await vscode.window.showInformationMessage(
+          `Thinking Effort changed to ${reasoningEffort}. Apply it to the current task's next model request?`,
+          'Apply to Current Task',
+          'Future Tasks Only'
+        );
+        if (token.isCancellationRequested) {
+          return;
+        }
+        applyToCurrentTask = choice === 'Apply to Current Task';
+      }
+      const transition = planReasoningEffortUpdate(reasoningEffort, previousReasoningSelection, applyToCurrentTask);
+      reasoningSelection = { observed: transition.observed, effective: transition.effective };
+      // Preserve the entire original reasoning parameter, including summary for none.
+      requestOptions.reasoning = reasoningEffortUpdates
+        ? reusableBranch?.state?.continuation?.fullRequest.reasoning ?? requestOptions.reasoning
+        : toResponsesReasoning(transition.effective);
+      if (reasoningEffortUpdates && transition.changed) {
+        // The SDK may lag the upstream catalog; keep the wire boundary local.
+        reasoningUpdateInput = [{
+          type: 'configuration_update',
+          reasoning: { effort: transition.effective }
+        } as unknown as ResponsesInputMessage];
+      }
+    }
+    // Restore the pinned request envelope after confirmation. Unsupported models
+    // use ordinary reasoning.effort, so a confirmed change forces canonical replay.
+    reuseEnvelope = buildResponseBranchReuseEnvelope({
+      baseURL: normalizeBaseURL(config.baseURL), authIdentity,
+      toolSignatures: toolPlan.toolSignatures,
+      effectiveInputBudget: selectedModel.effectiveInputBudget,
+      ...requestOptions
+    });
+    const reasoningEnvelopeChanged = Boolean(reusableBranch?.state?.continuation
+      && reusableBranch.state.continuation.requestFingerprint !== reuseEnvelope.requestFingerprint);
     const requiresFullInputForToolOutput = Boolean(
       reusableBranch?.comparison.appendedInput.some((item) => item.type === 'function_call_output')
     );
@@ -543,7 +611,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const toolOutputContinuationCapability = toolOutputContinuationCapabilityKey
       ? this.getToolOutputContinuationCapability(toolOutputContinuationCapabilityKey)
       : undefined;
-    const shouldAttemptToolOutputContinuation = hasOnlyToolOutputAppend
+    const shouldAttemptToolOutputContinuation = !reasoningEnvelopeChanged && hasOnlyToolOutputAppend
       && config.transport !== 'http'
       && TOOL_OUTPUT_CONTINUATION_ENABLED
       && toolOutputContinuationCapability !== false;
@@ -557,11 +625,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         })
       });
     }
-    const usePreviousResponseId = appendedInput.length > 0
+    const usePreviousResponseId = !reasoningEnvelopeChanged && appendedInput.length > 0
       && (!requiresFullInputForToolOutput || shouldAttemptToolOutputContinuation);
     const canonicalReplaySnapshot = reusableBranch?.state?.continuation;
     const canonicalReplayAppendedInput = reusableBranch?.comparison.appendedInput ?? [];
-    const fullReplayInput = toolPlan.mode === 'native-hosted'
+    const fullReplayInput = toolPlan.mode === 'native-hosted' || reasoningSelection !== undefined
       ? buildCanonicalReplayInput({
           previousSnapshot: canonicalReplaySnapshot,
           convertedInput: input,
@@ -569,9 +637,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           catalogHash: toolPlan.catalogHash
         })
       : input;
-    const recoveryReplayInput = markerCanonicalReplayInput ?? fullReplayInput;
+    const recoveryReplayInput = [...(markerCanonicalReplayInput ?? fullReplayInput), ...reasoningUpdateInput];
     const initialRequestInput = usePreviousResponseId
-      ? appendedInput
+      ? [...appendedInput, ...reasoningUpdateInput]
       : recoveryReplayInput;
     const initialPreviousResponseId = usePreviousResponseId
       ? reusableBranch?.responseId
@@ -651,7 +719,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
             }
         : null,
       serviceTier: config.defaultServiceTier ?? 'auto',
-      reasoningEffort: reasoningEffort ?? null,
+      reasoningEffort: reasoningSelection?.effective ?? reasoningEffort ?? null,
+      requestReasoningEffort: requestOptions.reasoning?.effort ?? null,
       reasoningEffortSource: reasoning.source,
       reasoningEffortInputConflict: reasoning.hasExplicitConflict,
       messageCount: messages.length,
@@ -1296,7 +1365,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           requestModel: selectedModel.requestModel,
           nativeToolSearchFallback: true
         });
-        legacyFallbackReplayInput = buildLegacyFallbackReplayInput(markerCanonicalReplayInput ?? input);
+        legacyFallbackReplayInput = buildLegacyFallbackReplayInput(
+          reasoningSelection ? recoveryReplayInput : markerCanonicalReplayInput ?? input
+        );
         await streamRequest(legacyFallbackReplayInput);
       } else if (shouldAttemptToolOutputContinuation && isResponsesContinuationMissError(error)) {
         if (reportedVisibleOutput) {
@@ -1400,12 +1471,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       const builtFullRequest = buildCodexResponsesRequest({
         ...requestOptions,
         identity: requestIdentity,
-        input: legacyFallbackReplayInput ?? recordedInput,
+        input: legacyFallbackReplayInput ?? (reasoningSelection ? recoveryReplayInput : recordedInput),
       });
       const fullRequest = isMarkerContinuation
         ? builtFullRequest
         : toolPlan.mode === 'native-hosted'
-        ? createCanonicalReplayRequest(builtFullRequest, fullReplayInput)
+        ? createCanonicalReplayRequest(builtFullRequest, reasoningEffortUpdates ? recoveryReplayInput : fullReplayInput)
         : builtFullRequest;
       branchState = {
         ...branchState,
@@ -1423,6 +1494,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         ),
         updatedAt: Date.now()
       };
+      if (branchState.continuation) {
+        const baselineEffort = fullRequest.reasoning?.effort;
+        branchState.continuation.reasoningSelection = reasoningSelection
+          ? { ...reasoningSelection }
+          : baselineEffort ? { observed: baselineEffort, effective: baselineEffort } : undefined;
+      }
       const continuationSnapshotMs = Math.max(0, performance.now() - continuationSnapshotStartedAt);
       const continuationStoreStartedAt = performance.now();
       activeBranchId = this.responseBranchStore.recordSuccess(
@@ -1979,6 +2056,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       return {
         requestModel: aliasedModel.requestModel,
         reasoningEffort: requestedModel.reasoningEffort,
+        supportsReasoningEffortUpdates: aliasedModel.supportsReasoningEffortUpdates,
         effectiveInputBudget: aliasedModel.effectiveInputBudget
       };
     }
@@ -1988,6 +2066,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     if (requestedAvailableModel) {
       return {
         ...requestedModel,
+        supportsReasoningEffortUpdates: requestedAvailableModel.supportsReasoningEffortUpdates,
         effectiveInputBudget: requestedAvailableModel.effectiveInputBudget
       };
     }
@@ -2009,6 +2088,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       return {
         requestModel: prefixMatch.requestModel,
         reasoningEffort: requestedModel.reasoningEffort,
+        supportsReasoningEffortUpdates: prefixMatch.supportsReasoningEffortUpdates,
         effectiveInputBudget: prefixMatch.effectiveInputBudget
       };
     }
@@ -2023,6 +2103,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       return {
         requestModel: config.model,
         reasoningEffort: requestedModel.reasoningEffort,
+        supportsReasoningEffortUpdates: configuredModel.supportsReasoningEffortUpdates,
         effectiveInputBudget: configuredModel.effectiveInputBudget
       };
     }
@@ -2036,6 +2117,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     return {
       requestModel: fallbackModel.requestModel,
       reasoningEffort: requestedModel.reasoningEffort,
+      supportsReasoningEffortUpdates: fallbackModel.supportsReasoningEffortUpdates,
       effectiveInputBudget: fallbackModel.effectiveInputBudget
     };
   }
@@ -2241,7 +2323,6 @@ function buildModelCacheKey(
     config.disabledModels.join(','),
     stableSerialize(config.modelAliases),
     config.defaultServiceTier ?? 'auto',
-    config.defaultReasoningEffort ?? 'auto',
     config.maxOutputTokens,
     credentialSource,
     credentialKind,
@@ -2728,7 +2809,8 @@ function normalizeLocalReplayItem(
   if (record.type === 'tool_search_call'
     || record.type === 'tool_search_output'
     || record.type === 'web_search_call'
-    || record.type === 'reasoning') {
+    || record.type === 'reasoning'
+    || record.type === 'configuration_update') {
     return OMIT_LOCAL_REPLAY_ITEM;
   }
   if (record.type === 'message') {

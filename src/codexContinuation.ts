@@ -1,6 +1,8 @@
 import { fingerprintCodexRequest, type CodexResponsesRequest } from './codexRequestBuilder';
 
 export interface CodexContinuationSnapshot {
+  /** Selection observed at the public request boundary, including deferred choices. */
+  reasoningSelection?: { observed: string; effective: string };
   fullRequest: CodexResponsesRequest;
   responseId: string;
   responseItems: unknown[];
@@ -38,6 +40,7 @@ export function cloneCodexContinuationSnapshot(
   snapshot: CodexContinuationSnapshot
 ): CodexContinuationSnapshot {
   return {
+    reasoningSelection: snapshot.reasoningSelection ? { ...snapshot.reasoningSelection } : undefined,
     fullRequest: structuredClone(snapshot.fullRequest),
     responseId: snapshot.responseId,
     responseItems: structuredClone(snapshot.responseItems),

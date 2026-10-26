@@ -31,6 +31,7 @@
     "compile": "npm run check && node esbuild.mjs",
     "test:extension-host": "node test/runExtensionHostSmoke.mjs",
     "package:vsix": "vsce package",
+    "test:reasoning-effort": "node test/smokeHotSwappableReasoning.mjs",
     "test:real-backend": "node test/realBackendProbe.mjs",
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",
     "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",

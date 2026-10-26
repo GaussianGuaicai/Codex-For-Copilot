@@ -17,6 +17,7 @@ let performanceNow = () => Date.now();
 const performanceMock = { now: () => performanceNow() };
 const warningMessages = [];
 let rewriteWebSocketURL;
+let configurationChangeListener;
 
 class RewritingWebSocket extends WebSocket {
   constructor(address, protocols, options) {
@@ -169,7 +170,8 @@ const vscodeMock = {
         }
       };
     },
-    onDidChangeConfiguration() {
+    onDidChangeConfiguration(listener) {
+      configurationChangeListener = listener;
       return new Disposable();
     }
   }
@@ -213,53 +215,60 @@ const { CodexModelProvider, hasCanonicalReplayContinuationIntegrity } = require(
 const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
 
 try {
-  await runProviderLimitErrorSmokeTest();
-  runCanonicalReplayIntegritySmokeTest();
-  await runUnauthorizedLegacyToolCallSmokeTest();
-  await runNativeReplayValidationSmokeTest();
-  await runModelCatalogMetadataSmokeTest();
-  await runFutureModelCatalogSmokeTest();
-  await runProviderMalformedCatalogFallbackSmokeTest();
-  await runProviderLongContextSelectionSmokeTest();
-  await runProviderFallbackSmokeTest();
-  await runInterleavedResponsePresentationSmokeTest();
-  await runProviderStreamRateLimitIsolationSmokeTest();
-  await runProviderAccountKeyPinningSmokeTest();
-  await runStatefulMarkerRoundTripSmokeTest();
-  await runNonLeadingStatefulMarkerHistoryReuseSmokeTest();
-  await runStatefulMarkerContinuationRecoverySmokeTest();
-  await runStatefulMarkerOpaqueRecoverySmokeTest();
-  await runStatefulMarkerToolOutputReplaySmokeTest();
-  await runStatefulMarkerMalformedRawSnapshotSmokeTest();
-  await runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest();
-  await runStatefulMarkerRecordFailureSmokeTest();
-  await runStatefulMarkerInvalidCompletionIdSmokeTest();
-  await runHttpContinuationRecoverySmokeTest();
-  await runHttpContinuationRecoverySmokeTest({ unsupported: true });
-  await runHttpContinuationRecoverySmokeTest({ unsupported: true, rejectRecovery: true });
-  await runAutoTransportHttpContinuationRecoverySmokeTest();
-  await runStructuredHttpContinuationRecoverySmokeTest();
-  await runContinuationMissAfterVisibleOutputSmokeTest();
-  await runRequestEnvelopeReuseInvalidationSmokeTest();
-  await runToolOutputFullInputReplaySmokeTest();
-  await runModelGeneratedToolLoopFullReplaySmokeTest();
-  await runNativeHostedCanonicalReplaySmokeTest();
-  await runNativeHostedCrossThreadBudgetDowngradeSmokeTest();
-  await runNativeAutoFallbackRawStateIsolationSmokeTest();
-  await runNativeHostedToolOutputContinuationRecoverySmokeTest();
-  await runDanglingCompletedToolCallFullReplaySmokeTest();
-  await runCreatedResponseCancellationDoesNotRecordBranchSmokeTest();
-  await runProviderCatalogVersionNeutralSmokeTest();
-  await runProviderUnavailableScopeSmokeTest();
-  await runProviderModelDiscoveryPolicySmokeTest();
-  await runProviderNestedAliasPolicySmokeTest();
-  await runProviderAuthoritativeCatalogSmokeTest();
-  await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
-  await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
-  await runProviderVirtualToolFallbackNotificationSmokeTest();
-  await runLocalTokenEstimateDiagnosticSmokeTest();
-  await runTokenCountEndpointCapabilitySmokeTest();
-  console.log('Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
+  await runReasoningEffortTransitionSmokeTest();
+  await runReasoningEffortTransitionSmokeTest({ transport: 'websocket' });
+  await runReasoningEffortTransitionSmokeTest({ supportsUpdates: false });
+  if (process.env.CODEX_TEST_REASONING_ONLY !== '1') {
+    await runProviderLimitErrorSmokeTest();
+    runCanonicalReplayIntegritySmokeTest();
+    await runUnauthorizedLegacyToolCallSmokeTest();
+    await runNativeReplayValidationSmokeTest();
+    await runModelCatalogMetadataSmokeTest();
+    await runFutureModelCatalogSmokeTest();
+    await runProviderMalformedCatalogFallbackSmokeTest();
+    await runProviderLongContextSelectionSmokeTest();
+    await runProviderFallbackSmokeTest();
+    await runInterleavedResponsePresentationSmokeTest();
+    await runProviderStreamRateLimitIsolationSmokeTest();
+    await runProviderAccountKeyPinningSmokeTest();
+    await runStatefulMarkerRoundTripSmokeTest();
+    await runNonLeadingStatefulMarkerHistoryReuseSmokeTest();
+    await runStatefulMarkerContinuationRecoverySmokeTest();
+    await runStatefulMarkerOpaqueRecoverySmokeTest();
+    await runStatefulMarkerToolOutputReplaySmokeTest();
+    await runStatefulMarkerMalformedRawSnapshotSmokeTest();
+    await runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest();
+    await runStatefulMarkerRecordFailureSmokeTest();
+    await runStatefulMarkerInvalidCompletionIdSmokeTest();
+    await runHttpContinuationRecoverySmokeTest();
+    await runHttpContinuationRecoverySmokeTest({ unsupported: true });
+    await runHttpContinuationRecoverySmokeTest({ unsupported: true, rejectRecovery: true });
+    await runAutoTransportHttpContinuationRecoverySmokeTest();
+    await runStructuredHttpContinuationRecoverySmokeTest();
+    await runContinuationMissAfterVisibleOutputSmokeTest();
+    await runRequestEnvelopeReuseInvalidationSmokeTest();
+    await runToolOutputFullInputReplaySmokeTest();
+    await runModelGeneratedToolLoopFullReplaySmokeTest();
+    await runNativeHostedCanonicalReplaySmokeTest();
+    await runNativeHostedCrossThreadBudgetDowngradeSmokeTest();
+    await runNativeAutoFallbackRawStateIsolationSmokeTest();
+    await runNativeHostedToolOutputContinuationRecoverySmokeTest();
+    await runDanglingCompletedToolCallFullReplaySmokeTest();
+    await runCreatedResponseCancellationDoesNotRecordBranchSmokeTest();
+    await runProviderCatalogVersionNeutralSmokeTest();
+    await runProviderUnavailableScopeSmokeTest();
+    await runProviderModelDiscoveryPolicySmokeTest();
+    await runProviderNestedAliasPolicySmokeTest();
+    await runProviderAuthoritativeCatalogSmokeTest();
+    await runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest();
+    await runProviderModelIdDoesNotBlockColdDiscoverySmokeTest();
+    await runProviderVirtualToolFallbackNotificationSmokeTest();
+    await runLocalTokenEstimateDiagnosticSmokeTest();
+    await runTokenCountEndpointCapabilitySmokeTest();
+  }
+  console.log(process.env.CODEX_TEST_REASONING_ONLY === '1'
+    ? 'Smoke test passed: reasoning effort transitions, cache compatibility, history replay, recovery, and session isolation.'
+    : 'Smoke test passed: provider advertises effective context profiles, sends real model slugs, and preserves runtime availability policy.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
@@ -7200,5 +7209,227 @@ async function runProviderLimitErrorSmokeTest() {
   } finally {
     configValues.baseURL = originalBaseURL;
     configValues.transport = originalTransport;
+  }
+}
+
+async function runReasoningEffortTransitionSmokeTest({ transport = 'http', supportsUpdates = true } = {}) {
+  const saved = { ...configValues };
+  const originalFetch = globalThis.fetch;
+  const originalRewrite = rewriteWebSocketURL;
+  const requests = [];
+  const prompts = [];
+  let choice = 'Apply to Current Task';
+  let rejectNextContinuation = false;
+  let releaseResponse;
+  let observePausedRequest;
+  const responseGate = new Promise((resolve) => { releaseResponse = resolve; });
+  const pausedRequest = new Promise((resolve) => { observePausedRequest = resolve; });
+  const originalPrompt = vscodeMock.window.showInformationMessage;
+  vscodeMock.window.showInformationMessage = async (_message, ...choices) => {
+    prompts.push(choices);
+    return choice;
+  };
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'Sol', {
+        supports_reasoning_effort_updates: supportsUpdates
+      })] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    await handleRequest(body, response);
+  });
+  const handleRequest = async (body, response) => {
+    requests.push(body);
+    if (body.input.some((item) => item.content === 'Paused effort task')) {
+      observePausedRequest();
+      await responseGate;
+    }
+    if (rejectNextContinuation && body.previous_response_id) {
+      rejectNextContinuation = false;
+      const error = { message: 'Invalid previous_response_id.', param: 'previous_response_id', code: 'previous_response_not_found' };
+      if (response.socketSend) {
+        response.socketSend({ type: 'error', error });
+      } else {
+        response.writeHead(400, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error }));
+      }
+      return;
+    }
+    if (body.input.some((item) => item.content === 'Tool effort task') && !body.input.some((item) => item.type === 'function_call_output')) {
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      const call = { type: 'function_call', id: 'fc_effort_read', call_id: 'call_effort_read', name: 'read', arguments: '{}' };
+      for (const event of [
+        { type: 'response.output_item.added', output_index: 0, item: call },
+        { type: 'response.function_call_arguments.done', output_index: 0, item_id: call.id, arguments: '{}' },
+        { type: 'response.output_item.done', output_index: 0, item: call },
+        { type: 'response.completed', response: { id: `resp_effort_${requests.length}`, status: 'completed' } }
+      ]) response.write(`data: ${JSON.stringify(event)}\n\n`);
+      response.end();
+      return;
+    }
+    writeSseResponseWithOutputItem(response, 'ok', `resp_effort_${requests.length}`, `msg_effort_${requests.length}`);
+  };
+  const wsServer = new webSocketModule.WebSocketServer({ server });
+  wsServer.on('connection', (socket) => socket.on('message', (data) => {
+    void handleRequest(JSON.parse(data.toString()), {
+      socketSend: (event) => socket.send(JSON.stringify(event)),
+      writeHead() {},
+      write(value) {
+        const payload = value.slice(6).trim();
+        if (payload !== '[DONE]') socket.send(payload);
+      },
+      end() {}
+    });
+  }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  Object.assign(configValues, {
+    baseURL: `https://localhost:${server.address().port}/backend-api/codex/responses`,
+    protocolProfile: 'custom',
+    transport, defaultReasoningEffort: 'auto', websocketPrewarm: 'disabled'
+  });
+  globalThis.fetch = (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    url.protocol = 'http:';
+    url.hostname = '127.0.0.1';
+    return originalFetch(url, init);
+  };
+  rewriteWebSocketURL = (address) => `ws://127.0.0.1:${server.address().port}${new URL(address).pathname}`;
+  const provider = new CodexModelProvider(
+    { secrets: { async get() { return 'test-api-key'; } }, subscriptions: [] }, createOutputChannel()
+  );
+  const updates = (request) => request.input.filter((item) => item.type === 'configuration_update').map((item) => item.reasoning.effort);
+  try {
+    const token = createCancellationToken();
+    const [model] = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const run = async (effort, marker, text = 'Continue') => {
+      const parts = [];
+      const messages = marker ? createAgentHostContinuationMessages(marker, 'Agent Host instructions', text) : [
+        createSystemMessage('Agent Host instructions'), { role: 1, content: [new LanguageModelTextPart(text)] }
+      ];
+      await provider.provideLanguageModelChatResponse(model, messages,
+        { modelOptions: { reasoningEffort: effort } }, { report(part) { parts.push(part); } }, token);
+      return getSingleStatefulMarkerPart(parts, 'effort transition');
+    };
+    let marker = await run('low', undefined, 'Task A');
+    assertEqual(JSON.stringify(updates(requests.at(-1))), supportsUpdates ? '["low"]' : '[]', 'initial selection is established in trusted history');
+    const baseline = JSON.stringify(requests.at(-1).reasoning);
+    marker = await run('high', marker);
+    assertEqual(prompts.length, 1, 'changed request-boundary selection requires confirmation');
+    assertEqual(prompts[0].join(','), 'Apply to Current Task,Future Tasks Only', 'confirmation preserves required choices');
+    assertEqual(requests.at(-1).reasoning.effort, supportsUpdates ? 'low' : 'high', 'only supported models pin request effort');
+    if (!supportsUpdates) assertEqual(requests.at(-1).previous_response_id, undefined, 'ordinary effort changes require full replay');
+    assertEqual(JSON.stringify(updates(requests.at(-1))), supportsUpdates ? '["high"]' : '[]', 'confirmed incremental request carries the new effort');
+    choice = 'Future Tasks Only';
+    marker = await run('medium', marker);
+    assertEqual(updates(requests.at(-1)).length, 0, 'declining does not change the running task');
+    marker = await run('medium', marker);
+    assertEqual(prompts.length, 2, 'a declined selection does not prompt on every tool step');
+    choice = undefined;
+    marker = await run('low', marker);
+    assertEqual(updates(requests.at(-1)).length, 0, 'dismissal does not silently change effort');
+    if (!supportsUpdates) assertEqual(requests.at(-1).reasoning.effort, 'high', 'unsupported models also preserve declined effort');
+
+    if (!supportsUpdates) return;
+    rejectNextContinuation = true;
+    choice = 'Apply to Current Task';
+    marker = await run('none', marker);
+    assertEqual(JSON.stringify(updates(requests.at(-1))), '["low","high","none"]', 'recovery replays ordered effort history exactly once');
+    assertEqual(JSON.stringify(requests.at(-1).reasoning), baseline, 'none does not rewrite the pinned summary');
+    assertEqual(requests.at(-1).previous_response_id, undefined, 'recovery sends full canonical history');
+    const otherMarker = await run('medium', undefined, 'Task B');
+    assertEqual(requests.at(-1).reasoning.effort, 'medium', 'independent task owns its request baseline');
+    marker = await run('none', marker);
+    assertEqual(JSON.stringify(requests.at(-1).reasoning), baseline, 'interleaved task does not change the original baseline');
+    await run('medium', otherMarker);
+    assertEqual(requests.at(-1).reasoning.effort, 'medium', 'second task retains its independent baseline');
+    const concurrentStart = requests.length;
+    await Promise.all([
+      run('high', marker, 'Concurrent A'),
+      run('low', otherMarker, 'Concurrent B')
+    ]);
+    const concurrentRequests = requests.slice(concurrentStart);
+    const taskRequest = (text) => concurrentRequests.find((request) => request.input.some((item) => item.content === text));
+    assertEqual(taskRequest('Concurrent A').reasoning.effort, 'low', 'concurrent task A uses its own baseline');
+    assertEqual(taskRequest('Concurrent B').reasoning.effort, 'medium', 'concurrent task B uses its own baseline');
+    assertEqual(JSON.stringify(updates(taskRequest('Concurrent A'))), '["high"]', 'concurrent A update stays on A');
+    assertEqual(JSON.stringify(updates(taskRequest('Concurrent B'))), '["low"]', 'concurrent B update stays on B');
+
+    await run('low', undefined, 'History task');
+    const historyParts = [];
+    await provider.provideLanguageModelChatResponse(model, [
+      createSystemMessage('Agent Host instructions'),
+      { role: 1, content: [new LanguageModelTextPart('History task')] },
+      { role: 2, content: [new LanguageModelTextPart('ok')] },
+      { role: 1, content: [new LanguageModelTextPart('History continuation')] }
+    ], { modelOptions: { reasoningEffort: 'high' } },
+    { report(part) { historyParts.push(part); } }, token);
+    assertEqual(requests.at(-1).reasoning.effort, 'low', 'full VS Code transcript recovers the local request pin');
+    assertEqual(JSON.stringify(updates(requests.at(-1))), '["high"]', 'history matching omits trusted configuration items only for comparison');
+    await run('high', undefined, 'Compacted replacement context');
+    assertEqual(requests.at(-1).reasoning.effort, 'high', 'a replaced context establishes a fresh baseline');
+    assertEqual(JSON.stringify(updates(requests.at(-1))), '["high"]', 'retired context updates do not leak into replacement history');
+    const tools = [{ name: 'read', description: 'Read fixture', inputSchema: { type: 'object', properties: {} } }];
+    const toolParts = [];
+    await provider.provideLanguageModelChatResponse(model, [
+      createSystemMessage('Agent Host instructions'),
+      { role: 1, content: [new LanguageModelTextPart('Tool effort task')] }
+    ], { tools, modelOptions: { reasoningEffort: 'low' } }, { report(part) { toolParts.push(part); } }, token);
+    const toolMarker = getSingleStatefulMarkerPart(toolParts, 'tool seed');
+    const toolCalls = toolParts.filter((part) => part instanceof LanguageModelToolCallPart);
+    assertEqual(toolCalls.length, 1, 'effort setup emits one tool call');
+    await provider.provideLanguageModelChatResponse(model, [
+      { role: 2, content: [toolMarker] },
+      createSystemMessage('Agent Host instructions'),
+      { role: 1, content: [new LanguageModelToolResultPart('call_effort_read', [new LanguageModelTextPart('fixture')])] }
+    ], { tools, modelOptions: { reasoningEffort: 'high' } }, { report() {} }, token);
+    assertEqual(requests.at(-1).reasoning.effort, 'low', 'tool continuation preserves request baseline');
+    assertEqual(updates(requests.at(-1)).at(-1), 'high', 'tool continuation receives confirmed effort');
+    assertEqual(requests.at(-1).input.some((item) => item.type === 'function_call_output' && item.call_id === 'call_effort_read'), true, 'effort update preserves the tool result');
+    if (!requests.at(-1).previous_response_id) {
+      assertEqual(requests.at(-1).input.some((item) => item.type === 'function_call' && item.call_id === 'call_effort_read'), true, 'full replay preserves the matching tool call');
+    }
+    const promptsBeforePause = prompts.length;
+    const pendingResponse = run('low', undefined, 'Paused effort task');
+    await pausedRequest;
+    configValues.defaultReasoningEffort = 'high';
+    configurationChangeListener({ affectsConfiguration: (section) => section === 'codexModelProvider'
+      || section === 'codexModelProvider.defaultReasoningEffort' });
+    assertEqual(prompts.length, promptsBeforePause, 'configuration edits do not interrupt an in-flight response');
+    assertEqual(requests.at(-1).reasoning.effort, 'low', 'an active request retains its original effort');
+    releaseResponse();
+    const pausedMarker = await pendingResponse;
+    await run('high', pausedMarker, 'After paused response');
+    assertEqual(prompts.length, promptsBeforePause + 1, 'new options are confirmed only at the next eligible boundary');
+    assertEqual(requests.at(-1).reasoning.effort, 'low', 'next request still preserves the original cache baseline');
+    configValues.defaultReasoningEffort = 'auto';
+    const noneMarker = await run('none', undefined, 'Initially no reasoning');
+    await run('high', noneMarker);
+    assertEqual(JSON.stringify(requests.at(-1).reasoning), '{"effort":"none"}', 'switching from none retains the original absence of summary');
+    assertEqual(JSON.stringify(updates(requests.at(-1))), '["high"]', 'switching from none uses a durable update');
+    const autoMarker = await run(undefined, undefined, 'Auto effort task');
+    const autoPrompts = prompts.length;
+    const explicitMarker = await run('high', autoMarker);
+    assertEqual(prompts.length, autoPrompts + 1, 'implicit initial default still requires confirmation before changing');
+    await run(undefined, explicitMarker, 'Missing effort options');
+    assertEqual(requests.at(-1).reasoning.effort, 'medium', 'missing options preserve the established request baseline');
+    assertEqual(prompts.length, autoPrompts + 1, 'missing options do not invent a new selection');
+
+
+
+
+  } finally {
+    releaseResponse();
+    vscodeMock.window.showInformationMessage = originalPrompt;
+    rewriteWebSocketURL = originalRewrite;
+    for (const socket of wsServer.clients) socket.terminate();
+    await new Promise((resolve) => wsServer.close(resolve));
+    globalThis.fetch = originalFetch;
+    for (const key of Object.keys(configValues)) delete configValues[key];
+    Object.assign(configValues, saved);
+    await closeServer(server);
   }
 }
