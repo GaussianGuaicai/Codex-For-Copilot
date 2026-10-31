@@ -1,6 +1,8 @@
 const assert = require('node:assert');
+const { existsSync } = require('node:fs');
 const { writeFile } = require('node:fs/promises');
 const { createServer } = require('node:http');
+const path = require('node:path');
 const vscode = require('vscode');
 const manifest = require('../package.json');
 
@@ -11,6 +13,16 @@ async function run() {
   const authenticationProvider = manifest.contributes.authentication?.find((provider) => provider.id === 'codex-for-copilot');
   assert(authenticationProvider, 'Codex authentication provider is not declared in the extension manifest.');
   assert.strictEqual(authenticationProvider.label, 'Codex for Copilot');
+  assert.strictEqual(manifest.capabilities?.agentsWindow?.supported, true);
+  const walkthrough = manifest.contributes.walkthroughs?.find((entry) => entry.id === 'codexGettingStarted');
+  assert(walkthrough, 'Getting started walkthrough is not declared.');
+  assert.deepStrictEqual(walkthrough.steps.map((step) => step.id), ['connectAccount', 'selectModel', 'agentsWindow']);
+  for (const step of walkthrough.steps) {
+    assert(existsSync(path.join(__dirname, '..', step.media.image)), `Missing walkthrough image for ${step.id}.`);
+  }
+  for (const command of ['codexForCopilot.auth.signInWithChatGPT', 'codexModelProvider.manage']) {
+    assert(manifest.contributes.commands.some((entry) => entry.command === command), `Missing walkthrough command ${command}.`);
+  }
 
   let modelDiscoveryRequestCount = 0;
   let responseRequestCount = 0;

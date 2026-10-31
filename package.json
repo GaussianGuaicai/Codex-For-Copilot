@@ -25,6 +25,11 @@
     "workspace",
     "ui"
   ],
+  "capabilities": {
+    "agentsWindow": {
+      "supported": true
+    }
+  },
   "main": "./out/extension.js",
   "scripts": {
     "check": "tsc -p ./ --noEmit",
@@ -56,6 +61,33 @@
     "typescript": "^5.9.2"
   },
   "contributes": {
+    "walkthroughs": [
+      {
+        "id": "codexGettingStarted",
+        "title": "Get Started with Codex for Copilot",
+        "description": "Connect your account and select a Codex model in VS Code Chat.",
+        "steps": [
+          {
+            "id": "connectAccount",
+            "title": "Connect your account",
+            "description": "Sign in with ChatGPT, or use account management to import Codex CLI credentials, use a device code, or set an API key.\n[Sign in with ChatGPT](command:codexForCopilot.auth.signInWithChatGPT)\n[Manage credentials](command:codexModelProvider.manage)",
+            "media": { "image": "assets/codex-for-copilot.png", "altText": "Codex for Copilot logo" }
+          },
+          {
+            "id": "selectModel",
+            "title": "Select a Codex model",
+            "description": "Open Chat, choose a Codex model from the model picker, and start a conversation.\n[Open Chat](command:workbench.action.chat.open)",
+            "media": { "image": "assets/showcase.gif", "altText": "Codex for Copilot in VS Code Chat" }
+          },
+          {
+            "id": "agentsWindow",
+            "title": "Use the Agents window (optional)",
+            "description": "If Codex models are missing in the standalone Agents window, enable this extension in the Agents window settings and reload the window. See the README for the setting and BYOK bridge details.\n[Open Settings](command:workbench.action.openSettings?%22extensions.supportAgentsWindow%22)",
+            "media": { "image": "assets/codex-for-copilot.png", "altText": "Codex for Copilot logo" }
+          }
+        ]
+      }
+    ],
     "authentication": [
       {
         "id": "codex-for-copilot",
