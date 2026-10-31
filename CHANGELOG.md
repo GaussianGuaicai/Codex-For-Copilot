@@ -2,6 +2,18 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.10.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.9...v1.10.0) (2026-10-31)
+
+
+### Features
+
+* preserve cache across confirmed Thinking Effort changes ([#123](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/123)) ([063027b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/063027bc3e4a401295d4a550bcc4b433af061dc9))
+
+
+### Bug Fixes
+
+* Add Agents window setup walkthrough ([#124](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/124)) ([40c3f6e](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/40c3f6e69009af407a2c14e8cad95606f8197a0f))
+
 ## [1.9.9](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.8...v1.9.9) (2026-10-23)
 
 
