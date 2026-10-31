@@ -35,6 +35,8 @@ Codex For Copilot is a lightweight VS Code Language Model Provider that connects
 
 Install the extension from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=Gaussian.gaussian-codex-for-copilot).
 
+In VS Code's Welcome page, open **Get Started with Codex for Copilot** for an interactive setup guide.
+
 ### 2. Add credentials
 
 Open the Command Palette and choose one of the following:
@@ -53,6 +55,18 @@ Open VS Code Chat, choose **Codex** from the model picker, and start chatting or
 To give a request live web access, enable **Web Search** in the Chat tools picker or reference `#webSearch` in the prompt. With a Codex model the Codex backend executes the search directly through OpenAI's hosted `web_search` tool. With any other tool-capable VS Code model, the same `#webSearch` tool runs one isolated Responses request that also uses OpenAI's hosted `web_search` tool and returns the synthesized answer plus sources.
 
 Web Search settings under **Settings → Extensions → Codex** let you choose live or cached access, search context size, and an optional domain allowlist. You can also choose whether Chat shows compact statuses, search/open/find actions, or actions with clickable source pages.
+
+### Standalone Agents window
+
+The standalone Agents window manages extension availability separately from editor windows. If Codex models are missing, add the following entry to your **user** `settings.json`, preserving any existing entries in `extensions.supportAgentsWindow`:
+
+```jsonc
+"extensions.supportAgentsWindow": {
+  "Gaussian.gaussian-codex-for-copilot": true
+}
+```
+
+Reload the Agents window after changing the setting. Select the Copilot harness and, if models are still missing, check that the VS Code `chat.agentHost.byokModels.enabled` setting is enabled. Agents window support and the BYOK bridge depend on your VS Code version and experimental settings; the extension's compatibility declaration may not enable it automatically.
 
 ## Tool discovery
 
