@@ -69,12 +69,14 @@ interface UpstreamModel {
   minimal_client_version?: unknown;
   default_reasoning_level?: unknown;
   supported_reasoning_levels?: unknown;
+  supports_reasoning_effort_updates?: unknown;
 }
 
 export interface ResolvedProviderModel {
   info: vscode.LanguageModelChatInformation;
   requestModel: string;
   reasoningEffort?: ReasoningEffort;
+  supportsReasoningEffortUpdates?: boolean;
   rawContextWindow: number;
   maximumRawContextWindow?: number;
   effectiveInputBudget: number;
@@ -292,6 +294,7 @@ function buildDiscoveredModels(
 
   return [{
     requestModel: slug,
+    supportsReasoningEffortUpdates: model.supports_reasoning_effort_updates === true,
     reasoningEffort: defaultReasoningEffort ?? reasoningEfforts[0],
     rawContextWindow: activeRawContextWindow,
     maximumRawContextWindow: maximumContextWindow,

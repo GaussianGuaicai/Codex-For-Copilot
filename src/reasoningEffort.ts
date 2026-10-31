@@ -158,3 +158,15 @@ export function buildResponsesReasoning(options: BuildReasoningOptions): Reasoni
 export function toResponsesReasoning(effort: ReasoningEffort): Reasoning {
   return buildResponsesReasoning({ effort });
 }
+
+/** Only the provider's local continuation snapshot can supply previous updates. */
+export function planReasoningEffortUpdate(
+  selected: ReasoningEffort,
+  previous: { observed: string; effective: string } | undefined,
+  applyToCurrentTask: boolean
+): { observed: string; effective: string; changed: boolean } {
+  const effective = !previous || (selected !== previous.observed && applyToCurrentTask)
+    ? selected
+    : previous.effective;
+  return { observed: selected, effective, changed: !previous || effective !== previous.effective };
+}

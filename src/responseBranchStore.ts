@@ -1,5 +1,6 @@
 import {
   compareResponsesInputHistory,
+  stableSerialize,
   projectResponsesInputForContinuation,
   summarizeResponsesInputMessageForLog,
   type ResponsesInputHistoryComparison,
@@ -155,6 +156,36 @@ export class ResponseBranchStore {
       comparison: bestCandidate.comparison,
       state: bestCandidate.branch.state ? cloneBranchState(bestCandidate.branch.state) : undefined
     };
+  }
+
+  /** Locate a task for confirmation; the caller must rebuild and validate its
+   * final envelope before allowing previous_response_id reuse. */
+  findBranchForReasoningChange(
+    envelope: ResponseBranchReuseEnvelope,
+    currentInput: readonly ResponsesInputMessage[],
+    markerHint?: ResponseBranchMarkerHint
+  ): ReusableResponseBranchMatch | undefined {
+    this.evictExpiredEntries();
+    const current = fingerprintWithoutEffort(envelope.requestFingerprint);
+    if (!current || this.disabledReuseKeys.has(envelope.identityKey)) {
+      return undefined;
+    }
+    let best: ReusableResponseBranchMatch | undefined;
+    for (const branch of this.branches.values()) {
+      if (branch.envelope.scopeKey !== envelope.scopeKey
+        || fingerprintWithoutEffort(branch.envelope.requestFingerprint) !== current) {
+        continue;
+      }
+      const match = this.findReusableBranch({
+        ...envelope,
+        identityKey: branch.envelope.identityKey,
+        requestFingerprint: branch.envelope.requestFingerprint
+      }, currentInput, markerHint);
+      if (match && (!best || match.comparison.matchedPrefixCount > best.comparison.matchedPrefixCount)) {
+        best = match;
+      }
+    }
+    return best;
   }
 
   private findMarkerBranch(
@@ -545,4 +576,22 @@ function compareToolSignatures(
     addedToolNames,
     changedToolNames
   };
+}
+
+function fingerprintWithoutEffort(fingerprint: string): string | undefined {
+  try {
+    const envelope = JSON.parse(fingerprint);
+    const request = JSON.parse(envelope.requestFingerprint);
+    if (!request.reasoning || typeof request.reasoning.effort !== 'string') {
+      return undefined;
+    }
+    delete request.reasoning.effort;
+    // Codex adds auto summary except for none; preserve all other reasoning fields.
+    if (request.reasoning.summary === 'auto') {
+      delete request.reasoning.summary;
+    }
+    return stableSerialize({ ...envelope, requestFingerprint: stableSerialize(request) });
+  } catch {
+    return undefined;
+  }
 }

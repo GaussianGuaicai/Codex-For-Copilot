@@ -39,6 +39,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const {
+  planReasoningEffortUpdate,
   getReasoningEffortDescription,
   getReasoningEffortLabel,
   normalizeKnownReasoningEffort,
@@ -51,6 +52,19 @@ const { buildProviderModels } = require(modelsBundlePath);
 
 try {
   const model = buildProviderModels(createConfig(), [createCatalogModel()], 'codexAccessToken')[0];
+  for (const value of [undefined, false, 'true', 1, true]) {
+    const discovered = buildProviderModels(createConfig(), [{
+      ...createCatalogModel(), supports_reasoning_effort_updates: value
+    }], 'codexAccessToken')[0];
+    assertEqual(discovered.supportsReasoningEffortUpdates, value === true, 'only explicit upstream true enables updates');
+  }
+  const initial = planReasoningEffortUpdate('low', undefined, false);
+  const confirmed = planReasoningEffortUpdate('high', initial, true);
+  const deferred = planReasoningEffortUpdate('medium', confirmed, false);
+  assertEqual(confirmed.effective, 'high', 'confirmed effort becomes effective');
+  assertEqual(deferred.effective, 'high', 'future-only retains task effort');
+  assertEqual(planReasoningEffortUpdate('medium', deferred, true).changed, false, 'same observed selection does not override deferred choice');
+  assertEqual(initial.effective, 'low', 'transition planning never mutates prior state');
   const schema = model.info.configurationSchema?.properties?.reasoningEffort;
   const contextSizeSchema = model.info.configurationSchema?.properties?.contextSize;
   if (!schema || !contextSizeSchema) {

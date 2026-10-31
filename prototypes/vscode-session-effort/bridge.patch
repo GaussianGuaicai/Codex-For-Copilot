@@ -1,0 +1,478 @@
+diff --git a/extensions/copilot/src/extension/prompt/node/defaultIntentRequestHandler.ts b/extensions/copilot/src/extension/prompt/node/defaultIntentRequestHandler.ts
+index e65ea475..e3a72f0d 100644
+--- a/extensions/copilot/src/extension/prompt/node/defaultIntentRequestHandler.ts
++++ b/extensions/copilot/src/extension/prompt/node/defaultIntentRequestHandler.ts
+@@ -721,0 +722,4 @@ class DefaultToolCallingLoop extends ToolCallingLoop<IDefaultToolLoopOptions> {
++			chatRequest: !isSubagent && !opts.isKeepAliveProbe ? {
++				sessionResource: this.options.request.sessionResource,
++				requestId: this.options.request.id,
++			} : undefined,
+diff --git a/extensions/copilot/src/platform/endpoint/vscode-node/extChatEndpoint.ts b/extensions/copilot/src/platform/endpoint/vscode-node/extChatEndpoint.ts
+index 76b8fa9c..e819769f 100644
+--- a/extensions/copilot/src/platform/endpoint/vscode-node/extChatEndpoint.ts
++++ b/extensions/copilot/src/platform/endpoint/vscode-node/extChatEndpoint.ts
+@@ -196,0 +197 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
++		chatRequest,
+@@ -214,0 +216 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
++			chatRequest,
+diff --git a/extensions/copilot/src/platform/networking/common/networking.ts b/extensions/copilot/src/platform/networking/common/networking.ts
+index 6c87b400..57cd914c 100644
+--- a/extensions/copilot/src/platform/networking/common/networking.ts
++++ b/extensions/copilot/src/platform/networking/common/networking.ts
+@@ -8 +8 @@ import { Raw } from '@vscode/prompt-tsx';
+-import type { CancellationToken } from 'vscode';
++import type { CancellationToken, Uri } from 'vscode';
+@@ -191,0 +192,2 @@ export interface IMakeChatRequestOptions {
++	/** Verified origin for native picker updates; never supplied to subagents or utility calls. */
++	chatRequest?: { readonly sessionResource: Uri; readonly requestId: string };
+diff --git a/src/vs/workbench/api/browser/mainThreadLanguageModels.ts b/src/vs/workbench/api/browser/mainThreadLanguageModels.ts
+index 49b55797..3360c5f5 100644
+--- a/src/vs/workbench/api/browser/mainThreadLanguageModels.ts
++++ b/src/vs/workbench/api/browser/mainThreadLanguageModels.ts
+@@ -15,0 +16,4 @@ import { localize } from '../../../nls.js';
++import { autorun } from '../../../base/common/observable.js';
++import { ChatSessionConfigurationTracker, ILanguageModelChatSessionContext } from '../../contrib/chat/common/chatSessionConfiguration.js';
++import { IChatService } from '../../contrib/chat/common/chatService/chatService.js';
++import { LocalChatSessionUri } from '../../contrib/chat/common/model/chatUri.js';
+@@ -59,0 +64,4 @@ export class MainThreadLanguageModels implements MainThreadLanguageModelsShape {
++	private readonly _sessionConfigurationSubscriptions = new DisposableMap<string>();
++	private readonly _sessionConfigurations = new ChatSessionConfigurationTracker((modelId, context) => {
++		void this._proxy.$acceptChatSessionConfigurationChange(modelId, context);
++	});
+@@ -63,0 +72 @@ export class MainThreadLanguageModels implements MainThreadLanguageModelsShape {
++		@IChatService private readonly _chatService: IChatService,
+@@ -72,0 +82,10 @@ export class MainThreadLanguageModels implements MainThreadLanguageModelsShape {
++		this._store.add(this._sessionConfigurationSubscriptions);
++		this._store.add(this._sessionConfigurations);
++		this._store.add(this._chatProviderService.onDidSelectChatSessionConfiguration(selection => {
++			const session = this._chatService.getSession(selection.sessionResource);
++			const request = session?.lastRequestObs.get();
++			if (session?.hasActiveRequest.get() && request) {
++				this._sessionConfigurations.select(session.sessionId, request.id, selection.modelId, selection.configuration);
++			}
++		}));
++
+@@ -155 +174,3 @@ export class MainThreadLanguageModels implements MainThreadLanguageModelsShape {
+-						await this._proxy.$startChatRequest(modelId, requestId, from, new SerializableObjectWithBuffers(messages), options, cts.token);
++						const { chatRequest, chatSessionContext: _untrustedContext, ...requestOptions } = options;
++						const chatSessionContext = this._resolveChatSessionContext(from, modelId, chatRequest);
++						await this._proxy.$startChatRequest(modelId, requestId, from, new SerializableObjectWithBuffers(messages), { ...requestOptions, chatSessionContext }, cts.token);
+@@ -177,0 +199,42 @@ export class MainThreadLanguageModels implements MainThreadLanguageModelsShape {
++	private _resolveChatSessionContext(
++		from: ExtensionIdentifier | undefined,
++		modelId: string,
++		request: { readonly sessionResource: UriComponents; readonly requestId: string } | undefined
++	): ILanguageModelChatSessionContext | undefined {
++		const participant = this._productService.defaultChatAgent?.chatExtensionId;
++		// This prototype accepts only the built-in participant's explicitly supplied origin.
++		// Never associate a utility call or a subagent by matching transcript or active UI.
++		if (!request || !from || !participant || !ExtensionIdentifier.equals(from, participant)) {
++			return undefined;
++		}
++		const resource = URI.revive(request.sessionResource);
++		if (!LocalChatSessionUri.isLocalSession(resource)) {
++			return undefined;
++		}
++		const session = this._chatService.getSession(resource);
++		const input = session?.inputModel.state.get();
++		if (!session || !session.hasActiveRequest.get() || session.lastRequestObs.get()?.id !== request.requestId
++			|| input?.selectedModel?.identifier !== modelId) {
++			return undefined;
++		}
++		const taskId = request.requestId;
++		const effort = input.modelConfiguration?.reasoningEffort;
++		const context = this._sessionConfigurations.track(session.sessionId, taskId, modelId, {
++			reasoningEffort: typeof effort === 'string' ? effort : undefined
++		});
++		const bindingKey = JSON.stringify([session.sessionId, taskId, modelId]);
++		if (!this._sessionConfigurationSubscriptions.has(bindingKey)) {
++			const subscriptions = new DisposableStore();
++			this._sessionConfigurationSubscriptions.set(bindingKey, subscriptions);
++			subscriptions.add(toDisposable(() => this._sessionConfigurations.end(session.sessionId, taskId)));
++			subscriptions.add(session.onDidDispose(() => this._sessionConfigurationSubscriptions.deleteAndDispose(bindingKey)));
++			subscriptions.add(autorun(reader => {
++				const selected = session.inputModel.state.read(reader)?.selectedModel?.identifier;
++				if (!session.hasActiveRequest.read(reader) || session.lastRequestObs.read(reader)?.id !== taskId || selected !== modelId) {
++					this._sessionConfigurationSubscriptions.deleteAndDispose(bindingKey);
++				}
++			}));
++		}
++		return context;
++	}
++
+diff --git a/src/vs/workbench/api/common/extHost.protocol.ts b/src/vs/workbench/api/common/extHost.protocol.ts
+index e53773ab..96219319 100644
+--- a/src/vs/workbench/api/common/extHost.protocol.ts
++++ b/src/vs/workbench/api/common/extHost.protocol.ts
+@@ -70,0 +71 @@ import { ChatAgentLocation } from '../../contrib/chat/common/constants.js';
++import { ILanguageModelChatSessionContext } from '../../contrib/chat/common/chatSessionConfiguration.js';
+@@ -1490,0 +1492 @@ export interface ExtHostLanguageModelsShape {
++	$acceptChatSessionConfigurationChange(modelId: string, context: ILanguageModelChatSessionContext): Promise<void>;
+diff --git a/src/vs/workbench/api/common/extHostLanguageModels.ts b/src/vs/workbench/api/common/extHostLanguageModels.ts
+index 47c1d508..8efa187e 100644
+--- a/src/vs/workbench/api/common/extHostLanguageModels.ts
++++ b/src/vs/workbench/api/common/extHostLanguageModels.ts
+@@ -30,0 +31 @@ import { ChatAgentLocation } from '../../contrib/chat/common/constants.js';
++import { ILanguageModelChatSessionContext } from '../../contrib/chat/common/chatSessionConfiguration.js';
+@@ -298,0 +300,13 @@ export class ExtHostLanguageModels implements ExtHostLanguageModelsShape {
++	async $acceptChatSessionConfigurationChange(modelId: string, context: ILanguageModelChatSessionContext): Promise<void> {
++		const model = this._localModels.get(modelId);
++		const data = model && this._languageModelProviders.get(model.metadata.vendor);
++		if (!model || !data || !isProposedApiEnabled(data.extension, 'chatProvider')) {
++			return;
++		}
++		try {
++			await data.provider.handleLanguageModelChatSessionConfigurationChange?.(model.info, context);
++		} catch (error) {
++			this._logService.error('Language model session configuration handler failed', error);
++		}
++	}
++
+@@ -369 +383 @@ export class ExtHostLanguageModels implements ExtHostLanguageModelsShape {
+-				{ ...options, modelOptions: options.modelOptions ?? {}, modelConfiguration: options.configuration, requestInitiator: from ? ExtensionIdentifier.toKey(from) : 'core', toolMode: options.toolMode ?? extHostTypes.LanguageModelChatToolMode.Auto, includeEncryptedThinking: options.includeEncryptedThinking },
++				{ ...options, chatSessionContext: isProposedApiEnabled(data.extension, 'chatProvider') ? options.chatSessionContext : undefined, modelOptions: options.modelOptions ?? {}, modelConfiguration: options.configuration, requestInitiator: from ? ExtensionIdentifier.toKey(from) : 'core', toolMode: options.toolMode ?? extHostTypes.LanguageModelChatToolMode.Auto, includeEncryptedThinking: options.includeEncryptedThinking },
+@@ -544,0 +559,3 @@ export class ExtHostLanguageModels implements ExtHostLanguageModelsShape {
++		if (options.chatRequest) {
++			checkProposedApiEnabled(extension, 'chatProvider');
++		}
+diff --git a/src/vs/workbench/api/test/browser/mainThreadLanguageModels.test.ts b/src/vs/workbench/api/test/browser/mainThreadLanguageModels.test.ts
+index a81a345a..c2fd6350 100644
+--- a/src/vs/workbench/api/test/browser/mainThreadLanguageModels.test.ts
++++ b/src/vs/workbench/api/test/browser/mainThreadLanguageModels.test.ts
+@@ -8 +8,7 @@ import { CancellationToken, CancellationTokenSource } from '../../../../base/com
+-import { Emitter } from '../../../../base/common/event.js';
++import { Emitter, Event } from '../../../../base/common/event.js';
++import { IChatService } from '../../../contrib/chat/common/chatService/chatService.js';
++import { IChatModel, IChatModelInputState, IChatRequestModel } from '../../../contrib/chat/common/model/chatModel.js';
++import { IChatSessionConfigurationSelection, ILanguageModelChatSessionContext } from '../../../contrib/chat/common/chatSessionConfiguration.js';
++import { observableValue } from '../../../../base/common/observable.js';
++import { URI } from '../../../../base/common/uri.js';
++import { LocalChatSessionUri } from '../../../contrib/chat/common/model/chatUri.js';
+@@ -27,0 +34,65 @@ suite('MainThreadLanguageModels', function () {
++	test('native selection reaches the verified task without cancelling its pending model request', async () => {
++		const store = disposables.add(new DisposableStore());
++		const selections = store.add(new Emitter<IChatSessionConfigurationSelection>());
++		const disposed = store.add(new Emitter<void>());
++		const active = observableValue('active', true);
++		const resource = LocalChatSessionUri.forSession('session-a');
++		const modelId = 'test/model';
++		const input = observableValue<IChatModelInputState | undefined>('input', {
++			selectedModel: { identifier: modelId }, modelConfiguration: { reasoningEffort: 'low' }
++		} as IChatModelInputState);
++		const request = observableValue<IChatRequestModel | undefined>('request', { id: 'task-a' } as IChatRequestModel);
++		const session = new class extends mock<IChatModel>() {
++			override readonly sessionId = 'session-a';
++			override readonly inputModel = { state: input } as IChatModel['inputModel'];
++			override readonly hasActiveRequest = active;
++			override readonly lastRequestObs = request;
++			override readonly onDidDispose = disposed.event;
++		};
++		let provider: ILanguageModelChatProvider | undefined;
++		const events: ILanguageModelChatSessionContext[] = [];
++		let forwarded: ILanguageModelChatSessionContext | undefined;
++		let pendingId = 0;
++		const proxy: Partial<ExtHostLanguageModelsShape> = {
++			$startChatRequest: async (_modelId, requestId, _from, _messages, options) => { pendingId = requestId; forwarded = options.chatSessionContext; },
++			$acceptChatSessionConfigurationChange: async (_modelId, context) => { events.push(context); }
++		};
++		const languageModels = new class extends mock<ILanguageModelsService>() {
++			override readonly onDidSelectChatSessionConfiguration = selections.event;
++			override readonly onDidChangeLanguageModels = Event.None;
++			override getLanguageModelIds(): string[] { return [modelId]; }
++			override registerLanguageModelProvider(_vendor: string, value: ILanguageModelChatProvider) { provider = value; return Disposable.None; }
++		};
++		const chatService = new class extends mock<IChatService>() {
++			override getSession(uri: URI) { return uri.toString() === resource.toString() ? session : undefined; }
++		};
++		const mainThread = store.add(new MainThreadLanguageModels(SingleProxyRPCProtocol(proxy), chatService,
++			languageModels, new NullLogService(),
++			{ ...TestProductService, defaultChatAgent: { ...TestProductService.defaultChatAgent!, chatExtensionId: 'builtin.chat' } },
++			new class extends mock<IAuthenticationService>() { }, new class extends mock<IAuthenticationAccessService>() { },
++			new TestExtensionService(), new class extends mock<ILanguageModelIgnoredFilesService>() { }));
++		mainThread.$registerLanguageModelProvider('test');
++		const response = await provider!.sendChatRequest(modelId, [], new ExtensionIdentifier('builtin.chat'), {
++			chatRequest: { sessionResource: resource, requestId: 'task-a' }
++		}, CancellationToken.None);
++		selections.fire({ sessionResource: resource, modelId, configuration: { reasoningEffort: 'high' } });
++		assert.deepStrictEqual([forwarded?.source, events.map(event => [event.sessionId, event.taskId, event.source, event.configuration.reasoningEffort])],
++			['request', [['session-a', 'task-a', 'user', 'high']]]);
++		// Completion of one model call does not end an Agent task waiting on tools.
++		await mainThread.$reportResponseDone(pendingId, undefined);
++		await response.result;
++		for (const [caller, requestId] of [['other.extension', 'task-a'], ['builtin.chat', 'wrong-task']]) {
++			const unassociated = await provider!.sendChatRequest(modelId, [], new ExtensionIdentifier(caller), {
++				chatRequest: { sessionResource: resource, requestId },
++				chatSessionContext: { protocolVersion: 1, sessionId: 'forged', taskId: 'task-a', revision: 99,
++					state: 'running', source: 'request', configuration: { reasoningEffort: 'none' } }
++			}, CancellationToken.None);
++			assert.strictEqual(forwarded, undefined, 'unverified callers and forged provider context cannot obtain an association');
++			await mainThread.$reportResponseDone(pendingId, undefined);
++			await unassociated.result;
++		}
++		selections.fire({ sessionResource: resource, modelId, configuration: { reasoningEffort: 'none' } });
++		active.set(false, undefined);
++		assert.deepStrictEqual(events.map(event => event.state), ['running', 'running', 'ended']);
++	});
++
+@@ -36,0 +108 @@ suite('MainThreadLanguageModels', function () {
++			override readonly onDidSelectChatSessionConfiguration = Event.None;
+@@ -42,0 +115 @@ suite('MainThreadLanguageModels', function () {
++			new class extends mock<IChatService>() { },
+@@ -79,0 +153 @@ suite('MainThreadLanguageModels', function () {
++			override readonly onDidSelectChatSessionConfiguration = Event.None;
+@@ -85,0 +160 @@ suite('MainThreadLanguageModels', function () {
++			new class extends mock<IChatService>() { },
+@@ -168,0 +244 @@ suite('MainThreadLanguageModels', function () {
++			override readonly onDidSelectChatSessionConfiguration = Event.None;
+@@ -178,0 +255 @@ suite('MainThreadLanguageModels', function () {
++			new class extends mock<IChatService>() { },
+@@ -202,0 +280 @@ suite('MainThreadLanguageModels', function () {
++			override readonly onDidSelectChatSessionConfiguration = Event.None;
+@@ -216,0 +295 @@ suite('MainThreadLanguageModels', function () {
++			new class extends mock<IChatService>() { },
+@@ -249,0 +329 @@ suite('MainThreadLanguageModels', function () {
++			override readonly onDidSelectChatSessionConfiguration = Event.None;
+@@ -255,0 +336 @@ suite('MainThreadLanguageModels', function () {
++			new class extends mock<IChatService>() { },
+@@ -282,0 +364 @@ suite('MainThreadLanguageModels', function () {
++			override readonly onDidSelectChatSessionConfiguration = Event.None;
+@@ -292,0 +375 @@ suite('MainThreadLanguageModels', function () {
++			new class extends mock<IChatService>() { },
+diff --git a/src/vs/workbench/api/test/common/extHostLanguageModels.test.ts b/src/vs/workbench/api/test/common/extHostLanguageModels.test.ts
+index 6eafd50a..2cf4ed6b 100644
+--- a/src/vs/workbench/api/test/common/extHostLanguageModels.test.ts
++++ b/src/vs/workbench/api/test/common/extHostLanguageModels.test.ts
+@@ -210,0 +211,26 @@ suite('ExtHostLanguageModels provider disposal', () => {
++
++
++suite('ExtHostLanguageModels session configuration prototype', () => {
++	const store = ensureNoDisposablesAreLeakedInTestSuite();
++	for (const enabled of [true, false]) {
++		test(`routes configuration only to an opted-in owning provider (enabled=${enabled})`, async () => {
++			const received: string[] = [];
++			const proxy: Partial<MainThreadLanguageModelsShape> = {
++				$registerLanguageModelProvider: () => { }, $unregisterProvider: () => { }
++			};
++			const host = store.add(new ExtHostLanguageModels(SingleProxyRPCProtocol(proxy), new NullLogService(), new class extends mock<IExtHostAuthentication>() { }));
++			const extension = { ...nullExtensionDescription, enabledApiProposals: enabled ? ['chatProvider'] as const : [] };
++			store.add(host.registerLanguageModelChatProvider(extension, 'test', {
++				provideLanguageModelChatInformation: async () => [{ id: 'model', name: 'Model', family: 'test', version: '1', maxInputTokens: 100, maxOutputTokens: 100, capabilities: {} }],
++				provideLanguageModelChatResponse: async () => { }, provideTokenCount: async () => 0,
++				handleLanguageModelChatSessionConfigurationChange: (model, context) => { received.push(`${model.id}:${context.sessionId}`); }
++			}));
++			const [model] = await host.$provideLanguageModelChatInfo('test', { silent: true }, CancellationToken.None);
++			await host.$acceptChatSessionConfigurationChange(model.identifier, {
++				protocolVersion: 1, sessionId: 'session-a', taskId: 'task-a', revision: 1,
++				state: 'running', source: 'user', configuration: { reasoningEffort: 'high' }
++			});
++			assert.deepStrictEqual(received, enabled ? ['model:session-a'] : []);
++		});
++	}
++});
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
+index 0e3b361c..c038f75a 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts
+@@ -1260,0 +1261,8 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
++				if (this._inputModelSessionResource) {
++					const configuration = this._modelConfigStore.getModelConfiguration(modelId);
++					this.languageModelsService.notifyChatSessionConfigurationSelection({
++						sessionResource: this._inputModelSessionResource,
++						modelId,
++						configuration: { reasoningEffort: typeof configuration?.reasoningEffort === 'string' ? configuration.reasoningEffort : undefined }
++					});
++				}
+diff --git a/src/vs/workbench/contrib/chat/common/chatSessionConfiguration.ts b/src/vs/workbench/contrib/chat/common/chatSessionConfiguration.ts
+new file mode 100644
+index 00000000..804a6e9b
+--- /dev/null
++++ b/src/vs/workbench/contrib/chat/common/chatSessionConfiguration.ts
+@@ -0,0 +1,74 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import { URI } from '../../../../base/common/uri.js';
++
++export interface IChatSessionConfigurationSelection {
++	readonly sessionResource: URI;
++	readonly modelId: string;
++	readonly configuration: Readonly<{ reasoningEffort?: string }>;
++}
++
++/** Prototype chatProvider context, scoped to a verified user turn, not an individual model call. */
++export interface ILanguageModelChatSessionContext {
++	readonly protocolVersion: 1;
++	readonly sessionId: string;
++	readonly taskId: string;
++	readonly revision: number;
++	readonly state: 'running' | 'ended';
++	readonly source: 'request' | 'user' | 'lifecycle';
++	readonly configuration: Readonly<{ reasoningEffort?: string }>;
++}
++
++/** Retains only routing/selection metadata; no messages, tools or response content. */
++export class ChatSessionConfigurationTracker {
++	private readonly tasks = new Map<string, { modelId: string; context: ILanguageModelChatSessionContext }>();
++
++	constructor(private readonly notify: (modelId: string, context: ILanguageModelChatSessionContext) => void) { }
++
++	track(sessionId: string, taskId: string, modelId: string, configuration: ILanguageModelChatSessionContext['configuration']): ILanguageModelChatSessionContext {
++		const existing = this.tasks.get(sessionId);
++		if (existing?.context.taskId === taskId && existing.modelId === modelId) {
++			return { ...existing.context, source: 'request' };
++		}
++		if (existing) {
++			this.end(sessionId, existing.context.taskId);
++		}
++		const context: ILanguageModelChatSessionContext = { protocolVersion: 1, sessionId, taskId, revision: 0, state: 'running', source: 'request', configuration: { ...configuration } };
++		this.tasks.set(sessionId, { modelId, context });
++		return context;
++	}
++
++	select(sessionId: string, taskId: string, modelId: string, configuration: ILanguageModelChatSessionContext['configuration']): void {
++		const task = this.tasks.get(sessionId);
++		if (!task || task.context.taskId !== taskId) {
++			return;
++		}
++		if (task.modelId !== modelId) {
++			this.end(sessionId, taskId);
++			return;
++		}
++		if (task.context.configuration.reasoningEffort === configuration.reasoningEffort) {
++			return;
++		}
++		task.context = { ...task.context, revision: task.context.revision + 1, source: 'user', configuration: { ...configuration } };
++		this.notify(modelId, task.context);
++	}
++
++	end(sessionId: string, taskId: string): void {
++		const task = this.tasks.get(sessionId);
++		if (task?.context.taskId !== taskId) {
++			return;
++		}
++		this.tasks.delete(sessionId);
++		this.notify(task.modelId, { ...task.context, state: 'ended', source: 'lifecycle' });
++	}
++
++	dispose(): void {
++		for (const [sessionId, task] of this.tasks) {
++			this.end(sessionId, task.context.taskId);
++		}
++	}
++}
+diff --git a/src/vs/workbench/contrib/chat/common/languageModels.ts b/src/vs/workbench/contrib/chat/common/languageModels.ts
+index de4417ec..5afeece6 100644
+--- a/src/vs/workbench/contrib/chat/common/languageModels.ts
++++ b/src/vs/workbench/contrib/chat/common/languageModels.ts
+@@ -44,0 +45 @@ import { ChatAgentLocation } from './constants.js';
++import { IChatSessionConfigurationSelection, ILanguageModelChatSessionContext } from './chatSessionConfiguration.js';
+@@ -619,0 +621,2 @@ export interface ILanguageModelChatRequestOptions {
++	readonly chatRequest?: { readonly sessionResource: URI; readonly requestId: string };
++	readonly chatSessionContext?: ILanguageModelChatSessionContext;
+@@ -655,0 +659,2 @@ export interface ILanguageModelsService {
++	readonly onDidSelectChatSessionConfiguration: Event<IChatSessionConfigurationSelection>;
++	notifyChatSessionConfigurationSelection(selection: IChatSessionConfigurationSelection): void;
+@@ -1251,0 +1257,6 @@ export class LanguageModelsService implements ILanguageModelsService {
++	private readonly _onDidSelectChatSessionConfiguration = this._store.add(new Emitter<IChatSessionConfigurationSelection>());
++	readonly onDidSelectChatSessionConfiguration = this._onDidSelectChatSessionConfiguration.event;
++	notifyChatSessionConfigurationSelection(selection: IChatSessionConfigurationSelection): void {
++		this._onDidSelectChatSessionConfiguration.fire(selection);
++	}
++
+diff --git a/src/vs/workbench/contrib/chat/test/common/chatSessionConfiguration.test.ts b/src/vs/workbench/contrib/chat/test/common/chatSessionConfiguration.test.ts
+new file mode 100644
+index 00000000..0a0283ab
+--- /dev/null
++++ b/src/vs/workbench/contrib/chat/test/common/chatSessionConfiguration.test.ts
+@@ -0,0 +1,49 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++import assert from 'assert';
++import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
++import { ChatSessionConfigurationTracker, ILanguageModelChatSessionContext } from '../../common/chatSessionConfiguration.js';
++
++suite('ChatSessionConfigurationTracker', () => {
++	const store = ensureNoDisposablesAreLeakedInTestSuite();
++	test('routes explicit selections only to the originating model and task', () => {
++		const events: [string, ILanguageModelChatSessionContext][] = [];
++		const tracker = store.add(new ChatSessionConfigurationTracker((model, context) => events.push([model, context])));
++		tracker.track('session-a', 'task-a', 'same-model', { reasoningEffort: 'low' });
++		tracker.track('session-b', 'task-b', 'same-model', { reasoningEffort: 'medium' });
++		tracker.select('session-a', 'task-a', 'same-model', { reasoningEffort: 'high' });
++		tracker.select('session-a', 'task-a', 'same-model', { reasoningEffort: 'high' });
++		tracker.select('session-a', 'other-task', 'same-model', { reasoningEffort: 'none' });
++		assert.deepStrictEqual(events, [['same-model', {
++			protocolVersion: 1, sessionId: 'session-a', taskId: 'task-a', revision: 1,
++			state: 'running', source: 'user', configuration: { reasoningEffort: 'high' }
++		}]]);
++		assert.strictEqual(tracker.track('session-b', 'task-b', 'same-model', {}).revision, 0);
++	});
++
++	test('tool continuations retain the latest revision despite stale configuration', () => {
++		const tracker = store.add(new ChatSessionConfigurationTracker(() => { }));
++		tracker.track('session', 'task', 'model', { reasoningEffort: 'low' });
++		tracker.select('session', 'task', 'model', { reasoningEffort: 'high' });
++		assert.deepStrictEqual(tracker.track('session', 'task', 'model', { reasoningEffort: 'low' }), {
++			protocolVersion: 1, sessionId: 'session', taskId: 'task', revision: 1,
++			state: 'running', source: 'request', configuration: { reasoningEffort: 'high' }
++		});
++	});
++
++	test('model switches and task completion retire the original association', () => {
++		const states: string[] = [];
++		const tracker = store.add(new ChatSessionConfigurationTracker((_model, context) => states.push(context.state)));
++		tracker.track('session', 'task', 'model', {});
++		tracker.select('session', 'task', 'other-model', {});
++		tracker.select('session', 'task', 'model', { reasoningEffort: 'high' });
++		tracker.end('session', 'task');
++		tracker.track('session', 'new-task', 'model', {});
++		tracker.end('session', 'old-task');
++		tracker.dispose();
++		assert.deepStrictEqual(states, ['ended', 'ended']);
++	});
++});
+diff --git a/src/vs/workbench/contrib/chat/test/common/languageModels.ts b/src/vs/workbench/contrib/chat/test/common/languageModels.ts
+index faf71784..ec3c44b0 100644
+--- a/src/vs/workbench/contrib/chat/test/common/languageModels.ts
++++ b/src/vs/workbench/contrib/chat/test/common/languageModels.ts
+@@ -25,0 +26,2 @@ export class NullLanguageModelsService implements ILanguageModelsService {
++	onDidSelectChatSessionConfiguration = Event.None;
++	notifyChatSessionConfigurationSelection(): void { }
+diff --git a/src/vscode-dts/vscode.proposed.chatProvider.d.ts b/src/vscode-dts/vscode.proposed.chatProvider.d.ts
+index eb2feeaf..ff20699c 100644
+--- a/src/vscode-dts/vscode.proposed.chatProvider.d.ts
++++ b/src/vscode-dts/vscode.proposed.chatProvider.d.ts
+@@ -205,0 +206,28 @@ declare module 'vscode' {
++
++// Prototype: native user selections scoped to an existing Agent turn.
++declare module 'vscode' {
++	/** Opaque identifiers; no conversation content or resource paths are exposed. */
++	export interface LanguageModelChatSessionContext {
++		readonly protocolVersion: 1;
++		readonly sessionId: string;
++		readonly taskId: string;
++		readonly revision: number;
++		readonly state: 'running' | 'ended';
++		readonly source: 'request' | 'user' | 'lifecycle';
++		readonly configuration: Readonly<{ reasoningEffort?: string }>;
++	}
++	export interface LanguageModelChatRequestOptions {
++		/** Prototype: only accepted from the built-in chat participant for a live matching turn. */
++		readonly chatRequest?: { readonly sessionResource: Uri; readonly requestId: string };
++	}
++	export interface ProvideLanguageModelChatResponseOptions {
++		/** Available only with the chatProvider proposal and a verified caller association. */
++		readonly chatSessionContext?: LanguageModelChatSessionContext;
++	}
++	export interface LanguageModelChatProvider<T extends LanguageModelChatInformation = LanguageModelChatInformation> {
++		/** Notify immediately on explicit native selections or when the associated task ends.
++		 * A configuration selection does not cancel or mutate any running model request.
++		 */
++		handleLanguageModelChatSessionConfigurationChange?(model: T, context: LanguageModelChatSessionContext): ProviderResult<void>;
++	}
++}

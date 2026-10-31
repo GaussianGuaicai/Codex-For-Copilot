@@ -19,6 +19,7 @@ try {
     },
     turn: { id: 'turn-a', stickyState: 'opaque', startedAt: 1, completed: true },
     continuation: {
+      reasoningSelection: { observed: 'high', effective: 'low' },
       fullRequest: {
         model: 'gpt-test',
         instructions: 'Smoke test instructions',
@@ -40,6 +41,8 @@ try {
   assertEqual(toolMatch.state.turn.id, 'turn-a', 'tool result keeps turn');
   assertEqual(toolMatch.state.turn.stickyState, 'opaque', 'tool result keeps sticky state');
   assertEqual(toolMatch.state.continuation.responseId, 'resp-a', 'tool result keeps continuation response id');
+  toolMatch.state.continuation.reasoningSelection.effective = 'high';
+  assertEqual(store.findReusableBranch(envelope, toolContinuation).state.continuation.reasoningSelection.effective, 'low', 'reasoning selection is safely cloned');
   toolMatch.state.turn.stickyState = 'mutated';
   toolMatch.state.continuation.responseItems[0].type = 'mutated';
   assertEqual(store.findReusableBranch(envelope, toolContinuation).state.turn.stickyState, 'opaque', 'state is safely cloned');
