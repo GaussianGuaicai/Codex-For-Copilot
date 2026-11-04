@@ -500,6 +500,43 @@ function runStatefulMarkerBranchStoreSmokeTest(ResponseBranchStore) {
     incrementalInput: currentInput
   }), undefined, 'malformed protocol fingerprint wrapper rejects an exact marker');
 
+  for (const [label, extraFields, expectedResponseId] of [
+    ['compatible client identity', { clientIdentity: { profile: 'codexCliCompatible' } }, 'resp_marker_identity'],
+    ['unknown envelope field', { unexpected: true }, undefined]
+  ]) {
+    const identityEnvelope = {
+      ...envelope,
+      requestFingerprint: JSON.stringify({ ...JSON.parse(envelope.requestFingerprint), ...extraFields })
+    };
+    const identityStore = new ResponseBranchStore();
+    const identityState = createCompletedBranchState(identityEnvelope, previousInput, 'resp_marker_identity');
+    identityStore.recordSuccess(identityEnvelope, previousInput, 'resp_marker_identity', undefined, identityState);
+    assertEqual(identityStore.findReusableBranch(identityEnvelope, currentInput, {
+      responseId: 'resp_marker_identity',
+      incrementalInput: currentInput
+    })?.responseId, expectedResponseId, `${label} marker validation`);
+
+    const changedIdentityEnvelope = {
+      ...identityEnvelope,
+      requestFingerprint: JSON.stringify({
+        ...JSON.parse(identityEnvelope.requestFingerprint),
+        clientIdentity: { profile: 'extension' }
+      })
+    };
+    assertEqual(identityStore.findReusableBranch(changedIdentityEnvelope, currentInput, {
+      responseId: 'resp_marker_identity',
+      incrementalInput: currentInput
+    }), undefined, `${label} still rejects a changed identity`);
+
+    identityState.continuation.fullRequest.instructions = 'Tampered instructions';
+    const tamperedStore = new ResponseBranchStore();
+    tamperedStore.recordSuccess(identityEnvelope, previousInput, 'resp_marker_identity', undefined, identityState);
+    assertEqual(tamperedStore.findReusableBranch(identityEnvelope, currentInput, {
+      responseId: 'resp_marker_identity',
+      incrementalInput: currentInput
+    }), undefined, `${label} still rejects a tampered snapshot`);
+  }
+
   const pendingStore = createTestResponseBranchStore(ResponseBranchStore);
   const pendingEnvelope = reuseEnvelope('reuse-key-marker-pending');
   const pendingItems = [
