@@ -40,6 +40,7 @@
 - Web Search coverage must prove Codex strips the `{ query }` schema into the hosted `web_search` tool, the fallback executor sends one isolated streamed (`stream: true`) hosted `web_search` request, and returned sources are sanitized and deduplicated.
 - An in-band `Model not found` error for the requested model must not make `auto` issue an HTTP fallback request.
 - Keep branch reuse semantics deterministic: append-only reuse, fork reset, and tool-change busting should be covered by local smoke tests.
+- Stateful-marker coverage must accept optional `clientIdentity` fingerprint metadata while rejecting unknown wrapper fields, changed identities, and tampered snapshot requests in `smokeConversationReuse.mjs`.
 - Settings that alter the Responses request envelope, including service tier and output limits, must force full-input replay without `previous_response_id`.
 - Compression tests must distinguish explicit encoding rejection from ordinary Responses `400`/`422` errors, which must not disable future compressed requests.
 - A full replay containing `function_call_output` must retain its matching `function_call` and omit `previous_response_id`, including after managed WebSocket incremental processing.

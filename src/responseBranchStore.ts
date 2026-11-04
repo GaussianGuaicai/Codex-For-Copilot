@@ -522,7 +522,7 @@ function hasMatchingStoredRequestFingerprint(
   }
 
   const record = envelopeFingerprint as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
+  const keys = Object.keys(record).filter(key => key !== 'clientIdentity').sort();
   return keys.length === 2
     && keys[0] === 'protocolSettings'
     && keys[1] === 'requestFingerprint'

@@ -39,6 +39,7 @@
 - When `transport` is `auto`, only fall back to HTTP for transport availability failures, not for successful in-band model responses.
 - A `Model not found` response for the requested model is an in-band model error, not a transport failure; surface it without an HTTP retry.
 - Conversation reuse is allowed only for append-only transcript growth with an identical shared-builder request fingerprint; input, prior-response IDs, cache routing, and turn metadata are excluded, while model settings, tools, and schema changes must bust reuse.
+- Stored fingerprint wrappers require `protocolSettings` and `requestFingerprint`, allow the builder's optional `clientIdentity`, and reject other fields. Preserve exact envelope matching and snapshot request-fingerprint validation for stateful markers.
 - Request-compression capability is endpoint-normalized, TTL-bounded, and reset for connection configuration or credential changes; only an explicit Content-Encoding rejection may disable it.
 - Both transports must convert a rejected `previous_response_id` into a continuation miss so the provider can retry once with the full input history.
 - Tool-result continuations may send only appended `function_call_output` items with `previous_response_id` on an eligible managed WebSocket. HTTP, socket changes, history forks, incompatible envelopes, and cached capability misses must retain the full `function_call` plus `function_call_output` replay.
