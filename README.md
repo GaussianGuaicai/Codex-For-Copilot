@@ -23,6 +23,7 @@ Codex For Copilot is a lightweight VS Code Language Model Provider that connects
 - **Native VS Code integration** — works in Chat and Agent mode through the standard model picker.
 - **Automatic model discovery** — exposes available upstream Codex models with configurable fallbacks.
 - **Fast streaming transport** — supports reusable WebSocket sessions with HTTP fallback.
+- **Overload recovery** — retries the known temporary server-overload response twice with a short backoff before any visible response or tool call; otherwise the error remains available for manual retry.
 - **VS Code tool support** — forwards built-in, extension, and MCP tool calls through the Responses API.
 - **Hosted Web Search** — optionally gives Codex live web access through OpenAI's native Responses tool, with clickable sources. The same `#webSearch` tool also works with other tool-capable VS Code models.
 - **Optional Native Tool Search** — lets compatible Codex models search selected Agent tools on demand when you explicitly enable it.

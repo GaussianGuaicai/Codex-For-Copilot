@@ -37,6 +37,7 @@
 - Logging smoke coverage must assert local account keys are hashed alongside existing credential and request identifier redaction.
 - Loopback OAuth smoke coverage must verify the callback response closes the browser connection, success is shown only after credential persistence, token-exchange failures reach the browser, and login completion is not blocked by callback-server cleanup.
 - Keep HTTP and WebSocket assertions aligned so transport parity regressions are caught in one place.
+- Overload retry coverage must include SDK WebSocket errors, managed connections, exhaustion, cancellation, visible output, and non-overload failures.
 - Web Search coverage must prove Codex strips the `{ query }` schema into the hosted `web_search` tool, the fallback executor sends one isolated streamed (`stream: true`) hosted `web_search` request, and returned sources are sanitized and deduplicated.
 - An in-band `Model not found` error for the requested model must not make `auto` issue an HTTP fallback request.
 - Keep branch reuse semantics deterministic: append-only reuse, fork reset, and tool-change busting should be covered by local smoke tests.

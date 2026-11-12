@@ -73,6 +73,8 @@ const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
 const MAX_ERROR_JSON_LENGTH = 16 * 1024;
 const STREAM_RATE_LIMIT_MAX_RETRIES = 1;
+const STREAM_OVERLOAD_MAX_RETRIES = 2;
+const STREAM_OVERLOAD_RETRY_BASE_DELAY_MS = 1_000;
 const MAX_STREAM_RETRY_DELAY_MS = 24 * 60 * 60 * 1_000;
 const UNREADABLE_ERROR_PROPERTY = Symbol('unreadableErrorProperty');
 
@@ -314,14 +316,22 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         await streamResponseTextOnce(trackedOptions, abortController);
         return;
       } catch (error) {
-        if (!(error instanceof ResponsesRateLimitedError)
-          || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
-          || visibleActivity
-          || options.hasProviderVisibleOutput?.() === true) {
+        const overloaded = isResponsesOverloaded(error);
+        const rateLimited = error instanceof ResponsesRateLimitedError;
+        const maxRetries = overloaded ? STREAM_OVERLOAD_MAX_RETRIES : STREAM_RATE_LIMIT_MAX_RETRIES;
+        if ((!overloaded && !rateLimited) || attempt >= maxRetries
+          || visibleActivity || options.hasProviderVisibleOutput?.() === true) {
+          if (overloaded && !options.token.isCancellationRequested && !abortController.signal.aborted) {
+            options.onResponseFailed?.(error instanceof Error ? error.message : String(error));
+          }
           throw error;
         }
-        options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
-        await waitForRetryDelay(error.retryDelayMs, abortController.signal);
+        options.onTransportMetrics?.({ retryReason: overloaded ? 'stream_server_overloaded' : 'stream_rate_limit_exceeded' });
+        await waitForRetryDelay(
+          overloaded ? STREAM_OVERLOAD_RETRY_BASE_DELAY_MS * 2 ** attempt
+            : error instanceof ResponsesRateLimitedError ? error.retryDelayMs : undefined,
+          abortController.signal
+        );
         if (options.token.isCancellationRequested || abortController.signal.aborted) {
           return;
         }
@@ -397,7 +407,7 @@ async function streamResponseTextOnce(
       await streamResponseTextOverWebSocket(options, abortController);
       return;
     } catch (error) {
-      if (!shouldFallbackToHttp(error, options.token, abortController.signal)) {
+      if (isResponsesOverloaded(error) || !shouldFallbackToHttp(error, options.token, abortController.signal)) {
         throw error;
       }
 
@@ -1413,6 +1423,9 @@ function handleResponsesServerEvent(
 
   if (event.type === 'error') {
     const message = collectErrorMessages(event).find((value) => value.trim()) ?? 'Responses API stream error.';
+    if (isResponsesOverloaded(event)) {
+      throw new ResponsesOverloadedError(message);
+    }
     const limit = classifyResponsesLimit('error' in event ? event.error : event);
     if (limit === 'quota') {
       throw new ResponsesQuotaExceededError(message);
@@ -1432,6 +1445,10 @@ function handleResponsesServerEvent(
 
   if (event.type === 'response.failed') {
     const error = event.response.error;
+
+    if (isResponsesOverloaded(error)) {
+      throw new ResponsesOverloadedError(error?.message ?? 'Responses API server overloaded.');
+    }
 
     const mismatchedModel = getMismatchedModelNotFoundName(error?.message, options.model);
     if (mismatchedModel && options.transport !== 'http') {
@@ -1506,6 +1523,20 @@ function collectErrorMessages(error: unknown): string[] {
     return true;
   });
   return messages;
+}
+
+function isResponsesOverloaded(error: unknown): boolean {
+  return error instanceof ResponsesOverloadedError
+    || collectErrorMessages(error).some((message) =>
+      /^our servers are currently overloaded\.\s*please try again later\.?$/i.test(message.trim())
+    );
+}
+
+class ResponsesOverloadedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ResponsesOverloadedError';
+  }
 }
 
 function walkErrorEnvelope(error: unknown, visit: (value: unknown) => boolean): void {

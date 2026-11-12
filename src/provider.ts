@@ -1170,6 +1170,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           if (metrics.retryReason === 'websocket_unauthorized_recovered'
             || metrics.retryReason === 'websocket_connection_limit_reached'
             || metrics.retryReason === 'websocket_prewarm_continuation_miss'
+            || metrics.retryReason === 'stream_server_overloaded'
             || metrics.retryReason === 'stream_rate_limit_exceeded') {
             resetAttemptState();
           }
