@@ -58,6 +58,7 @@ try {
   await runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText);
   await runProviderVisibleRateLimitSmokeTest(streamResponseText);
   await runRetryBackoffCancellationSmokeTest(streamResponseText);
+  await runServerOverloadRetrySmokeTest(streamResponseText);
   await runTruncatedHttpStreamSmokeTest(streamResponseText);
   await runHttpTerminalFailureSmokeTest(streamResponseText);
   await runManagedWebSocketAccountKeyPinningSmokeTest(streamResponseText);
@@ -463,6 +464,155 @@ async function runRetryBackoffCancellationSmokeTest(streamResponseText) {
     assertEqual(requestCount, 1, 'cancellation during retry backoff prevents another attempt');
   } finally {
     clearTimeout(cancellationTimer);
+    server.close();
+  }
+}
+
+async function runServerOverloadRetrySmokeTest(streamResponseText) {
+  const message = 'Our servers are currently overloaded. Please try again later.';
+  let scenario;
+  let requests;
+  let httpRequests;
+  let requestTimes;
+  const server = createServer((_request, response) => {
+    httpRequests += 1;
+    requests += 1;
+    requestTimes.push(performance.now());
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    for (const event of eventsForAttempt()) response.write(`data: ${JSON.stringify(event)}\n\n`);
+    response.end('data: [DONE]\n\n');
+  });
+  const webSocketServer = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit('connection', webSocket, request);
+    });
+  });
+  webSocketServer.on('connection', (webSocket) => {
+    webSocket.once('message', () => {
+      requests += 1;
+      requestTimes.push(performance.now());
+      for (const event of eventsForAttempt()) webSocket.send(JSON.stringify(event));
+    });
+  });
+
+  function eventsForAttempt() {
+    if (requests > 1 && scenario !== 'exhausted') {
+      return [
+        { type: 'response.output_text.delta', delta: 'recovered' },
+        { type: 'response.completed', response: { id: 'resp_overload_recovered', status: 'completed' } }
+      ];
+    }
+    const failure = scenario === 'sdk-error' || scenario === 'stream-error'
+      ? { type: 'error', error: { code: 'server_error', message } }
+      : { type: 'response.failed', response: { id: 'resp_overloaded', status: 'failed', error: { code: 'server_error', message } } };
+    if (scenario === 'visible-text') {
+      return [{ type: 'response.output_text.delta', delta: 'visible' }, failure];
+    }
+    if (scenario === 'visible-reasoning') {
+      return [{ type: 'response.reasoning_text.delta', item_id: 'reasoning', delta: 'thinking' }, failure];
+    }
+    if (scenario === 'tool-arguments') {
+      return [
+        { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'tool_item', call_id: 'call_1', name: 'test_tool', arguments: '' } },
+        { type: 'response.function_call_arguments.done', item_id: 'tool_item', output_index: 0, arguments: '{}' },
+        failure
+      ];
+    }
+    if (scenario === 'visible-tool') {
+      return [{ type: 'response.output_item.done', output_index: 0, item: {
+        type: 'web_search_call', id: 'ws_overload', status: 'completed',
+        action: { type: 'search', query: 'visible search' }
+      } }, failure];
+    }
+    if (scenario === 'other-error') {
+      failure.response.error.message = 'A different server error.';
+    }
+    return [failure];
+  }
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
+    for (const testCase of [
+      { transport: 'http', scenario: 'failed', expectedRequests: 2 },
+      { transport: 'http', scenario: 'stream-error', expectedRequests: 2 },
+      { transport: 'websocket', scenario: 'sdk-error', expectedRequests: 2 },
+      { transport: 'websocket', scenario: 'failed', expectedRequests: 2 },
+      { transport: 'auto', scenario: 'sdk-error', managed: true, expectedRequests: 2 },
+      { transport: 'http', scenario: 'exhausted', expectedRequests: 3, error: true },
+      { transport: 'websocket', scenario: 'visible-text', expectedRequests: 1, error: true },
+      { transport: 'http', scenario: 'visible-reasoning', expectedRequests: 1, error: true },
+      { transport: 'websocket', scenario: 'tool-arguments', expectedRequests: 1, error: true },
+      { transport: 'http', scenario: 'visible-tool', expectedRequests: 1, error: true },
+      { transport: 'http', scenario: 'other-error', expectedRequests: 1, error: true },
+      { transport: 'auto', scenario: 'sdk-error', cancel: true, expectedRequests: 1 }
+    ]) {
+      scenario = testCase.scenario;
+      requests = 0;
+      httpRequests = 0;
+      requestTimes = [];
+      let providerVisible = false;
+      let error;
+      let cancellationTimer;
+      const failures = [];
+      const retryReasons = [];
+      const retryTimes = [];
+      const deltas = [];
+      const token = createMutableCancellationToken();
+      const managedOptions = testCase.managed ? {
+        compatibilityProfile: { enabled: true, endpointKey: baseURL },
+        authIdentity: 'codexAuth:overload-test',
+        identity: {
+          installationId: '11111111-1111-4111-8111-111111111111',
+          sessionId: 'overload-test', threadId: 'overload-test-thread',
+          turnId: 'overload-test-turn', windowId: '55555555-5555-4555-8555-555555555555'
+        },
+        websocketPrewarm: 'disabled'
+      } : {};
+      try {
+        await streamResponseText({
+          ...createStreamOptions(baseURL, testCase.transport),
+          ...managedOptions,
+          token,
+          onTextDelta: (text) => deltas.push(text),
+          onReasoningDelta() {},
+          onToolCallArgumentsDone() {},
+          onRawResponseItem: () => { providerVisible = true; },
+          hasProviderVisibleOutput: () => providerVisible,
+          onResponseFailed: (value) => failures.push(value),
+          onTransportMetrics: (metrics) => {
+            if (metrics.retryReason === 'stream_server_overloaded') {
+              retryReasons.push(metrics.retryReason);
+              retryTimes.push(performance.now());
+              if (testCase.cancel) cancellationTimer = setTimeout(() => token.cancel(), 0);
+            }
+          }
+        });
+      } catch (caught) {
+        error = caught;
+      } finally {
+        clearTimeout(cancellationTimer);
+      }
+      const label = `${testCase.transport} ${scenario}${testCase.managed ? ' managed' : ''}`;
+      assertEqual(requests, testCase.expectedRequests, `${label} request count`);
+      assertEqual(Boolean(error), Boolean(testCase.error), `${label} error outcome`);
+      assertEqual(failures.length, testCase.error ? 1 : 0, `${label} terminal failure count`);
+      assertEqual(retryReasons.length, testCase.cancel ? 1 : testCase.expectedRequests - 1, `${label} retry count`);
+      for (let index = 0; index < requestTimes.length - 1; index += 1) {
+        assertEqual(requestTimes[index + 1] - retryTimes[index] >= 950 * 2 ** index, true, `${label} backoff ${index + 1}`);
+      }
+      if (!testCase.error && !testCase.cancel) {
+        assertEqual(deltas.join(''), 'recovered', `${label} successful output`);
+      }
+      if (testCase.transport === 'auto') {
+        assertEqual(httpRequests, 0, `${label} does not fall back to HTTP`);
+      }
+    }
+  } finally {
+    for (const socket of webSocketServer.clients) socket.terminate();
+    webSocketServer.close();
     server.close();
   }
 }

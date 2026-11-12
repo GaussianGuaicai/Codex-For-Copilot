@@ -20,6 +20,7 @@ Compiled output is written to `out/` and should be treated as build artifacts. T
 Transport-related constraints that must not break:
 - `codexModelProvider.transport` defaults to `auto`, which means WebSocket-first with HTTP fallback.
 - HTTP and WebSocket transports must emit the same provider-facing callbacks for text, reasoning, tool calls, completion, and failure.
+- Retry the known server-overload response only before visible output, with bounded backoff and cancellation, without falling back to HTTP.
 - ChatGPT/Codex custom headers for WebSocket requests are passed via the WebSocket constructor options, not via OpenAI client `defaultHeaders`.
 - The runtime now depends on the `ws` package because `openai/resources/responses/ws` requires it outside the SDK bundle.
 - `auto` fallback is limited to transport availability failures. Structured WebSocket API errors must be surfaced without an HTTP retry.

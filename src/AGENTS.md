@@ -27,6 +27,7 @@
 - Tool boundaries may use larger bounded synchronous text batches; normal playback and completion-drain pacing must remain unchanged.
 - Tool-call telemetry must reuse the stable serialization of sanitized replay arguments and avoid scheduling or hashing diagnostics when Trace is disabled.
 - Keep provider-visible callback semantics transport-agnostic: HTTP and WebSocket must report the same deltas and terminal events.
+- Retry the explicit temporary server-overload response only before visible output, with bounded backoff and cancellation; reset provider attempt state and never replay visible tool calls.
 - Keep ChatGPT Codex compatibility logic centralized in `responsesClient.ts`, `config.ts`, and `secrets.ts`; do not duplicate header or base URL normalization across call sites.
 - Native ChatGPT OAuth credentials must be exposed through the `codex-for-copilot` VS Code AuthenticationProvider and emit added, changed, or removed session events when credential state changes.
 - Local Codex account keys are opaque storage identities. Reuse one only for a verified matching ChatGPT user plus workspace (or legacy email plus workspace); never deduplicate by workspace ID alone.

@@ -5474,6 +5474,7 @@ async function runProviderStreamRateLimitIsolationSmokeTest() {
   const requestBodies = [];
   let visibleRequestCount = 0;
   let safeRequestCount = 0;
+  let overloadRequestCount = 0;
   let followUpRequestCount = 0;
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -5532,8 +5533,9 @@ async function runProviderStreamRateLimitIsolationSmokeTest() {
       return;
     }
 
-    safeRequestCount += 1;
-    if (safeRequestCount === 1) {
+    const overload = serializedInput.includes('Safe overload retry');
+    const attempt = overload ? ++overloadRequestCount : ++safeRequestCount;
+    if (attempt === 1) {
       response.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache',
@@ -5561,7 +5563,9 @@ async function runProviderStreamRateLimitIsolationSmokeTest() {
         response: {
           id: 'resp_safe_limited',
           status: 'failed',
-          error: { code: 'rate_limit_exceeded', message: 'Please try again in 350ms.' }
+          error: overload
+            ? { code: 'server_error', message: 'Our servers are currently overloaded. Please try again later.' }
+            : { code: 'rate_limit_exceeded', message: 'Please try again in 350ms.' }
         }
       })}\n\n`);
       response.end('data: [DONE]\n\n');
@@ -5648,6 +5652,36 @@ async function runProviderStreamRateLimitIsolationSmokeTest() {
     const recoveryInput = JSON.stringify(recoveryRequest.input);
     assertEqual(['msg_failed_safe_retry', 'Failed-attempt hidden replay text.'].some((value) => recoveryInput.includes(value)), false, 'safe retry recovery excludes failed-attempt raw replay state');
     assertEqual(recoveryInput.includes('Safe retry succeeded.'), true, 'safe retry recovery retains successful response text');
+
+    const overloadProvider = new CodexModelProvider(context, createOutputChannel());
+    const overloadParts = [];
+    await overloadProvider.provideLanguageModelChatResponse(
+      model,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Safe overload retry')] }],
+      { tools: [webSearchTool] },
+      { report(part) { overloadParts.push(part); } },
+      token
+    );
+    assertEqual(overloadRequestCount, 2, 'pre-visible server overload retries once');
+    assertEqual(overloadParts.filter((part) => part instanceof LanguageModelThinkingPart).length, 0, 'overload retry clears scheduled failed-attempt status');
+    assertEqual(
+      overloadParts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''),
+      'Safe retry succeeded.',
+      'overload retry emits only successful text'
+    );
+    const overloadMarker = getSingleStatefulMarkerPart(overloadParts, 'safe overload retry');
+    await overloadProvider.provideLanguageModelChatResponse(
+      model,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [overloadMarker] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue after safe retry')] }
+      ],
+      { tools: [webSearchTool] },
+      { report() {} },
+      token
+    );
+    const overloadRecoveryInput = JSON.stringify(requestBodies.at(-1).input);
+    assertEqual(overloadRecoveryInput.includes('Failed-attempt hidden replay text.'), false, 'overload retry excludes failed-attempt replay state');
   } finally {
     configValues.baseURL = originalBaseURL;
     configValues.credentialsSource = originalCredentialsSource;
