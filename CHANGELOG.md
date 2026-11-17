@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.10.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.10.0...v1.10.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* Retry transient server overloads ([#127](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/127)) ([1601386](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/16013861005d422e4da30b74a24909f116c75d4d))
+
 ## [1.10.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.9...v1.10.0) (2026-11-04)
 
 
