@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.10.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.10.1...v1.10.2) (2026-11-19)
+
+
+### Bug Fixes
+
+* Add configurable context window budgets ([#129](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/129)) ([6a80bb6](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/6a80bb6b8ee836e046c7d852f67a91879e13c91b))
+
 ## [1.10.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.10.0...v1.10.1) (2026-11-12)
 
 
