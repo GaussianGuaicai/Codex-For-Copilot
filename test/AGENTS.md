@@ -15,6 +15,7 @@
 - `smokeConversationReuse.mjs`: local semantic coverage for append detection, stable serialization, branch reuse invalidation, and malformed tool-history filtering.
 - `smokeCodexLatency.mjs`: deterministic coverage for redacted provider latency stage accounting.
 - `smokeCodexModelCache.mjs`: deterministic stale-while-revalidate model-cache coverage without sleeps.
+- `smokeReasoningEffort.mjs`: model catalog coverage for Thinking Effort and Context Size picker metadata.
 - `smokeCodexToolSchemaCache.mjs`: bounded, order-aware, immutable tool-schema cache coverage.
 - `smokeCodexPrewarmBudget.mjs`: local recovery coverage for a timed-out `generate:false` prewarm.
 - `smokeCodexPreconnection.mjs`: local identity-free handshake and formal-request socket-claim coverage.
@@ -59,6 +60,7 @@
 - Real tool-continuation probes must use a side-effect-free test tool and must report only aggregate outcomes, never credentials, prompt content, tool arguments, or tool output.
 - Latency tests must use deterministic timestamps or mocks; do not introduce sleeps to assert timing behavior.
 - Model-cache tests must prove cold blocking, fresh reuse, stale immediate return, and single-flight background refresh with deterministic promises.
+- Context coverage must verify standard, long, and auto metadata, percentage overrides and fallback; Extension Host must observe updated budgets after settings changes.
 - Provider-level stale-cache coverage must hold the refresh pending and prove `/responses` proceeds before the refresh resolves.
 - Provider coverage must prove a valid selected `codex::` model ID reaches `/responses` without waiting for a cold `/models` lookup and still applies a configured alias.
 - Tool-schema tests must cover first-build miss, repeat-build hit, order-sensitive invalidation, immutable cached definitions, and same-object semantic mutation invalidation.

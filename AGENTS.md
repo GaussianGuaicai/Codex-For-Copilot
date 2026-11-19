@@ -54,6 +54,8 @@ There is no formatter or linter configured here, so keep edits stylistically con
 ## Testing Guidelines
 
 Add focused tests under `test/` when changing request construction, credential resolution, or VS Code integration points. Name tests by behavior, not implementation detail. Keep mock-based checks in the smoke tests and reserve `test:real-backend` for flows that truly need live backend validation.
+Context Size picker labels show effective input budgets; option descriptions show raw catalog windows.
+The global context mode defaults to standard; auto retains the regular Chat picker while Agents advertises the maximum.
 For service tier changes, prefer a single real-backend probe with `CODEX_TEST_MODEL` and `CODEX_TEST_SERVICE_TIER` instead of broad runs.
 
 ## VS Code AI References

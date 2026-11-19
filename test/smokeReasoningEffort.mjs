@@ -48,7 +48,7 @@ const {
   buildResponsesReasoning,
   toResponsesReasoning
 } = require(reasoningBundlePath);
-const { buildProviderModels } = require(modelsBundlePath);
+const { buildProviderModels, buildFallbackModel } = require(modelsBundlePath);
 
 try {
   const model = buildProviderModels(createConfig(), [createCatalogModel()], 'codexAccessToken')[0];
@@ -58,6 +58,42 @@ try {
     }], 'codexAccessToken')[0];
     assertEqual(discovered.supportsReasoningEffortUpdates, value === true, 'only explicit upstream true enables updates');
   }
+  const sol = buildProviderModels(createConfig(), [{
+    ...createCatalogModel(),
+    slug: 'gpt-6.1-sol',
+    context_window: 500000,
+    max_context_window: 872000,
+    effective_context_window_percent: 95
+  }], 'codexAccessToken')[0];
+  const solContext = sol.info.configurationSchema.properties.contextSize;
+  assertEqual(sol.effectiveInputBudget, 475000, 'Sol uses the catalog effective context percentage');
+  assertEqual(solContext.default, 475000, 'Sol defaults to 475K rather than the opt-in maximum');
+  assertEqual(solContext.enum.join(','), '475000,828400', 'Sol preserves default and opt-in effective budgets');
+  assertEqual(solContext.enumItemLabels.join(','), '475K,828.4K', 'Sol picker labels match usable budgets, not raw windows');
+
+  const catalogSol = {
+    ...createCatalogModel(),
+    slug: 'gpt-6.1-sol',
+    context_window: 500000,
+    max_context_window: 872000,
+    effective_context_window_percent: 95
+  };
+  const standard = buildProviderModels({ ...createConfig(), contextWindowMode: 'standard' }, [catalogSol], 'codexAccessToken')[0];
+  assertEqual(standard.info.maxInputTokens, 475000, 'standard mode advertises the standard budget to Agent Window');
+  assertEqual(standard.info.configurationSchema?.properties?.contextSize, undefined, 'standard mode does not offer a conflicting larger picker choice');
+  assertEqual(standard.effectiveInputBudget, 475000, 'standard mode keeps the active budget');
+
+  const long = buildProviderModels({ ...createConfig(), contextWindowMode: 'long', effectiveContextWindowPercent: 80 }, [catalogSol], 'codexAccessToken')[0];
+  assertEqual(long.info.maxInputTokens, 697600, 'long mode advertises the overridden percentage of the long window');
+  assertEqual(long.effectiveInputBudget, 697600, 'long mode uses the advertised budget for continuation');
+  assertEqual(long.info.configurationSchema?.properties?.contextSize, undefined, 'long mode does not offer a conflicting standard picker choice');
+  const autoOverride = buildProviderModels({ ...createConfig(), effectiveContextWindowPercent: 80 }, [catalogSol], 'codexAccessToken')[0];
+  assertEqual(autoOverride.info.configurationSchema.properties.contextSize.enum.join(','), '400000,697600', 'percentage override applies to both auto choices');
+  const noMaximum = buildProviderModels({ ...createConfig(), contextWindowMode: 'long' }, [{ ...catalogSol, max_context_window: undefined }], 'codexAccessToken')[0];
+  assertEqual(noMaximum.info.maxInputTokens, 475000, 'long mode does not invent an undiscovered maximum');
+  const fallback = buildFallbackModel({ ...createConfig(), effectiveContextWindowPercent: 80 }, 'codexAccessToken');
+  assertEqual(fallback.info.maxInputTokens, 217600, 'percentage override applies when discovery falls back');
+
   const initial = planReasoningEffortUpdate('low', undefined, false);
   const confirmed = planReasoningEffortUpdate('high', initial, true);
   const deferred = planReasoningEffortUpdate('medium', confirmed, false);
@@ -84,8 +120,8 @@ try {
   assertEqual(schema.default, 'low', 'catalog default reasoning effort');
   assertEqual(contextSizeSchema.group, 'tokens', 'context size uses the native tokens group');
   assertEqual(contextSizeSchema.enum.join(','), '258400,828400', 'context size preserves effective input budgets');
-  assertEqual(contextSizeSchema.enumItemLabels.join(','), '272K,872K', 'context size shows raw context-window picker labels');
-  assertEqual(contextSizeSchema.enumDescriptions.join(','), 'Default context size.,Long context.', 'context size labels the discovered maximum option');
+  assertEqual(contextSizeSchema.enumItemLabels.join(','), '258.4K,828.4K', 'context size shows effective input-budget labels');
+  assertEqual(contextSizeSchema.enumDescriptions[0], 'Default context size. Raw context window: 272K.', 'context size describes the default raw window separately');
   assertEqual(contextSizeSchema.default, 258400, 'context size defaults to the active context window');
   assertEqual(model.info.maxInputTokens, 828400, 'model advertises its maximum selectable context size');
   assertEqual(
@@ -162,6 +198,7 @@ function createConfig() {
     websocketPrewarm: 'auto',
     requestCompression: 'auto',
     model: 'gpt-5.6-sol',
+    contextWindowMode: 'auto',
     includeHiddenModels: false,
     disabledModels: [],
     modelAliases: {},

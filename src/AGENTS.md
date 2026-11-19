@@ -51,6 +51,7 @@
 - Latency traces may include timestamps, counts, transport state, and request byte sizes, but never prompt text, tool arguments or results, credentials, Turn State, or reasoning content.
 - Model discovery may block only for a cold or expired cache entry. Fresh entries are returned directly; stale entries remain usable while one background refresh is in flight, and failed background refreshes must retain the stale entry.
 - Model discovery must project the resolved request identity onto credential headers, matching Responses request identity semantics.
+- Context mode defaults to standard; standard and long publish one global budget for Agents, while auto preserves the Chat picker and advertises its maximum. The optional percentage override applies to discovered and fallback budgets.
 - A valid selected `codex::` model ID resolves directly for chat requests; only untrusted, disabled, or temporarily unavailable IDs require a model-directory lookup.
 - `generate:false` prewarm is strictly opt-in and best effort: `auto` skips speculative work, while an enabled prewarm has a short independent budget, must not cancel the formal request, and a timed-out prewarm socket must be discarded before the formal request starts.
 - An idle WebSocket preconnection is keyed only by endpoint/account/auth compatibility, carries no synthetic request identity, and must be short-lived, bounded, and claimed by at most one formal thread request.

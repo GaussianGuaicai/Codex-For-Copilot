@@ -2346,6 +2346,8 @@ function buildModelCacheKey(
     config.credentialsSource,
     config.transport,
     config.model,
+    config.contextWindowMode,
+    config.effectiveContextWindowPercent ?? 'catalog',
     config.includeHiddenModels,
     config.disabledModels.join(','),
     stableSerialize(config.modelAliases),
