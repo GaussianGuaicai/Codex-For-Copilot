@@ -217,7 +217,10 @@ async function run() {
     assert(model, 'Hidden GPT-5.4 model was not selectable.');
     assert.strictEqual(model.name, 'GPT-5.4');
     assert.strictEqual(model.family, 'gpt-5.4');
-    assert.strictEqual(model.maxInputTokens, 258400, 'Default mode advertises the standard budget.');
+    assert.strictEqual(config.get('contextWindowMode'), 'auto', 'The default context mode is auto.');
+    assert.strictEqual(model.maxInputTokens, 950000, 'Default auto mode advertises the maximum budget.');
+    await config.update('contextWindowMode', 'standard', vscode.ConfigurationTarget.Global);
+    await waitForModelBudget(258400);
     await config.update('contextWindowMode', 'auto', vscode.ConfigurationTarget.Global);
     model = await waitForModelBudget(950000);
 
