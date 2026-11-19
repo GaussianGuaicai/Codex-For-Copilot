@@ -190,7 +190,10 @@ export function buildProviderModels(
 
 export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCredentials['kind']): ResolvedProviderModel {
   const rawContextWindow = getFallbackContextWindow(config.model);
-  const effectiveInputBudget = getEffectiveInputBudget(rawContextWindow, DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
+  const effectiveInputBudget = getEffectiveInputBudget(
+    rawContextWindow,
+    config.effectiveContextWindowPercent ?? DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT
+  );
   const reasoningEffort = getDefaultReasoningEffort(undefined, config.model);
   const reasoningOptions = getReasoningOptions(undefined, config.model);
   return {
@@ -249,24 +252,32 @@ function buildDiscoveredModels(
   const reasoningEfforts = reasoningOptions.map((option) => option.effort);
   const defaultReasoningEffort = getDefaultReasoningEffort(model, slug);
   const activeRawContextWindow = getModelContextWindow(slug, model.context_window);
-  const effectiveContextWindowPercent = getEffectiveContextWindowPercent(model.effective_context_window_percent);
-  const effectiveInputBudget = getEffectiveInputBudget(activeRawContextWindow, effectiveContextWindowPercent);
+  const effectiveContextWindowPercent = config.effectiveContextWindowPercent
+    ?? getEffectiveContextWindowPercent(model.effective_context_window_percent);
+  const activeInputBudget = getEffectiveInputBudget(activeRawContextWindow, effectiveContextWindowPercent);
   const maximumContextWindow = getPositiveInteger(model.max_context_window);
   const longRawContextWindow = getLongContextWindow(activeRawContextWindow, maximumContextWindow);
   const contextSizeOptions = getContextSizeOptions(
     activeRawContextWindow,
-    effectiveInputBudget,
+    activeInputBudget,
     longRawContextWindow,
     effectiveContextWindowPercent
   );
-  const maximumEffectiveInputBudget = Math.max(...contextSizeOptions.map((option) => option.value));
+  const selectedContextSizeOptions = config.contextWindowMode === 'standard'
+    ? contextSizeOptions.slice(0, 1)
+    : config.contextWindowMode === 'long'
+      ? contextSizeOptions.slice(-1)
+      : contextSizeOptions;
+  const effectiveInputBudget = selectedContextSizeOptions[0].value;
+  const displayedRawContextWindow = selectedContextSizeOptions[0].rawContextWindow;
+  const maximumEffectiveInputBudget = Math.max(...selectedContextSizeOptions.map((option) => option.value));
   const imageInput = Array.isArray(model.input_modalities) && model.input_modalities.includes('image');
   const tooltip = getModelDescription(model, slug);
   const versionBase = typeof model.comp_hash === 'string' && model.comp_hash.trim() ? model.comp_hash.trim() : '1.0.0';
   const configurationSchema = buildModelConfigurationSchema(
     reasoningOptions,
     defaultReasoningEffort ?? reasoningEfforts[0],
-    contextSizeOptions
+    selectedContextSizeOptions
   );
 
   const info: ModelPickerChatInformation = {
@@ -278,7 +289,7 @@ function buildDiscoveredModels(
     maxOutputTokens: config.maxOutputTokens,
     tooltip,
     detail: buildModelDetail(
-      activeRawContextWindow,
+      displayedRawContextWindow,
       effectiveInputBudget,
       reasoningOptions,
       defaultReasoningEffort,
@@ -504,8 +515,10 @@ function buildModelConfigurationSchema(
       type: 'number',
       title: 'Context Size',
       enum: contextSizeOptions.map((option) => option.value),
-      enumItemLabels: contextSizeOptions.map((option) => formatContextSize(option.rawContextWindow)),
-      enumDescriptions: contextSizeOptions.map((option) => option.description),
+      enumItemLabels: contextSizeOptions.map((option) => formatContextSize(option.value)),
+      enumDescriptions: contextSizeOptions.map((option) =>
+        `${option.description} Raw context window: ${formatContextSize(option.rawContextWindow)}.`
+      ),
       default: contextSizeOptions[0].value,
       group: 'tokens'
     };

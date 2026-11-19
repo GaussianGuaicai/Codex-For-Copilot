@@ -42,6 +42,7 @@ const configValues = {
   credentialsSource: 'secretStorage',
   transport: 'http',
   model: 'gpt-5.5',
+  contextWindowMode: 'auto',
   includeHiddenModels: false,
   instructions: 'Smoke test instructions',
   defaultServiceTier: 'auto',
@@ -926,7 +927,7 @@ async function runModelCatalogMetadataSmokeTest() {
       assertEqual(resolvedModel.effectiveInputBudget, 258400, `${slug} retains the default effective budget`);
       assertEqual(resolvedModel.info.maxInputTokens, 828400, `${slug} advertises the maximum selectable budget`);
       assertEqual(contextSize.enum.join(','), '258400,828400', `${slug} exposes standard and long context sizes`);
-      assertEqual(contextSize.enumDescriptions[1], 'Long context.', `${slug} labels the discovered maximum as long context`);
+      assertEqual(contextSize.enumDescriptions[1], 'Long context. Raw context window: 872K.', `${slug} describes the discovered raw maximum separately`);
       assertEqual(
         resolvedModel.info.detail?.includes(`Maximum context: ${formattedGpt56MaximumContext} tokens (opt-in)`),
         true,
@@ -1194,7 +1195,9 @@ async function runProviderLongContextSelectionSmokeTest() {
       ['model options seed reply', 'resp_model_options_seed'],
       ['model options follow-up reply', 'resp_model_options_follow_up'],
       ['precedence seed reply', 'resp_precedence_seed'],
-      ['precedence follow-up reply', 'resp_precedence_follow_up']
+      ['precedence follow-up reply', 'resp_precedence_follow_up'],
+      ['global long reply', 'resp_global_long'],
+      ['global standard reply', 'resp_global_standard']
     ];
     const reply = replies[responseRequests.length - 1];
     if (!reply) {
@@ -1364,7 +1367,36 @@ async function runProviderLongContextSelectionSmokeTest() {
       undefined,
       'request-time model options override conflicting persisted model configuration'
     );
+
+    configValues.contextWindowMode = 'long';
+    configurationChangeListener({ affectsConfiguration: (section) => section === 'codexModelProvider' });
+    const longModel = (await provider.provideLanguageModelChatInformation({ silent: true }, token))[0];
+    assertEqual(longModel.maxInputTokens, 950000, 'long mode refreshes the provider model budget');
+    await provider.provideLanguageModelChatResponse(
+      longModel,
+      [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Global mode seed')] }],
+      {},
+      { report() {} },
+      token
+    );
+    configValues.contextWindowMode = 'standard';
+    configurationChangeListener({ affectsConfiguration: (section) => section === 'codexModelProvider' });
+    const standardModel = (await provider.provideLanguageModelChatInformation({ silent: true }, token))[0];
+    assertEqual(standardModel.maxInputTokens, 258400, 'standard mode refreshes the provider model budget');
+    await provider.provideLanguageModelChatResponse(
+      standardModel,
+      [
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Global mode seed')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.Assistant, content: [new vscodeMock.LanguageModelTextPart('global long reply')] },
+        { role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Global mode follow-up')] }
+      ],
+      {},
+      { report() {} },
+      token
+    );
+    assertEqual(responseRequests[9].previous_response_id, undefined, 'global budget downgrade starts an isolated chain');
   } finally {
+    configValues.contextWindowMode = 'auto';
     server.close();
   }
 }

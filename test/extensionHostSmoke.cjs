@@ -186,6 +186,8 @@ async function run() {
   let originalTransport;
   let originalIncludeHiddenModels;
   let originalRequestIdentityProfile;
+  let originalContextWindowMode;
+  let originalEffectiveContextWindowPercent;
   let configCleanupFailure;
   let serverCleanupFailure;
   try {
@@ -197,6 +199,8 @@ async function run() {
     originalTransport = config.inspect('transport')?.globalValue;
     originalIncludeHiddenModels = config.inspect('includeHiddenModels')?.globalValue;
     originalRequestIdentityProfile = config.inspect('requestIdentityProfile')?.globalValue;
+    originalContextWindowMode = config.inspect('contextWindowMode')?.globalValue;
+    originalEffectiveContextWindowPercent = config.inspect('effectiveContextWindowPercent')?.globalValue;
     await config.update('baseURL', `http://127.0.0.1:${address.port}/backend-api/codex/responses`, vscode.ConfigurationTarget.Global);
     await config.update('instructions', 'Extension host smoke instructions', vscode.ConfigurationTarget.Global);
     await config.update('transport', 'http', vscode.ConfigurationTarget.Global);
@@ -209,11 +213,13 @@ async function run() {
 
     const models = await vscode.lm.selectChatModels({ vendor: 'codex-for-copilot' });
     assert(modelDiscoveryRequestCount > 0, 'Model discovery did not reach the mock backend; verify isolated test credentials.');
-    const model = models.find((candidate) => candidate.id === 'codex::gpt-5.4');
+    let model = models.find((candidate) => candidate.id === 'codex::gpt-5.4');
     assert(model, 'Hidden GPT-5.4 model was not selectable.');
     assert.strictEqual(model.name, 'GPT-5.4');
     assert.strictEqual(model.family, 'gpt-5.4');
-    assert.strictEqual(model.maxInputTokens, 950000);
+    assert.strictEqual(model.maxInputTokens, 258400, 'Default mode advertises the standard budget.');
+    await config.update('contextWindowMode', 'auto', vscode.ConfigurationTarget.Global);
+    model = await waitForModelBudget(950000);
 
     assert.strictEqual(await collectText(await model.sendRequest([
       vscode.LanguageModelChatMessage.User('Profile start')
@@ -268,6 +274,13 @@ async function run() {
     await waitForPendingMockRequests();
     throwIfMockServerFailed();
 
+    await config.update('effectiveContextWindowPercent', 80, vscode.ConfigurationTarget.Global);
+    await waitForModelBudget(800000);
+    await config.update('contextWindowMode', 'standard', vscode.ConfigurationTarget.Global);
+    await waitForModelBudget(217600);
+    await config.update('contextWindowMode', 'long', vscode.ConfigurationTarget.Global);
+    await waitForModelBudget(800000);
+
     if (process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH) {
       await writeFile(process.env.CODEX_EXTENSION_HOST_SMOKE_RESULT_PATH, JSON.stringify({ passed: true }));
     }
@@ -280,6 +293,8 @@ async function run() {
         await config.update('transport', originalTransport, vscode.ConfigurationTarget.Global);
         await config.update('includeHiddenModels', originalIncludeHiddenModels, vscode.ConfigurationTarget.Global);
         await config.update('requestIdentityProfile', originalRequestIdentityProfile, vscode.ConfigurationTarget.Global);
+        await config.update('contextWindowMode', originalContextWindowMode, vscode.ConfigurationTarget.Global);
+        await config.update('effectiveContextWindowPercent', originalEffectiveContextWindowPercent, vscode.ConfigurationTarget.Global);
       }
     } catch (error) {
       configCleanupFailure = error;
@@ -298,6 +313,19 @@ async function run() {
   if (serverCleanupFailure !== undefined) {
     throw serverCleanupFailure;
   }
+}
+
+async function waitForModelBudget(expected) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const models = await vscode.lm.selectChatModels({ vendor: 'codex-for-copilot' });
+    const model = models.find((candidate) => candidate.id === 'codex::gpt-5.4');
+    if (model?.maxInputTokens === expected) {
+      return model;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for model input budget ${expected}.`);
 }
 
 async function collectText(response) {

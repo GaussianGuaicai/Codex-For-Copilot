@@ -22,6 +22,28 @@ const loaded = await loadBundled('src/config.ts', {
   }
 });
 try {
+  const contextSettings = manifest.contributes.configuration.properties;
+  assertEqual(contextSettings['codexModelProvider.contextWindowMode'].default, 'standard', 'manifest defaults to the standard context window');
+  assertEqual(contextSettings['codexModelProvider.effectiveContextWindowPercent'].default, null, 'manifest defaults to the catalog percentage');
+  assertEqual(loaded.exports.getProviderConfig().contextWindowMode, 'standard', 'runtime defaults to the standard context window');
+  assertEqual(loaded.exports.getProviderConfig().effectiveContextWindowPercent, undefined, 'runtime preserves the catalog percentage by default');
+  for (const value of [1, 80.5, 100]) {
+    configValues.effectiveContextWindowPercent = value;
+    assertEqual(loaded.exports.getProviderConfig().effectiveContextWindowPercent, value, `percentage ${value} is accepted`);
+  }
+  for (const value of [0, -1, 100.1, '80', NaN, Infinity]) {
+    configValues.effectiveContextWindowPercent = value;
+    let error;
+    try {
+      loaded.exports.getProviderConfig();
+    } catch (caught) {
+      error = caught;
+    }
+    if (!(error instanceof Error) || !error.message.includes('effectiveContextWindowPercent')) {
+      throw new Error(`Invalid percentage ${String(value)} must surface a configuration error.`);
+    }
+  }
+  delete configValues.effectiveContextWindowPercent;
   assertEqual(
     loaded.exports.getProviderConfig().nativeToolSearch,
     'disabled',

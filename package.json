@@ -510,6 +510,33 @@
             "advanced"
           ]
         },
+        "codexModelProvider.contextWindowMode": {
+          "type": "string",
+          "scope": "application",
+          "default": "standard",
+          "enum": [
+            "standard",
+            "long",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Use the catalog's standard context window in all chat windows.",
+            "Use the catalog's maximum context window when available, otherwise use the standard window.",
+            "Expose both sizes in the regular Chat picker; Agents window advertises the maximum because it cannot select a size."
+          ],
+          "description": "Context window advertised to VS Code. Standard and long apply globally and replace the per-model Context Size picker. Changing this does not increase the backend's actual limit."
+        },
+        "codexModelProvider.effectiveContextWindowPercent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "scope": "application",
+          "default": null,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Override the effective input budget as a percentage of each model's raw context window (1–100). Null uses the catalog percentage, or 95 when unavailable. Higher values leave less room for output and token-count inaccuracies."
+        },
         "codexModelProvider.includeHiddenModels": {
           "type": "boolean",
           "default": false,

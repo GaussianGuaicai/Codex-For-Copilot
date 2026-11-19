@@ -53,6 +53,10 @@ The extension stores imported and signed-in ChatGPT credentials in VS Code Secre
 
 Open VS Code Chat, choose **Codex** from the model picker, and start chatting or using Agent mode.
 
+The global `codexModelProvider.contextWindowMode` setting selects **standard** (default) or **long** context for all models and both Chat and Agents windows. Long uses the catalog maximum when available; otherwise it uses the standard window. Set it to **auto** to restore the regular Chat Context Size picker; the Agents window cannot currently display that picker and advertises the larger budget in auto mode.
+
+The optional `codexModelProvider.effectiveContextWindowPercent` setting overrides the effective input budget percentage globally (1–100, including decimals). When unset, the extension uses each model's catalog percentage, or 95% if unavailable. For example, a 500K raw window at 95% gives a 475K input budget. Changing these settings does not raise the backend's actual limit; a higher percentage leaves less room for output and counting inaccuracies. Agents may display a total that includes an output allowance. After changing settings, reselect the model or start a new session if an existing session retains old metadata.
+
 To give a request live web access, enable **Web Search** in the Chat tools picker or reference `#webSearch` in the prompt. With a Codex model the Codex backend executes the search directly through OpenAI's hosted `web_search` tool. With any other tool-capable VS Code model, the same `#webSearch` tool runs one isolated Responses request that also uses OpenAI's hosted `web_search` tool and returns the synthesized answer plus sources.
 
 Web Search settings under **Settings → Extensions → Codex** let you choose live or cached access, search context size, and an optional domain allowlist. You can also choose whether Chat shows compact statuses, search/open/find actions, or actions with clickable source pages.

@@ -38,6 +38,8 @@ export interface ProviderConfig {
   nativeToolSearchMaxToolsPerNamespace: number;
   webSearch: WebSearchConfig;
   model: string;
+  contextWindowMode: 'standard' | 'long' | 'auto';
+  effectiveContextWindowPercent?: number;
   includeHiddenModels: boolean;
   disabledModels: string[];
   modelAliases: Record<string, string>;
@@ -84,6 +86,8 @@ export function getProviderConfig(): ProviderConfig {
       statusMaxSources: normalizeWebSearchStatusMaxSources(config.get('webSearchStatusMaxSources', 3))
     },
     model: config.get('model', 'gpt-5.5'),
+    contextWindowMode: normalizeContextWindowMode(config.get('contextWindowMode', 'standard')),
+    effectiveContextWindowPercent: normalizeEffectiveContextWindowPercent(config.get('effectiveContextWindowPercent', null)),
     includeHiddenModels: config.get('includeHiddenModels', false),
     disabledModels: normalizeStringList(config.get('disabledModels', [])),
     modelAliases: normalizeModelAliases(config.get('modelAliases', {})),
@@ -94,6 +98,23 @@ export function getProviderConfig(): ProviderConfig {
     maxOutputTokens: config.get('maxOutputTokens', 8192),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };
+}
+
+function normalizeContextWindowMode(value: unknown): ProviderConfig['contextWindowMode'] {
+  if (value === 'standard' || value === 'long' || value === 'auto') {
+    return value;
+  }
+  throw new Error('codexModelProvider.contextWindowMode must be standard, long, or auto.');
+}
+
+function normalizeEffectiveContextWindowPercent(value: unknown): number | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 100) {
+    return value;
+  }
+  throw new Error('codexModelProvider.effectiveContextWindowPercent must be null or a number between 1 and 100.');
 }
 
 function normalizeRequestIdentityProfile(value: unknown): CodexRequestIdentityProfile {
