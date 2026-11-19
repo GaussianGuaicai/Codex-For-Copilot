@@ -23,9 +23,9 @@ const loaded = await loadBundled('src/config.ts', {
 });
 try {
   const contextSettings = manifest.contributes.configuration.properties;
-  assertEqual(contextSettings['codexModelProvider.contextWindowMode'].default, 'standard', 'manifest defaults to the standard context window');
+  assertEqual(contextSettings['codexModelProvider.contextWindowMode'].default, 'auto', 'manifest defaults to the context size picker');
   assertEqual(contextSettings['codexModelProvider.effectiveContextWindowPercent'].default, null, 'manifest defaults to the catalog percentage');
-  assertEqual(loaded.exports.getProviderConfig().contextWindowMode, 'standard', 'runtime defaults to the standard context window');
+  assertEqual(loaded.exports.getProviderConfig().contextWindowMode, 'auto', 'runtime defaults to the context size picker');
   assertEqual(loaded.exports.getProviderConfig().effectiveContextWindowPercent, undefined, 'runtime preserves the catalog percentage by default');
   for (const value of [1, 80.5, 100]) {
     configValues.effectiveContextWindowPercent = value;

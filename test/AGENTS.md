@@ -60,7 +60,7 @@
 - Real tool-continuation probes must use a side-effect-free test tool and must report only aggregate outcomes, never credentials, prompt content, tool arguments, or tool output.
 - Latency tests must use deterministic timestamps or mocks; do not introduce sleeps to assert timing behavior.
 - Model-cache tests must prove cold blocking, fresh reuse, stale immediate return, and single-flight background refresh with deterministic promises.
-- Context coverage must verify standard, long, and auto metadata, percentage overrides and fallback; Extension Host must observe updated budgets after settings changes.
+- Context coverage must verify the auto default, standard, long, and auto metadata, percentage overrides and fallback; Extension Host must observe updated budgets after settings changes.
 - Provider-level stale-cache coverage must hold the refresh pending and prove `/responses` proceeds before the refresh resolves.
 - Provider coverage must prove a valid selected `codex::` model ID reaches `/responses` without waiting for a cold `/models` lookup and still applies a configured alias.
 - Tool-schema tests must cover first-build miss, repeat-build hit, order-sensitive invalidation, immutable cached definitions, and same-object semantic mutation invalidation.

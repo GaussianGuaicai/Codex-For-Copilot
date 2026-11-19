@@ -513,7 +513,7 @@
         "codexModelProvider.contextWindowMode": {
           "type": "string",
           "scope": "application",
-          "default": "standard",
+          "default": "auto",
           "enum": [
             "standard",
             "long",

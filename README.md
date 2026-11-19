@@ -53,7 +53,7 @@ The extension stores imported and signed-in ChatGPT credentials in VS Code Secre
 
 Open VS Code Chat, choose **Codex** from the model picker, and start chatting or using Agent mode.
 
-The global `codexModelProvider.contextWindowMode` setting selects **standard** (default) or **long** context for all models and both Chat and Agents windows. Long uses the catalog maximum when available; otherwise it uses the standard window. Set it to **auto** to restore the regular Chat Context Size picker; the Agents window cannot currently display that picker and advertises the larger budget in auto mode.
+The global `codexModelProvider.contextWindowMode` setting defaults to **auto**, exposing the regular Chat Context Size picker when multiple sizes are available. The Agents window cannot currently display that picker and advertises the larger budget in auto mode. Alternatively, **standard** or **long** selects a single context size for both windows and hides the picker; long uses the catalog maximum when available, otherwise the standard window.
 
 The optional `codexModelProvider.effectiveContextWindowPercent` setting overrides the effective input budget percentage globally (1–100, including decimals). When unset, the extension uses each model's catalog percentage, or 95% if unavailable. For example, a 500K raw window at 95% gives a 475K input budget. Changing these settings does not raise the backend's actual limit; a higher percentage leaves less room for output and counting inaccuracies. Agents may display a total that includes an output allowance. After changing settings, reselect the model or start a new session if an existing session retains old metadata.
 
