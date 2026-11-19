@@ -2,6 +2,14 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.10.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.10.2...v1.10.3) (2026-11-19)
+
+
+### Bug Fixes
+
+* Default context window mode to auto ([#131](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/131)) ([c27c740](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/c27c740ee78a946aeb06225e3579e3ad452f1f61))
+* Update auto context extension host test ([#133](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/133)) ([878bfd5](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/878bfd5e00513218b766726533f2a0812769cc0a))
+
 ## [1.10.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.10.1...v1.10.2) (2026-11-19)
 
 
