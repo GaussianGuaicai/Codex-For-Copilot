@@ -86,7 +86,7 @@ export function getProviderConfig(): ProviderConfig {
       statusMaxSources: normalizeWebSearchStatusMaxSources(config.get('webSearchStatusMaxSources', 3))
     },
     model: config.get('model', 'gpt-5.5'),
-    contextWindowMode: normalizeContextWindowMode(config.get('contextWindowMode', 'standard')),
+    contextWindowMode: normalizeContextWindowMode(config.get('contextWindowMode', 'auto')),
     effectiveContextWindowPercent: normalizeEffectiveContextWindowPercent(config.get('effectiveContextWindowPercent', null)),
     includeHiddenModels: config.get('includeHiddenModels', false),
     disabledModels: normalizeStringList(config.get('disabledModels', [])),
