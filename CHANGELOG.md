@@ -2,6 +2,13 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.10.4](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.10.3...v1.10.4) (2026-11-24)
+
+
+### Bug Fixes
+
+* Improve Codex sign-in and account import in Remote Development ([#134](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/134)) ([ffb4d54](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/ffb4d54f8188bc1d600be3ba3cf95c73869ba8ba))
+
 ## [1.10.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.10.2...v1.10.3) (2026-11-19)
 
 
