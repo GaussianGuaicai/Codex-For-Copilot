@@ -5,6 +5,7 @@ import { CodexAuthLock } from './auth/codexAuthLock';
 import { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexAuthenticationProvider, CODEX_AUTHENTICATION_PROVIDER_ID } from './auth/codexAuthenticationProvider';
 import { CodexSecretStore } from './auth/codexSecretStore';
+import { pickLocalAuthJson } from './auth/codexLocalAuthFile';
 import { InvalidAuthJsonError } from './auth/codexAuthTypes';
 import { createCodexLogger } from './codexLogger';
 import { getProviderConfig } from './config';
@@ -57,7 +58,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     new CodexSecretStore(context.secrets),
     (accountKey) => new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, `codex-auth-refresh.${sanitizeLockKey(accountKey)}.lock`)),
     undefined,
-    logger.child('auth')
+    logger.child('auth'),
+    !!vscode.env.remoteName && context.extension.extensionKind === vscode.ExtensionKind.Workspace
   );
   const authenticationProvider = new CodexAuthenticationProvider(authManager);
   const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, logger.child('account-usage'), authManager);
@@ -333,6 +335,17 @@ function sanitizeLockKey(accountKey: string): string {
 
 /** Prompt for an auth.json file and import it, returning the new account key (or undefined if cancelled). */
 async function importCodexAuthJsonInteractive(authManager: CodexAuthManager): Promise<string | undefined> {
+  if (vscode.env.remoteName) {
+    const source = await vscode.window.showQuickPick(
+      ['Local computer', 'Remote workspace'],
+      { title: 'Import Codex auth.json', placeHolder: 'Where is the auth.json file?' }
+    );
+    if (!source) return undefined;
+    if (source === 'Local computer') {
+      const raw = await pickLocalAuthJson();
+      return raw === undefined ? undefined : authManager.importAuthJson(raw);
+    }
+  }
   const selected = await vscode.window.showOpenDialog({
     title: 'Import Codex auth.json',
     canSelectFiles: true,
