@@ -6,7 +6,7 @@ import { parseCodexAccountIdentity } from './codexAccountIdentity';
 import { CodexSecretStore, randomRevision } from './codexSecretStore';
 import { ACCESS_TOKEN_REFRESH_WINDOW_MS, PERIODIC_REFRESH_INTERVAL_MS } from './codexTokenRefresh';
 import { CodexOAuthClient, type OAuthTokens } from './codexOAuthClient';
-import { signInWithLoopback } from './codexLoopbackLogin';
+import { LoopbackUnavailableError, signInWithLoopback } from './codexLoopbackLogin';
 import { signInWithDeviceCode } from './codexDeviceCodeLogin';
 import { AuthRequiredError, type CodexAuthChangeEvent, type CodexAuthStatus, type CodexCredentialRecord, type CodexCredentialSnapshot, type CodexCredentialSource, type ExtensionOAuthCredentialRecord, type RefreshableCodexCredentialRecord, ReauthRequiredError, TokenRefreshError } from './codexAuthTypes';
 import type { CodexLogger } from '../codexLogger';
@@ -32,7 +32,8 @@ export class CodexAuthManager implements vscode.Disposable {
     private readonly store: CodexSecretStore,
     private readonly lockFor: (accountKey: string) => CodexAuthLock,
     private readonly oauth = new CodexOAuthClient(),
-    private readonly logger?: CodexLogger
+    private readonly logger?: CodexLogger,
+    private readonly isRemoteHost = false
   ) {}
   dispose(): void {
     if (this.periodicRefreshTimer) clearInterval(this.periodicRefreshTimer);
@@ -144,16 +145,25 @@ export class CodexAuthManager implements vscode.Disposable {
     const logger = this.logger?.operation('auth.browser-sign-in');
     logger?.info('sign-in.started');
     let accountKey: string | undefined;
-    await signInWithLoopback(
-      this.oauth,
-      (uri) => vscode.env.openExternal(vscode.Uri.parse(uri)),
-      undefined,
-      (stage, port) => logger?.debug('sign-in.stage', { stage, port }),
-      async (tokens) => {
-        accountKey = await this.completeSignIn(tokens);
-        logger?.info('sign-in.completed');
+    try {
+      await signInWithLoopback(
+        this.oauth,
+        (uri) => vscode.env.openExternal(vscode.Uri.parse(uri)),
+        undefined,
+        (stage, port) => logger?.debug('sign-in.stage', { stage, port }),
+        async (tokens) => {
+          accountKey = await this.completeSignIn(tokens);
+          logger?.info('sign-in.completed');
+        },
+        this.isRemoteHost ? async (uri) => (await vscode.env.asExternalUri(vscode.Uri.parse(uri))).toString() : undefined
+      );
+    } catch (error) {
+      if (this.isRemoteHost && error instanceof LoopbackUnavailableError) {
+        const choice = await vscode.window.showWarningMessage(error.message, 'Sign in with Device Code');
+        if (choice === 'Sign in with Device Code') return this.signInWithDeviceCode();
       }
-    );
+      throw error;
+    }
     return accountKey!;
   }
   async signInWithDeviceCode(): Promise<string> { const logger = this.logger?.operation('auth.device-code-sign-in'); try { const accountKey = await this.completeSignIn(await signInWithDeviceCode(this.oauth)); logger?.info('sign-in.completed'); return accountKey; } catch (error) { logger?.error('sign-in.failed', error); throw error; } }

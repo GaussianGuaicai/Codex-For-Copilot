@@ -3,6 +3,7 @@ import Module from 'node:module';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
 import { resolveTestTempDirectory } from './testTempDirectory.mjs';
 
@@ -13,6 +14,9 @@ const repoImport = (relativePath) => JSON.stringify(join(process.cwd(), relative
 const require = createRequire(import.meta.url);
 const moduleLoad = Module._load;
 const nativeFetch = globalThis.fetch;
+let localFilePanel;
+let onInformationMessage = async () => undefined;
+let cancelDeviceLogin;
 class EventEmitter {
   constructor() {
     this.listeners = new Set();
@@ -44,7 +48,28 @@ Module._load = function patchedLoad(request, parent, isMain) {
           }
         }
       },
-      window: { showErrorMessage: async () => undefined, showInformationMessage: async () => undefined },
+      window: {
+        showErrorMessage: async () => undefined,
+        showInformationMessage: (...args) => onInformationMessage(...args),
+        withProgress: async (_options, task) => {
+          const cancellation = new EventEmitter();
+          cancelDeviceLogin = () => cancellation.fire();
+          return task({ report() {} }, { isCancellationRequested: false, onCancellationRequested: cancellation.event });
+        },
+        createWebviewPanel: (_id, _title, _column, options) => {
+          const disposed = new EventEmitter();
+          const messages = new EventEmitter();
+          localFilePanel = {
+            options,
+            webview: { onDidReceiveMessage: messages.event, send: (message) => messages.fire(message) },
+            onDidDispose: disposed.event,
+            dispose: () => disposed.fire()
+          };
+          return localFilePanel;
+        }
+      },
+      ViewColumn: { Active: -1 },
+      ProgressLocation: { Notification: 15 },
       commands: { executeCommand: async () => undefined },
       EventEmitter
     };
@@ -64,6 +89,8 @@ export * from ${repoImport('src/auth/codexPkce')};
 export * from ${repoImport('src/auth/codexOAuthClient')};
 export * from ${repoImport('src/auth/codexAuthenticationProvider')};
 export * from ${repoImport('src/auth/codexLoopbackLogin')};
+export * from ${repoImport('src/auth/codexDeviceCodeLogin')};
+export * from ${repoImport('src/auth/codexLocalAuthFile')};
 export * from ${repoImport('src/secrets')};
 `));
 
@@ -641,6 +668,86 @@ try {
     return true;
   }, { loopbackPorts: [failedCallbackPort], callbackPath: '/auth/callback' }), 'token exchange failure rejects loopback sign-in');
   await failedCallbackPromise;
+
+  const blockedPort = await findAvailablePort();
+  let forwardedPort = await findAvailablePort();
+  while (forwardedPort === blockedPort) forwardedPort = await findAvailablePort();
+  const forwardAttempts = [];
+  const remoteTokens = await auth.signInWithLoopback(loopbackClient, async (authorizationUrl) => {
+    const callback = new URL(authorizationUrl);
+    assertEqual(callback.origin, `http://localhost:${forwardedPort}`, 'OAuth keeps the registered localhost redirect on the forwarded port');
+    assertEqual(forwardAttempts.length, 2, 'browser opens only after a compatible callback is available');
+    callback.hostname = '127.0.0.1';
+    callback.searchParams.set('code', 'authorization-code');
+    void fetch(callback);
+    return true;
+  }, { loopbackPorts: [blockedPort, forwardedPort], callbackPath: '/auth/callback' }, undefined, undefined, async (uri) => {
+    const callback = new URL(uri);
+    forwardAttempts.push(callback.port);
+    return callback.port === String(blockedPort) ? 'https://forwarded.invalid/auth/callback' : uri;
+  });
+  assertEqual(remoteTokens.access_token, 'access', 'remote browser callback completes sign-in');
+  let openedWithInvalidTunnel = false;
+  let unavailableError;
+  try {
+    await auth.signInWithLoopback(loopbackClient, async () => {
+      openedWithInvalidTunnel = true;
+      return true;
+    }, { loopbackPorts: [blockedPort], callbackPath: '/auth/callback' }, undefined, undefined, async () => 'https://forwarded.invalid/auth/callback');
+  } catch (error) {
+    unavailableError = error;
+  }
+  assertEqual(unavailableError instanceof auth.LoopbackUnavailableError, true, 'incompatible forwarding is eligible for Device Code fallback');
+  assertEqual(openedWithInvalidTunnel, false, 'no browser is opened for an unusable remote callback');
+
+  const localFile = auth.pickLocalAuthJson();
+  let selectFile;
+  const localJson = '{"tokens":{"access_token":"test-local-file"}}';
+  const input = {
+    files: [{ text: async () => localJson }],
+    addEventListener: (_event, handler) => { selectFile = handler; }
+  };
+  assertEqual(localFilePanel.options.localResourceRoots.length, 0, 'import panel cannot load workspace files');
+  const script = localFilePanel.webview.html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
+  runInNewContext(script, {
+    document: { getElementById: (id) => id === 'credentials' ? input : {} },
+    acquireVsCodeApi: () => ({ postMessage: localFilePanel.webview.send })
+  });
+  await selectFile();
+  assertEqual(await localFile, localJson, 'client-side file picker passes exact JSON to the extension host');
+  const cancelledFile = auth.pickLocalAuthJson();
+  localFilePanel.dispose();
+  assertEqual(await cancelledFile, undefined, 'closing the local picker cancels without importing');
+
+  const device = { device_auth_id: 'device', user_code: 'CODE', verification_uri: 'https://auth.openai.com/codex/device', interval: 5 };
+  let dismissDevicePrompt;
+  onInformationMessage = () => new Promise((resolve) => { dismissDevicePrompt = resolve; });
+  const deviceTokens = await auth.signInWithDeviceCode({
+    async requestDeviceCode() { return device; },
+    async pollDeviceCode() { return { authorization_code: 'authorized', code_verifier: 'verifier' }; },
+    async exchangeAuthorizationCode() { return { access_token: 'device-access' }; }
+  });
+  assertEqual(deviceTokens.access_token, 'device-access', 'manual browser authorization completes while the VS Code prompt is open');
+  dismissDevicePrompt();
+  onInformationMessage = async () => undefined;
+
+  let startPolling;
+  const polling = new Promise((resolve) => { startPolling = resolve; });
+  const cancelledLogin = auth.signInWithDeviceCode({
+    async requestDeviceCode() { return device; },
+    async pollDeviceCode(_deviceId, _code, signal) {
+      startPolling();
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    }
+  });
+  await polling;
+  cancelDeviceLogin();
+  await assertRejects(() => cancelledLogin, 'cancelling Device Code sign-in aborts an in-flight poll');
+
+  const throttledClient = new auth.CodexOAuthClient(async () => new Response('{}', { status: 429, headers: { 'Retry-After': '12' } }));
+  const throttle = await throttledClient.pollDeviceCode('device', 'CODE').catch((error) => error);
+  assertEqual(throttle instanceof auth.DeviceCodeRetryableError, true, 'device polling recognizes a retryable service response');
+  assertEqual(throttle.retryAfterMs, 12_000, 'device polling preserves the server retry delay');
 
   const authChanges = new EventEmitter();
   let signedInSnapshot;

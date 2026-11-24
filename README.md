@@ -159,7 +159,7 @@ Release and Marketplace publishing details are documented in [docs/releasing.md]
 
 In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the remote workspace host to work around [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25). It runs locally in local workspaces. No settings change is needed.
 
-VS Code SecretStorage credentials remain available. The `~/.codex/auth.json` fallback is read on the host running the extension. If browser sign-in fails remotely, use **Codex for Copilot: Sign in with Device Code**.
+VS Code SecretStorage credentials remain available. The `~/.codex/auth.json` fallback is read on the host running the extension. Browser sign-in uses VS Code port forwarding when the extension runs remotely and offers Device Code sign-in if the required callback cannot be reached. When importing `auth.json` from a remote window, choose **Local computer** or **Remote workspace** to pick the file from that machine.
 
 This preference remains remote after [VS Code fixes the routing bug](https://github.com/microsoft/vscode/issues/326554); it does not automatically switch back to the local host.
 
